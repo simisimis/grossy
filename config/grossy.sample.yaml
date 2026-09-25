@@ -1,0 +1,52 @@
+# Canonical Grossy sample configuration, schema version 1 (PRD section 7.2).
+schema_version: 1
+retailer: ab
+timezone: Europe/Athens
+currency: EUR
+
+household:
+  adults: 2
+  children: 1
+  recipe_servings: 3
+
+weekly_budget: 100
+material_unit_price_improvement_pct: 15
+
+disliked_ingredients: []
+
+pantry_assumptions:
+  - salt
+  - black pepper
+  - olive oil
+
+appliances:
+  thermomix:
+    available: true
+    model: null
+  dough_kneading_machine:
+    available: true
+  steam_oven:
+    available: true
+  air_fryer:
+    available: true
+    capacity_litres: null
+  induction_cooktop:
+    available: true
+  microwave:
+    available: true
+    wattage: null
+  pressure_cooker:
+    available: true
+    kind: null
+    capacity_litres: null
+  dutch_oven:
+    available: true
+    capacity_litres: null
+
+appliance_preferences:
+  prefer_air_fryer_over_pan_frying: true
+  prefer_thermomix_native_over_manual: true
+
+staples:
+  breakfast: []
+  lunch: []
