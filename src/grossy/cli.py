@@ -16,6 +16,12 @@ from typing import Annotated, NoReturn
 
 import typer
 
+from grossy.db import db_backup as _db_backup
+from grossy.db import db_export as _db_export
+from grossy.db import db_restore as _db_restore
+from grossy.init import InitError, do_init
+from grossy.paths import resolve_paths
+
 STATUS_SCHEMA_NAME = "grossy.cli.status"
 STATUS_SCHEMA_VERSION = 1
 
@@ -76,7 +82,25 @@ history_app.add_typer(category_app, name="category")
 @app.command()
 def init() -> None:
     """Create XDG directories, sample configuration, database, and permissions."""
-    emit_not_implemented("init")
+    try:
+        paths = resolve_paths()
+        result = do_init(paths)
+    except InitError as exc:
+        typer.echo(
+            json.dumps(
+                {
+                    "schema_name": STATUS_SCHEMA_NAME,
+                    "schema_version": STATUS_SCHEMA_VERSION,
+                    "status": "error",
+                    "command": "init",
+                    "detail": str(exc),
+                },
+                sort_keys=True,
+            )
+        )
+        typer.echo(f"grossy init: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(json.dumps(result, sort_keys=True))
 
 
 @app.command()
@@ -231,19 +255,168 @@ def weekly_abandon(run_id: str) -> None:
 @db_app.command("backup")
 def db_backup(path: Path) -> None:
     """Create a SQLite-safe backup with a schema-version manifest and checksum."""
-    emit_not_implemented(f"db backup {path}")
+    paths = resolve_paths()
+    if not paths.database_file.exists():
+        typer.echo(
+            json.dumps(
+                {
+                    "schema_name": STATUS_SCHEMA_NAME,
+                    "schema_version": STATUS_SCHEMA_VERSION,
+                    "status": "error",
+                    "command": "db backup",
+                    "detail": f"database not found at {paths.database_file}; run init first",
+                },
+                sort_keys=True,
+            )
+        )
+        raise typer.Exit(code=1)
+    try:
+        result = _db_backup(paths.database_file, path)
+    except Exception as exc:
+        typer.echo(
+            json.dumps(
+                {
+                    "schema_name": STATUS_SCHEMA_NAME,
+                    "schema_version": STATUS_SCHEMA_VERSION,
+                    "status": "error",
+                    "command": "db backup",
+                    "detail": str(exc),
+                },
+                sort_keys=True,
+            )
+        )
+        raise typer.Exit(code=1) from exc
+    manifest_path = result.with_suffix(result.suffix + ".manifest.json")
+    typer.echo(
+        json.dumps(
+            {
+                "schema_name": STATUS_SCHEMA_NAME,
+                "schema_version": STATUS_SCHEMA_VERSION,
+                "status": "success",
+                "command": "db backup",
+                "backup_path": str(result),
+                "manifest_path": str(manifest_path),
+            },
+            sort_keys=True,
+        )
+    )
 
 
 @db_app.command("export")
 def db_export(path: Path) -> None:
     """Write a versioned JSON export."""
-    emit_not_implemented(f"db export {path}")
+    paths = resolve_paths()
+    if not paths.database_file.exists():
+        typer.echo(
+            json.dumps(
+                {
+                    "schema_name": STATUS_SCHEMA_NAME,
+                    "schema_version": STATUS_SCHEMA_VERSION,
+                    "status": "error",
+                    "command": "db export",
+                    "detail": f"database not found at {paths.database_file}; run init first",
+                },
+                sort_keys=True,
+            )
+        )
+        raise typer.Exit(code=1)
+    try:
+        result = _db_export(paths.database_file, path)
+    except Exception as exc:
+        typer.echo(
+            json.dumps(
+                {
+                    "schema_name": STATUS_SCHEMA_NAME,
+                    "schema_version": STATUS_SCHEMA_VERSION,
+                    "status": "error",
+                    "command": "db export",
+                    "detail": str(exc),
+                },
+                sort_keys=True,
+            )
+        )
+        raise typer.Exit(code=1) from exc
+    typer.echo(
+        json.dumps(
+            {
+                "schema_name": STATUS_SCHEMA_NAME,
+                "schema_version": STATUS_SCHEMA_VERSION,
+                "status": "success",
+                "command": "db export",
+                "export_path": str(result),
+            },
+            sort_keys=True,
+        )
+    )
 
 
 @db_app.command("restore")
-def db_restore(backup: Path) -> None:
+def db_restore(
+    backup: Path,
+    confirm: Annotated[bool, typer.Option("--confirm")] = False,
+) -> None:
     """Restore a verified backup under the PRD restore constraints."""
-    emit_not_implemented(f"db restore {backup}")
+    paths = resolve_paths()
+    if not paths.database_file.exists():
+        typer.echo(
+            json.dumps(
+                {
+                    "schema_name": STATUS_SCHEMA_NAME,
+                    "schema_version": STATUS_SCHEMA_VERSION,
+                    "status": "error",
+                    "command": "db restore",
+                    "detail": f"database not found at {paths.database_file}; run init first",
+                },
+                sort_keys=True,
+            )
+        )
+        raise typer.Exit(code=1)
+    try:
+        info = _db_restore(paths.database_file, backup, paths.state_dir, confirm=confirm)
+    except Exception as exc:
+        typer.echo(
+            json.dumps(
+                {
+                    "schema_name": STATUS_SCHEMA_NAME,
+                    "schema_version": STATUS_SCHEMA_VERSION,
+                    "status": "error",
+                    "command": "db restore",
+                    "detail": str(exc),
+                },
+                sort_keys=True,
+            )
+        )
+        raise typer.Exit(code=1) from exc
+    if not confirm:
+        # Validation passed but confirmation not provided.
+        typer.echo(
+            json.dumps(
+                {
+                    "schema_name": STATUS_SCHEMA_NAME,
+                    "schema_version": STATUS_SCHEMA_VERSION,
+                    "status": "confirmation_required",
+                    "command": "db restore",
+                    "source_schema_version": info.source_schema_version,
+                    "target_schema_version": info.target_schema_version,
+                    "detail": f"validation passed; re-run with --confirm to restore from {backup}",
+                },
+                sort_keys=True,
+            )
+        )
+        raise typer.Exit(code=1)
+    typer.echo(
+        json.dumps(
+            {
+                "schema_name": STATUS_SCHEMA_NAME,
+                "schema_version": STATUS_SCHEMA_VERSION,
+                "status": "success",
+                "command": "db restore",
+                "source_schema_version": info.source_schema_version,
+                "target_schema_version": info.target_schema_version,
+            },
+            sort_keys=True,
+        )
+    )
 
 
 # --- PRD 10.2: deterministic workflow commands ----------------------------

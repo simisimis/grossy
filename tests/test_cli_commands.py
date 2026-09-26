@@ -110,7 +110,6 @@ def test_help_exits_zero() -> None:
 @pytest.mark.parametrize(
     "args",
     [
-        ["init"],
         ["doctor"],
         ["history", "set-primary", "fam-1", "1234567"],
         ["history", "set-recurrence", "fam-1", "--weeks", "2"],
@@ -140,9 +139,6 @@ def test_help_exits_zero() -> None:
         ["weekly", "reroll-apply", "run-1", "recipe1", "--from", "meat"],
         ["weekly", "selection-apply", "run-1", "recipe1,recipe2"],
         ["weekly", "removal-preflight", "run-1", "--product", "1234567"],
-        ["db", "backup", "/tmp/backup.sqlite3"],
-        ["db", "export", "/tmp/export.json"],
-        ["db", "restore", "/tmp/backup.sqlite3"],
     ],
 )
 def test_placeholder_fails_closed_with_versioned_json(args: list[str]) -> None:
