@@ -102,13 +102,17 @@ class AppliancePreferencesModel(_StrictModel):
 
 
 def _is_safe_url_char(char: str) -> bool:
-    """Raw URL text: printable and non-space.
+    """Raw URL text: printable, non-space, non-angle-bracket.
 
     ``str.isprintable`` rejects C0/C1 controls, DEL, format characters
     (zero-width, BOM), and lone surrogates; space is rejected explicitly
-    because it is not a legal URL character and the prior policy rejected it.
+    because it is not a legal URL character. Angle brackets (``<`` and
+    ``>``) are rejected because no legitimate AB.gr product URL segment
+    contains them, and their presence after percent-decoding would permit
+    executable markup (e.g. ``%3Cscript%3E``) to bypass the raw-string
+    prohibited-content scan in the observation envelope.
     """
-    return char.isprintable() and char != " "
+    return char.isprintable() and char not in (" ", "<", ">")
 
 
 def _decode_path_segment(segment: str) -> str | None:

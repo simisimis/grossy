@@ -106,7 +106,15 @@ def init() -> None:
 @app.command()
 def doctor() -> None:
     """Validate the local environment and authenticated read-only AB.gr access."""
-    emit_not_implemented("doctor")
+    from grossy.doctor import run_doctor
+
+    paths = resolve_paths()
+    result = run_doctor(paths)
+    typer.echo(json.dumps(result.to_dict(), sort_keys=True))
+    if result.has_failures:
+        raise typer.Exit(code=1)
+    if result.has_warnings:
+        raise typer.Exit(code=2)
 
 
 @history_app.command("set-primary")

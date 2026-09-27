@@ -110,7 +110,6 @@ def test_help_exits_zero() -> None:
 @pytest.mark.parametrize(
     "args",
     [
-        ["doctor"],
         ["history", "set-primary", "fam-1", "1234567"],
         ["history", "set-recurrence", "fam-1", "--weeks", "2"],
         ["history", "set-quantity", "fam-1", "2"],
