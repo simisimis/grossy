@@ -106,12 +106,30 @@ class TestAtomicWrite:
         assert target.read_bytes() == b"new"
         assert mode_of(target) == FILE_MODE
 
-    def test_replacement_is_visible_as_single_content(self, tmp_path: Path) -> None:
+    def test_replacement_stages_complete_file_before_replace(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         target = tmp_path / "f"
-        first = b"x" * 100
-        atomic_write(target, first)
-        atomic_write(target, b"y")
-        assert target.read_bytes() == b"y"
+        target.write_bytes(b"old")
+        real_replace = os.replace
+        observations: list[tuple[bytes, bytes]] = []
+
+        def inspect_then_replace(
+            source: str | os.PathLike[str], destination: str | os.PathLike[str]
+        ) -> None:
+            assert Path(destination) == target
+            # Before the commit point, readers still see the old complete file
+            # and the staged same-directory file contains all new bytes.
+            assert target.read_bytes() == b"old"
+            assert Path(source).parent == target.parent
+            assert Path(source).read_bytes() == b"new"
+            observations.append((target.read_bytes(), Path(source).read_bytes()))
+            real_replace(source, destination)
+
+        monkeypatch.setattr("grossy.fsutil.os.replace", inspect_then_replace)
+        atomic_write(target, b"new")
+        assert observations == [(b"old", b"new")]
+        assert target.read_bytes() == b"new"
 
     def test_missing_parent_raises(self, tmp_path: Path) -> None:
         with pytest.raises(FileNotFoundError):
@@ -123,20 +141,30 @@ class TestAtomicWrite:
         assert target.read_text(encoding="utf-8") == "π and €"
         assert mode_of(target) == FILE_MODE
 
-    def test_failure_leaves_old_content_and_no_tmp(self, tmp_path: Path) -> None:
-        parent = tmp_path / "locked"
-        parent.mkdir()
-        target = parent / "f"
+    def test_replace_failure_preserves_old_content_and_removes_temp(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        target = tmp_path / "f"
         atomic_write(target, b"old")
-        parent.chmod(0o500)
-        try:
-            with pytest.raises(OSError):
-                atomic_write(target, b"new")
-        finally:
-            parent.chmod(0o700)
+        staged: list[Path] = []
+
+        def fail_replace(
+            source: str | os.PathLike[str], _destination: str | os.PathLike[str]
+        ) -> None:
+            staged_path = Path(source)
+            assert staged_path.exists()
+            assert staged_path.read_bytes() == b"new"
+            staged.append(staged_path)
+            raise OSError("simulated atomic replacement failure")
+
+        monkeypatch.setattr("grossy.fsutil.os.replace", fail_replace)
+        with pytest.raises(OSError, match="simulated atomic replacement failure"):
+            atomic_write(target, b"new")
+
+        assert staged
+        assert not staged[0].exists()
         assert target.read_bytes() == b"old"
-        leftovers = [entry for entry in parent.iterdir() if entry.name.startswith(".")]
-        assert leftovers == []
+        assert list(tmp_path.iterdir()) == [target]
 
 
 class TestEnforceFileMode:

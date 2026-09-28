@@ -80,9 +80,6 @@ def staples_text(breakfast: str, lunch: str = "  lunch: []") -> str:
 
 
 class TestCanonicalSample:
-    def test_sample_validates(self) -> None:
-        load_config_file(SAMPLE_CONFIG)
-
     def test_sample_fields(self) -> None:
         config = load_config_file(SAMPLE_CONFIG)
         assert config.schema_version == 1
@@ -384,30 +381,31 @@ class TestStaples:
         )
         assert config.staples.breakfast[0].product_url == OBSERVED_PRODUCT_URL
 
-    def test_numeric_category_url_rejected_at_model_level(self) -> None:
-        # Coordinator probe: a numeric category segment is not a product ID.
+    @pytest.mark.parametrize(
+        "url",
+        [
+            pytest.param(
+                "https://www.ab.gr/eshop/category/1234567", id="numeric-category-not-product"
+            ),
+            pytest.param(
+                "https://www.ab.gr/eshop/1234567/../../checkout", id="literal-dot-traversal"
+            ),
+            pytest.param("https://www.ab.gr/en/eshop/%2e%2e/p/12345", id="encoded-dot-traversal"),
+            pytest.param(
+                "https://www.ab.gr:/eshop/bread/white-loaf/p/12345", id="empty-port-delimiter"
+            ),
+            pytest.param(
+                "https://www.ab.gr/eshop/bread/white-loaf/p/%312345", id="encoded-identity-digit"
+            ),
+            pytest.param(
+                "https://www.ab.gr/eshop/%252e%252e/white-loaf/p/12345",
+                id="nested-encoded-traversal",
+            ),
+        ],
+    )
+    def test_model_rejects_unsafe_product_url_forms(self, url: str) -> None:
         with pytest.raises(ValueError):
-            StapleModel(key="x", quantity=1, product_url="https://www.ab.gr/eshop/category/1234567")
-
-    def test_dot_segment_url_rejected_at_model_level(self) -> None:
-        # Coordinator probe: dot segments can change the destination and are
-        # rejected, so traversal cannot smuggle an identity through.
-        with pytest.raises(ValueError):
-            StapleModel(
-                key="x",
-                quantity=1,
-                product_url="https://www.ab.gr/eshop/1234567/../../checkout",
-            )
-
-    def test_encoded_traversal_url_rejected_at_model_level(self) -> None:
-        # Coordinator verification (attempt 03): percent-encoded dot segments
-        # decode to a different destination and must fail closed.
-        with pytest.raises(ValueError):
-            StapleModel(
-                key="x",
-                quantity=1,
-                product_url="https://www.ab.gr/en/eshop/%2e%2e/p/12345",
-            )
+            StapleModel(key="x", quantity=1, product_url=url)
 
     def test_greek_url_accepted_at_model_level(self) -> None:
         url = "https://www.ab.gr/el/eshop/Γαλακτοκομικά/Γιαούρτι/p/7633916"
@@ -420,17 +418,6 @@ class TestStaples:
         url = "https://www.ab.gr/en/eshop/Dairy/%CE%93%CE%B9%CE%B1%CF%8C%CF%85%CF%81%CF%84%CE%B9/p/7633916"
         staple = StapleModel(key="yogurt", quantity=1, product_url=url)
         assert staple.product_url == url
-
-    def test_trailing_colon_url_rejected_at_model_level(self) -> None:
-        # Reviewer finding (attempt 04): the empty explicit port delimiter
-        # (``https://www.ab.gr:/...``) is not the canonical port-free
-        # authority and must fail closed at the StapleModel boundary.
-        with pytest.raises(ValueError):
-            StapleModel(
-                key="x",
-                quantity=1,
-                product_url="https://www.ab.gr:/eshop/bread/white-loaf/p/12345",
-            )
 
     def test_plain_no_port_url_accepted_at_model_level(self) -> None:
         # The ordinary canonical port-free URL remains accepted at the
@@ -445,25 +432,6 @@ class TestStaples:
         config = load_config_text(config_text(staples=staples_text(staple_line)))
         assert config.staples.breakfast[0].product_id is None
         assert config.staples.breakfast[0].product_url == url
-
-    def test_encoded_identity_never_normalizes_into_acceptance(self) -> None:
-        # An encoded digit in the identity marker is not the raw ASCII marker
-        # and must not decode into an accepted product ID.
-        with pytest.raises(ValueError):
-            StapleModel(
-                key="x",
-                quantity=1,
-                product_url="https://www.ab.gr/eshop/bread/white-loaf/p/%312345",
-            )
-
-    def test_nested_encoding_rejected_at_model_level(self) -> None:
-        # Double encoding survives one decode as percent text and fails.
-        with pytest.raises(ValueError):
-            StapleModel(
-                key="x",
-                quantity=1,
-                product_url="https://www.ab.gr/eshop/%252e%252e/white-loaf/p/12345",
-            )
 
     def test_encoded_traversal_url_fails_with_field_path(self) -> None:
         text = config_text(
@@ -778,16 +746,25 @@ class TestProductIdFromUrl:
             product_id_from_url("https://www.ab.gr/eshop/bread/white-loaf/p/1234567") == "1234567"
         )
 
-    def test_rejects_malformed_port(self) -> None:
-        # A non-numeric port used to raise an uncaught ValueError from the
-        # ``.port`` property; it must fail closed instead.
-        assert product_id_from_url("https://www.ab.gr:443x/eshop/bread/white-loaf/p/12345") is None
-
-    def test_rejects_other_hosts(self) -> None:
-        assert product_id_from_url("https://example.com/eshop/bread/white-loaf/p/1234567") is None
-
-    def test_rejects_non_https(self) -> None:
-        assert product_id_from_url("http://www.ab.gr/eshop/bread/white-loaf/p/1234567") is None
+    @pytest.mark.parametrize(
+        "url",
+        [
+            pytest.param(
+                "https://www.ab.gr:443x/eshop/bread/white-loaf/p/12345", id="malformed-port"
+            ),
+            pytest.param("https://example.com/eshop/bread/white-loaf/p/1234567", id="foreign-host"),
+            pytest.param(
+                "http://www.ab.gr/eshop/bread/white-loaf/p/1234567", id="non-https-scheme"
+            ),
+            pytest.param(
+                "https://www.ab.gr/fr/eshop/bread/white-loaf/p/1234567", id="unknown-locale"
+            ),
+            pytest.param("https://www.ab.gr/eshop/bread/white-loaf/p/12a3", id="non-numeric-id"),
+            pytest.param("https://www.ab.gr/eshop/category/bread", id="non-product-category-route"),
+        ],
+    )
+    def test_rejects_invalid_product_route_or_authority(self, url: str) -> None:
+        assert product_id_from_url(url) is None
 
     def test_rejects_user_info_port_query_fragment(self) -> None:
         base = "https://www.ab.gr/eshop/bread/white-loaf/p/1234567"
@@ -799,15 +776,6 @@ class TestProductIdFromUrl:
         assert product_id_from_url(base + "?utm=1") is None
         assert product_id_from_url(base + "#ref") is None
 
-    def test_rejects_unknown_locale(self) -> None:
-        assert product_id_from_url("https://www.ab.gr/fr/eshop/bread/white-loaf/p/1234567") is None
-
     def test_rejects_missing_slug_before_identity(self) -> None:
         assert product_id_from_url("https://www.ab.gr/eshop/p/1234567") is None
         assert product_id_from_url("https://www.ab.gr/en/eshop/p/1234567") is None
-
-    def test_rejects_non_numeric_id(self) -> None:
-        assert product_id_from_url("https://www.ab.gr/eshop/bread/white-loaf/p/12a3") is None
-
-    def test_rejects_non_canonical_category_url(self) -> None:
-        assert product_id_from_url("https://www.ab.gr/eshop/category/bread") is None

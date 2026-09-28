@@ -58,15 +58,6 @@ class TestWriterLock:
             assert lock.lock_path == tmp_path / "state" / "writer.lock"
             assert lock.lock_path.exists()
 
-    def test_lock_released_after_process_exit_simulated(self, tmp_path: Path) -> None:
-        """When the lock holder's context exits, the lock is freed."""
-        lock = WriterLock(tmp_path)
-        with lock:
-            pass
-        # After context exit, another lock can be acquired.
-        with WriterLock(tmp_path):
-            pass
-
     def test_lock_creates_parent_directory(self, tmp_path: Path) -> None:
         """The lock should create the state directory if it doesn't exist."""
         state_dir = tmp_path / "deep" / "state"

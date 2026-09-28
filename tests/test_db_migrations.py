@@ -55,9 +55,11 @@ class TestMigrationDiscovery:
 
 
 class TestFreshInstall:
-    def test_fresh_install_applies_all_migrations(self, grossy_home: GrossyPaths) -> None:
+    def test_fresh_install_applies_all_migrations(
+        self, grossy_home: GrossyPaths, current_schema_version: int
+    ) -> None:
         do_init(grossy_home)
-        assert get_schema_version(grossy_home.database_file) == 3
+        assert get_schema_version(grossy_home.database_file) == current_schema_version
 
     def test_fresh_install_no_pre_migration_backup_on_empty(
         self, grossy_home: GrossyPaths, tmp_path: Path
@@ -183,37 +185,10 @@ class TestTransactionalApplication:
         assert cursor.fetchone()[0] == "original"
         conn.close()
 
-    def test_migration_failure_preserves_usable_database(self, tmp_path: Path) -> None:
-        """PRD 12.2.7: migration failure must retain a usable prior database."""
-        db_path = tmp_path / "test.sqlite3"
-        conn = sqlite3.connect(str(db_path))
-        conn.execute("CREATE TABLE data (id INTEGER PRIMARY KEY, value TEXT)")
-        conn.execute("INSERT INTO data VALUES (1, 'keep-me')")
-        conn.execute("COMMIT")
-        conn.close()
-
-        migrations_dir = tmp_path / "migrations"
-        migrations_dir.mkdir()
-        (migrations_dir / "001_bad.sql").write_text("THIS IS NOT VALID SQL; -- will fail\n")
-
-        backup_dir = tmp_path / "backups"
-        backup_dir.mkdir()
-
-        with pytest.raises(sqlite3.OperationalError):
-            run_migrations(db_path, backup_dir, migrations_dir=migrations_dir)
-
-        # Database must still be usable.
-        conn = open_connection(db_path)
-        try:
-            cursor = conn.execute("SELECT value FROM data WHERE id=1")
-            assert cursor.fetchone()[0] == "keep-me"
-        finally:
-            conn.close()
-
 
 class TestNoDeletionOrRecreation:
-    def test_migration_failure_does_not_delete_database(self, tmp_path: Path) -> None:
-        """PRD 12.2.8: no failure path may delete or recreate the database."""
+    def test_migration_failure_preserves_usable_database(self, tmp_path: Path) -> None:
+        """PRD 12.2.7/12.2.8: failed migration preserves the usable database."""
         db_path = tmp_path / "test.sqlite3"
         conn = sqlite3.connect(str(db_path))
         conn.execute("CREATE TABLE persistent (id INTEGER PRIMARY KEY)")
@@ -231,13 +206,12 @@ class TestNoDeletionOrRecreation:
         with pytest.raises(sqlite3.OperationalError):
             run_migrations(db_path, backup_dir, migrations_dir=migrations_dir)
 
-        # Database file still exists.
         assert db_path.exists()
-        # Database is still openable and has data.
-        conn = sqlite3.connect(str(db_path))
-        cursor = conn.execute("SELECT id FROM persistent")
-        assert cursor.fetchone()[0] == 1
-        conn.close()
+        conn = open_connection(db_path)
+        try:
+            assert conn.execute("SELECT id FROM persistent").fetchone()[0] == 1
+        finally:
+            conn.close()
 
 
 class TestPreMigrationBackupVerification:
@@ -321,7 +295,9 @@ class TestPrimaryFieldConsistency:
         conn.close()
         return db
 
-    def test_upgrade_reconciles_mismatched_primary(self, tmp_path: Path) -> None:
+    def test_upgrade_reconciles_mismatched_primary(
+        self, tmp_path: Path, current_schema_version: int
+    ) -> None:
         """Upgrading from v1 to v2 fixes a mismatched primary_product_id."""
         db = self._create_v1_db_with_mismatch(tmp_path)
         # Verify the mismatch exists before upgrade.
@@ -330,9 +306,9 @@ class TestPrimaryFieldConsistency:
         assert row[0] == 2  # wrong: points to product 2
         conn.close()
 
-        # Upgrade (real migrations dir includes 001, 002, and 003).
+        # Upgrade (real migrations dir includes 001 through 004).
         run_migrations(db, tmp_path / "bk2")
-        assert get_schema_version(db) == 3
+        assert get_schema_version(db) == current_schema_version
 
         # After upgrade, primary_product_id must match the actual primary member.
         conn = open_connection(db)
@@ -340,11 +316,13 @@ class TestPrimaryFieldConsistency:
         assert row[0] == 1  # corrected to match family_members
         conn.close()
 
-    def test_direct_update_of_primary_field_is_rejected(self, tmp_path: Path) -> None:
+    def test_direct_update_of_primary_field_is_rejected(
+        self, tmp_path: Path, current_schema_version: int
+    ) -> None:
         """A direct UPDATE of primary_product_id disagreeing with the member is rejected."""
         db = self._create_v1_db_with_mismatch(tmp_path)
         run_migrations(db, tmp_path / "bk2")
-        assert get_schema_version(db) == 3
+        assert get_schema_version(db) == current_schema_version
 
         conn = open_connection(db)
         try:

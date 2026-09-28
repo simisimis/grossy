@@ -14,14 +14,11 @@ from pathlib import Path
 import pytest
 
 from grossy.db.connection import open_connection
-from grossy.db.migrations import get_schema_version
 from grossy.init import InitError, do_init
 from grossy.paths import GrossyPaths
 
 
-@pytest.fixture
-def grossy_home(tmp_path: Path) -> GrossyPaths:
-    """Provide isolated XDG paths under tmp_path."""
+def _paths_in(tmp_path: Path) -> GrossyPaths:
     return GrossyPaths(
         config_dir=tmp_path / ".config" / "grossy",
         data_dir=tmp_path / ".local" / "share" / "grossy",
@@ -29,34 +26,42 @@ def grossy_home(tmp_path: Path) -> GrossyPaths:
     )
 
 
+@pytest.fixture
+def grossy_home(tmp_path: Path) -> GrossyPaths:
+    """Provide isolated XDG paths under tmp_path."""
+    return _paths_in(tmp_path)
+
+
 class TestFreshInstall:
+    @pytest.fixture(scope="class")
+    @classmethod
+    def grossy_home(cls, tmp_path_factory: pytest.TempPathFactory) -> GrossyPaths:
+        """Initialize one read-only fresh install shared by this contract class."""
+        paths = _paths_in(tmp_path_factory.mktemp("fresh-install"))
+        do_init(paths)
+        return paths
+
     def test_creates_config_directory_with_0700(self, grossy_home: GrossyPaths) -> None:
-        do_init(grossy_home)
         mode = stat.S_IMODE(os.stat(grossy_home.config_dir).st_mode)
         assert mode == 0o700
 
     def test_creates_data_directory_with_0700(self, grossy_home: GrossyPaths) -> None:
-        do_init(grossy_home)
         mode = stat.S_IMODE(os.stat(grossy_home.data_dir).st_mode)
         assert mode == 0o700
 
     def test_creates_backups_directory_with_0700(self, grossy_home: GrossyPaths) -> None:
-        do_init(grossy_home)
         mode = stat.S_IMODE(os.stat(grossy_home.backups_dir).st_mode)
         assert mode == 0o700
 
     def test_creates_state_directory_with_0700(self, grossy_home: GrossyPaths) -> None:
-        do_init(grossy_home)
         mode = stat.S_IMODE(os.stat(grossy_home.state_dir).st_mode)
         assert mode == 0o700
 
     def test_creates_browser_profile_directory_with_0700(self, grossy_home: GrossyPaths) -> None:
-        do_init(grossy_home)
         mode = stat.S_IMODE(os.stat(grossy_home.browser_profile_dir).st_mode)
         assert mode == 0o700
 
     def test_writes_sample_config_with_0600(self, grossy_home: GrossyPaths) -> None:
-        do_init(grossy_home)
         assert grossy_home.config_file.exists()
         mode = stat.S_IMODE(os.stat(grossy_home.config_file).st_mode)
         assert mode == 0o600
@@ -65,13 +70,11 @@ class TestFreshInstall:
         assert "retailer: ab" in content
 
     def test_creates_database_with_0600(self, grossy_home: GrossyPaths) -> None:
-        do_init(grossy_home)
         assert grossy_home.database_file.exists()
         mode = stat.S_IMODE(os.stat(grossy_home.database_file).st_mode)
         assert mode == 0o600
 
     def test_database_has_schema_migrations(self, grossy_home: GrossyPaths) -> None:
-        do_init(grossy_home)
         conn = open_connection(grossy_home.database_file)
         try:
             cursor = conn.execute(
@@ -83,13 +86,7 @@ class TestFreshInstall:
         finally:
             conn.close()
 
-    def test_schema_version_after_init(self, grossy_home: GrossyPaths) -> None:
-        do_init(grossy_home)
-        # All three shipped migrations (001, 002, 003) are applied on fresh install.
-        assert get_schema_version(grossy_home.database_file) == 3
-
     def test_database_has_wal_mode(self, grossy_home: GrossyPaths) -> None:
-        do_init(grossy_home)
         conn = open_connection(grossy_home.database_file)
         try:
             cursor = conn.execute("PRAGMA journal_mode")
@@ -98,7 +95,6 @@ class TestFreshInstall:
             conn.close()
 
     def test_database_has_foreign_keys_enabled(self, grossy_home: GrossyPaths) -> None:
-        do_init(grossy_home)
         conn = open_connection(grossy_home.database_file)
         try:
             cursor = conn.execute("PRAGMA foreign_keys")
@@ -107,12 +103,10 @@ class TestFreshInstall:
             conn.close()
 
     def test_creates_writer_lock_location(self, grossy_home: GrossyPaths) -> None:
-        do_init(grossy_home)
         lock_path = grossy_home.state_dir / "writer.lock"
         assert lock_path.exists()
 
-    def test_all_tables_created(self, grossy_home: GrossyPaths) -> None:
-        do_init(grossy_home)
+    def test_required_tables_created(self, grossy_home: GrossyPaths) -> None:
         conn = open_connection(grossy_home.database_file)
         try:
             cursor = conn.execute(
@@ -153,8 +147,8 @@ class TestFreshInstall:
         finally:
             conn.close()
 
-    def test_result_is_versioned_json_structure(self, grossy_home: GrossyPaths) -> None:
-        result = do_init(grossy_home)
+    def test_result_is_versioned_json_structure(self, tmp_path: Path) -> None:
+        result = do_init(_paths_in(tmp_path))
         assert result["schema_name"] == "grossy.init.result"
         assert result["schema_version"] == 1
         assert result["status"] == "success"
@@ -443,8 +437,8 @@ class TestSchemaConstraints:
         finally:
             conn.close()
 
-    def test_currency_stored_as_integer_cents(self, grossy_home: GrossyPaths) -> None:
-        """PRD 12.1.10: currency uses integer minor units."""
+    def test_budget_cents_integer_value_round_trips(self, grossy_home: GrossyPaths) -> None:
+        """An integer minor-unit budget value survives database persistence."""
         do_init(grossy_home)
         conn = open_connection(grossy_home.database_file)
         try:

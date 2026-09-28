@@ -8,8 +8,8 @@ stdout, diagnostics on stderr, and a non-zero exit code (PRD 10.3).
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import click
 import pytest
@@ -40,6 +40,7 @@ EXPECTED_COMMANDS = frozenset(
         "history category rename",
         "history discover-prepare",
         "history sync-dry-run",
+        "history scan-prepare",
         "history scan-validate",
         "history sync-apply",
         "recipes add-file",
@@ -124,7 +125,6 @@ def test_help_exits_zero() -> None:
         ["history", "family", "merge", "fam-1", "fam-2"],
         ["history", "set-category", "fam-1", "breakfast"],
         ["history", "category", "rename", "old", "new"],
-        ["history", "discover-prepare"],
         ["recipes", "favorite", "r-1"],
         ["recipes", "regular", "r-1"],
         ["recipes", "weight", "r-1", "1.5"],
@@ -152,20 +152,42 @@ def test_placeholder_fails_closed_with_versioned_json(args: list[str]) -> None:
     assert result.output.count("\n") <= 1
 
 
-def test_missing_proposal_file_fails(tmp_path: Path) -> None:
-    result = RUNNER.invoke(app, ["history", "scan-validate", str(tmp_path / "missing.json")])
-    assert result.exit_code != 0
+def test_nonnumeric_weeks_rejected_by_parser() -> None:
+    with patch("grossy.cli.emit_not_implemented") as placeholder:
+        result = RUNNER.invoke(app, ["history", "set-recurrence", "fam-1", "--weeks", "zero"])
+    placeholder.assert_not_called()
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert "--weeks" in result.stderr
+    assert "not a valid integer" in result.stderr
 
 
 @pytest.mark.parametrize(
-    "args",
+    ("args", "diagnostic"),
     [
-        ["history", "set-recurrence", "fam-1", "--weeks", "zero"],
-        ["history", "set-quantity", "fam-1", "0"],
-        ["recipes", "weight", "r-1", "0"],
-        ["weekly", "removal-preflight", "run-1", "--product", "1", "--quantity", "-2"],
+        pytest.param(
+            ["history", "set-quantity", "fam-1", "0"],
+            "quantity must be a positive integer",
+            id="zero-history-quantity",
+        ),
+        pytest.param(
+            ["recipes", "weight", "r-1", "0"],
+            "weight must be a positive decimal",
+            id="zero-recipe-weight",
+        ),
+        pytest.param(
+            ["weekly", "removal-preflight", "run-1", "--product", "1", "--quantity", "-2"],
+            "--quantity must be a positive integer",
+            id="negative-removal-quantity",
+        ),
     ],
 )
-def test_invalid_arguments_fail_non_zero(args: list[str]) -> None:
-    result = RUNNER.invoke(app, args)
-    assert result.exit_code != 0
+def test_nonpositive_arguments_rejected_before_placeholder(
+    args: list[str], diagnostic: str
+) -> None:
+    with patch("grossy.cli.emit_not_implemented") as placeholder:
+        result = RUNNER.invoke(app, args)
+    placeholder.assert_not_called()
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert diagnostic in result.stderr

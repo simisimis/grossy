@@ -101,26 +101,23 @@ class TestFakeAdapterCustom:
         assert result.lines[1].product_id == "222"
 
 
-class TestFakeAdapterSafety:
-    """Verify the fake adapter never mutates or makes external calls."""
+class TestFakeAdapterRepeatedResults:
+    """Repeated calls return the configured fake observations and checks."""
 
-    def test_repeated_reads_return_same_data(self) -> None:
+    def test_repeated_cart_reads_return_equal_observations(self) -> None:
         adapter = FakeBrowserAdapter()
         first = adapter.read_cart()
         second = adapter.read_cart()
-        # Same object identity (no mutation between reads)
-        assert first is second
+        assert first == second
 
-    def test_auth_check_does_not_mutate(self) -> None:
+    def test_repeated_auth_checks_return_configured_result(self) -> None:
         auth = AuthCheckResult(True, "ok")
         adapter = FakeBrowserAdapter(auth=auth)
-        first = adapter.check_authentication()
-        second = adapter.check_authentication()
-        assert first is second
+        assert adapter.check_authentication() == auth
+        assert adapter.check_authentication() == auth
 
-    def test_history_check_does_not_mutate(self) -> None:
+    def test_repeated_history_checks_return_configured_result(self) -> None:
         history = HistoryControlsResult(True, "ok")
         adapter = FakeBrowserAdapter(history=history)
-        first = adapter.check_history_controls()
-        second = adapter.check_history_controls()
-        assert first is second
+        assert adapter.check_history_controls() == history
+        assert adapter.check_history_controls() == history

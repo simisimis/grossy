@@ -17,6 +17,8 @@ import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from grossy.browser.adapter import (
     AuthCheckResult,
     FakeBrowserAdapter,
@@ -57,6 +59,28 @@ def _init_valid_env(paths: GrossyPaths) -> None:
     with WriterLock(paths.state_dir):
         run_migrations(paths.database_file, paths.backups_dir)
     paths.database_file.chmod(0o600)
+
+
+@pytest.fixture
+def initialized_doctor_paths(tmp_path: Path) -> GrossyPaths:
+    """Build isolated valid local state for a doctor run."""
+    paths = _make_paths(tmp_path)
+    _init_valid_env(paths)
+    return paths
+
+
+def _run_doctor_with_agent_browser_result(
+    paths: GrossyPaths, *, stdout: str, returncode: int = 0
+) -> DoctorResult:
+    """Run doctor with deterministic executable discovery/version output."""
+    with (
+        patch("shutil.which", return_value="/usr/bin/fake"),
+        patch(
+            "subprocess.run",
+            return_value=subprocess.CompletedProcess([], returncode, stdout=stdout),
+        ),
+    ):
+        return run_doctor(paths)
 
 
 def _check_name(result: DoctorResult, name: str) -> str:
@@ -117,8 +141,9 @@ class TestDoctorAllPass:
         assert _check_name(result, "auth") == "skipped"
         assert _check_name(result, "history_controls") == "skipped"
         assert _check_name(result, "cart_read") == "skipped"
-        # Skipped required checks prevent a clean "pass" status
+        # Skipped required checks prevent a clean "pass" status.
         assert result.status == "warn"
+        assert result.has_warnings
 
     def test_browser_checks_pass_with_fake_adapter(self, tmp_path: Path) -> None:
         paths = _make_paths(tmp_path)
@@ -136,6 +161,7 @@ class TestDoctorAllPass:
         assert _check_name(result, "history_controls") == "pass"
         assert _check_name(result, "cart_read") == "pass"
         assert result.status == "pass"
+        assert not result.has_warnings
 
 
 class TestDoctorConfigChecks:
@@ -462,19 +488,6 @@ class TestDoctorToolChecks:
         assert _check_name(result, "agent_browser") == "fail"
         assert "0.27" in (_check_remediation(result, "agent_browser") or "")
 
-    def test_supported_agent_browser_version_passes(self, tmp_path: Path) -> None:
-        paths = _make_paths(tmp_path)
-        _init_valid_env(paths)
-        with (
-            patch("shutil.which", return_value="/usr/bin/fake"),
-            patch(
-                "subprocess.run",
-                return_value=subprocess.CompletedProcess([], 0, stdout="0.27.3\n"),
-            ),
-        ):
-            result = run_doctor(paths)
-        assert _check_name(result, "agent_browser") == "pass"
-
 
 class TestDoctorBrowserProfile:
     def test_missing_profile_fails(self, tmp_path: Path) -> None:
@@ -525,20 +538,6 @@ class TestDoctorAuthChecks:
         assert remediation is not None
         assert "manual" in remediation.lower() or "log in" in remediation.lower()
 
-    def test_auth_pass(self, tmp_path: Path) -> None:
-        paths = _make_paths(tmp_path)
-        _init_valid_env(paths)
-        adapter = FakeBrowserAdapter(auth=AuthCheckResult(True, "session valid"))
-        with (
-            patch("shutil.which", return_value="/usr/bin/fake"),
-            patch(
-                "subprocess.run",
-                return_value=subprocess.CompletedProcess([], 0, stdout="0.27.1\n"),
-            ),
-        ):
-            result = run_doctor(paths, browser=adapter)
-        assert _check_name(result, "auth") == "pass"
-
 
 class TestDoctorHistoryControls:
     def test_history_not_visible_fails(self, tmp_path: Path) -> None:
@@ -557,22 +556,8 @@ class TestDoctorHistoryControls:
 
 
 class TestDoctorCartRead:
-    def test_cart_read_pass(self, tmp_path: Path) -> None:
-        paths = _make_paths(tmp_path)
-        _init_valid_env(paths)
-        adapter = FakeBrowserAdapter()
-        with (
-            patch("shutil.which", return_value="/usr/bin/fake"),
-            patch(
-                "subprocess.run",
-                return_value=subprocess.CompletedProcess([], 0, stdout="0.27.1\n"),
-            ),
-        ):
-            result = run_doctor(paths, browser=adapter)
-        assert _check_name(result, "cart_read") == "pass"
-
-    def test_cart_read_no_mutation(self, tmp_path: Path) -> None:
-        """Doctor must never mutate the cart (FR-4)."""
+    def test_doctor_does_not_mutate_database_during_cart_read(self, tmp_path: Path) -> None:
+        """A cart-read check leaves the local database file unchanged."""
         paths = _make_paths(tmp_path)
         _init_valid_env(paths)
         # Record the database file state before doctor
@@ -591,8 +576,8 @@ class TestDoctorCartRead:
         assert _check_name(result, "cart_read") == "pass"
 
 
-class TestDoctorReadOnly:
-    """FR-4: Doctor must not add, remove, replace, or change any cart item."""
+class TestDoctorLocalReadOnlyChecks:
+    """Doctor's local checks must not modify the database or configuration."""
 
     def test_no_database_mutation(self, tmp_path: Path) -> None:
         paths = _make_paths(tmp_path)
@@ -834,73 +819,33 @@ class TestDoctorBackupsDirPermission:
 
 
 class TestDoctorAgentBrowserVersion:
-    """Agent-browser version check must validate format and return code."""
+    """Named compatibility and failure cases for the agent-browser version gate."""
 
-    def test_malformed_version_fails(self, tmp_path: Path) -> None:
-        paths = _make_paths(tmp_path)
-        _init_valid_env(paths)
-        with (
-            patch("shutil.which", return_value="/usr/bin/fake"),
-            patch(
-                "subprocess.run",
-                return_value=subprocess.CompletedProcess([], 0, stdout="0.27.not-a-version\n"),
-            ),
-        ):
-            result = run_doctor(paths)
-        assert _check_name(result, "agent_browser") == "fail"
-
-    def test_nonzero_exit_fails(self, tmp_path: Path) -> None:
-        paths = _make_paths(tmp_path)
-        _init_valid_env(paths)
-        with (
-            patch("shutil.which", return_value="/usr/bin/fake"),
-            patch(
-                "subprocess.run",
-                return_value=subprocess.CompletedProcess([], 1, stdout="0.27.1\n"),
-            ),
-        ):
-            result = run_doctor(paths)
-        assert _check_name(result, "agent_browser") == "fail"
-
-    def test_valid_version_passes(self, tmp_path: Path) -> None:
-        paths = _make_paths(tmp_path)
-        _init_valid_env(paths)
-        with (
-            patch("shutil.which", return_value="/usr/bin/fake"),
-            patch(
-                "subprocess.run",
-                return_value=subprocess.CompletedProcess([], 0, stdout="0.27.4\n"),
-            ),
-        ):
-            result = run_doctor(paths)
-        assert _check_name(result, "agent_browser") == "pass"
-
-    def test_unsupported_version_fails(self, tmp_path: Path) -> None:
-        paths = _make_paths(tmp_path)
-        _init_valid_env(paths)
-        with (
-            patch("shutil.which", return_value="/usr/bin/fake"),
-            patch(
-                "subprocess.run",
-                return_value=subprocess.CompletedProcess([], 0, stdout="0.28.0\n"),
-            ),
-        ):
-            result = run_doctor(paths)
-        assert _check_name(result, "agent_browser") == "fail"
-
-    def test_trailing_junk_version_fails(self, tmp_path: Path) -> None:
-        """A version with trailing junk is not a valid full version string."""
-        paths = _make_paths(tmp_path)
-        _init_valid_env(paths)
-        with (
-            patch("shutil.which", return_value="/usr/bin/fake"),
-            patch(
-                "subprocess.run",
-                return_value=subprocess.CompletedProcess([], 0, stdout="0.27.1junk\n"),
-            ),
-        ):
-            result = run_doctor(paths)
-        assert _check_name(result, "agent_browser") == "fail"
+    @pytest.mark.parametrize(
+        ("stdout", "returncode", "expected_status", "remediation"),
+        [
+            pytest.param("0.27.4\n", 0, "pass", None, id="supported-0.27-patch"),
+            pytest.param("0.26.0\n", 0, "fail", "0.27", id="unsupported-minor"),
+            pytest.param("0.28.0\n", 0, "fail", None, id="unsupported-next-minor"),
+            pytest.param("0.27.not-a-version\n", 0, "fail", None, id="malformed-version"),
+            pytest.param("0.27.1junk\n", 0, "fail", None, id="trailing-junk"),
+            pytest.param("0.27.1\n", 1, "fail", None, id="command-failed"),
+        ],
+    )
+    def test_version_gate(
+        self,
+        initialized_doctor_paths: GrossyPaths,
+        stdout: str,
+        returncode: int,
+        expected_status: str,
+        remediation: str | None,
+    ) -> None:
+        result = _run_doctor_with_agent_browser_result(
+            initialized_doctor_paths, stdout=stdout, returncode=returncode
+        )
+        assert _check_name(result, "agent_browser") == expected_status
+        if remediation is not None:
+            assert remediation in (_check_remediation(result, "agent_browser") or "")
 
 
 class TestDoctorWarnAggregation:
@@ -935,36 +880,3 @@ class TestDoctorWarnAggregation:
         assert _check_name(result, "migrations") == "warn"
         assert result.status == "warn"
         assert result.has_warnings
-
-
-class TestDoctorWarnStatus:
-    """Doctor must report 'warn' (not 'pass') when required checks are skipped."""
-
-    def test_warn_without_adapter(self, tmp_path: Path) -> None:
-        paths = _make_paths(tmp_path)
-        _init_valid_env(paths)
-        with (
-            patch("shutil.which", return_value="/usr/bin/fake"),
-            patch(
-                "subprocess.run",
-                return_value=subprocess.CompletedProcess([], 0, stdout="0.27.1\n"),
-            ),
-        ):
-            result = run_doctor(paths)
-        assert result.status == "warn"
-        assert result.has_warnings
-
-    def test_pass_with_adapter(self, tmp_path: Path) -> None:
-        paths = _make_paths(tmp_path)
-        _init_valid_env(paths)
-        adapter = FakeBrowserAdapter()
-        with (
-            patch("shutil.which", return_value="/usr/bin/fake"),
-            patch(
-                "subprocess.run",
-                return_value=subprocess.CompletedProcess([], 0, stdout="0.27.1\n"),
-            ),
-        ):
-            result = run_doctor(paths, browser=adapter)
-        assert result.status == "pass"
-        assert not result.has_warnings

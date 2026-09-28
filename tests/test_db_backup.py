@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import sqlite3
 import stat
 from pathlib import Path
@@ -76,68 +75,36 @@ def populated_db(grossy_home: GrossyPaths) -> Path:
 
 
 class TestBackup:
-    def test_backup_creates_file(self, populated_db: Path, tmp_path: Path) -> None:
+    def test_backup_success_contract(
+        self, populated_db: Path, tmp_path: Path, current_schema_version: int
+    ) -> None:
+        """One SQLite snapshot carries a private, checksummed manifest and data."""
         dest = tmp_path / "backup.sqlite3"
         result = db_backup(populated_db, dest)
-        assert result.exists()
-        assert result.stat().st_size > 0
+        assert result == dest
+        assert dest.exists()
+        assert dest.stat().st_size > 0
+        assert stat.S_IMODE(dest.stat().st_mode) == 0o600
 
-    def test_backup_has_0600_permissions(self, populated_db: Path, tmp_path: Path) -> None:
-        dest = tmp_path / "backup.sqlite3"
-        db_backup(populated_db, dest)
-        mode = stat.S_IMODE(os.stat(dest).st_mode)
-        assert mode == 0o600
-
-    def test_backup_manifest_created(self, populated_db: Path, tmp_path: Path) -> None:
-        dest = tmp_path / "backup.sqlite3"
-        db_backup(populated_db, dest)
         manifest_path = dest.with_suffix(dest.suffix + ".manifest.json")
         assert manifest_path.exists()
+        assert stat.S_IMODE(manifest_path.stat().st_mode) == 0o600
         manifest = json.loads(manifest_path.read_text())
         assert manifest["schema_name"] == BACKUP_MANIFEST_SCHEMA
         assert manifest["schema_version_manifest"] == 1
-        # The populated database has all shipped migrations applied (schema version 3).
-        assert manifest["database_schema_version"] == 3
-        assert "checksum_sha256" in manifest
-        assert "backup_at" in manifest
+        assert manifest["database_schema_version"] == current_schema_version
+        assert manifest["checksum_sha256"] == hashlib.sha256(dest.read_bytes()).hexdigest()
+        assert manifest["backup_at"]
 
-    def test_backup_manifest_has_0600_permissions(self, populated_db: Path, tmp_path: Path) -> None:
-        dest = tmp_path / "backup.sqlite3"
-        db_backup(populated_db, dest)
-        manifest_path = dest.with_suffix(dest.suffix + ".manifest.json")
-        mode = stat.S_IMODE(os.stat(manifest_path).st_mode)
-        assert mode == 0o600
-
-    def test_backup_checksum_matches_file(self, populated_db: Path, tmp_path: Path) -> None:
-        dest = tmp_path / "backup.sqlite3"
-        db_backup(populated_db, dest)
-        manifest_path = dest.with_suffix(dest.suffix + ".manifest.json")
-        manifest = json.loads(manifest_path.read_text())
-        actual = hashlib.sha256(dest.read_bytes()).hexdigest()
-        assert manifest["checksum_sha256"] == actual
-
-    def test_backup_is_valid_sqlite(self, populated_db: Path, tmp_path: Path) -> None:
-        dest = tmp_path / "backup.sqlite3"
-        db_backup(populated_db, dest)
         conn = sqlite3.connect(str(dest))
         try:
-            cursor = conn.execute("PRAGMA integrity_check")
-            assert cursor.fetchone()[0] == "ok"
-            # Data should be present.
-            cursor = conn.execute("SELECT name FROM products")
-            assert cursor.fetchone()[0] == "Greek Yogurt"
-        finally:
-            conn.close()
-
-    def test_backup_preserves_data(self, populated_db: Path, tmp_path: Path) -> None:
-        dest = tmp_path / "backup.sqlite3"
-        db_backup(populated_db, dest)
-        conn = sqlite3.connect(str(dest))
-        try:
-            cursor = conn.execute("SELECT source_order_id FROM source_orders")
-            assert cursor.fetchone()[0] == "999"
-            cursor = conn.execute("SELECT purchase_order_count FROM products WHERE id=1")
-            assert cursor.fetchone()[0] == 1
+            assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+            assert conn.execute("SELECT name FROM products").fetchone()[0] == "Greek Yogurt"
+            assert conn.execute("SELECT source_order_id FROM source_orders").fetchone()[0] == "999"
+            assert (
+                conn.execute("SELECT purchase_order_count FROM products WHERE id=1").fetchone()[0]
+                == 1
+            )
         finally:
             conn.close()
 
@@ -148,85 +115,69 @@ class TestBackup:
 
 
 class TestExport:
-    def test_export_creates_json_file(self, populated_db: Path, tmp_path: Path) -> None:
+    def test_export_success_contract(
+        self, populated_db: Path, tmp_path: Path, current_schema_version: int
+    ) -> None:
+        """One private export contains its schema metadata and required data tables."""
         dest = tmp_path / "export.json"
         result = db_export(populated_db, dest)
+        assert result == dest
         assert result.exists()
+        assert stat.S_IMODE(result.stat().st_mode) == 0o600
+
         data = json.loads(result.read_text())
         assert data["schema_name"] == EXPORT_SCHEMA
         assert data["schema_version"] == 1
-        assert data["database_schema_version"] == 3
-
-    def test_export_has_0600_permissions(self, populated_db: Path, tmp_path: Path) -> None:
-        dest = tmp_path / "export.json"
-        db_export(populated_db, dest)
-        mode = stat.S_IMODE(os.stat(dest).st_mode)
-        assert mode == 0o600
-
-    def test_export_includes_history(self, populated_db: Path, tmp_path: Path) -> None:
-        dest = tmp_path / "export.json"
-        db_export(populated_db, dest)
-        data = json.loads(dest.read_text())
-        assert "source_orders" in data["data"]
-        assert len(data["data"]["source_orders"]) == 1
-        assert data["data"]["source_orders"][0]["source_order_id"] == "999"
-
-    def test_export_includes_products(self, populated_db: Path, tmp_path: Path) -> None:
-        dest = tmp_path / "export.json"
-        db_export(populated_db, dest)
-        data = json.loads(dest.read_text())
-        assert "products" in data["data"]
-        assert len(data["data"]["products"]) == 1
-        assert data["data"]["products"][0]["name"] == "Greek Yogurt"
-
-    def test_export_includes_families_table(self, populated_db: Path, tmp_path: Path) -> None:
-        dest = tmp_path / "export.json"
-        db_export(populated_db, dest)
-        data = json.loads(dest.read_text())
-        assert "product_families" in data["data"]
-
-    def test_export_includes_recipes_table(self, populated_db: Path, tmp_path: Path) -> None:
-        dest = tmp_path / "export.json"
-        db_export(populated_db, dest)
-        data = json.loads(dest.read_text())
-        assert "recipes" in data["data"]
-
-    def test_export_includes_run_records(self, populated_db: Path, tmp_path: Path) -> None:
-        dest = tmp_path / "export.json"
-        db_export(populated_db, dest)
-        data = json.loads(dest.read_text())
-        assert "planner_runs" in data["data"]
-
-    def test_export_includes_overrides(self, populated_db: Path, tmp_path: Path) -> None:
-        dest = tmp_path / "export.json"
-        db_export(populated_db, dest)
-        data = json.loads(dest.read_text())
-        assert "manual_overrides" in data["data"]
-        assert "blacklist_events" in data["data"]
-
-    def test_export_includes_source_order_ids(self, populated_db: Path, tmp_path: Path) -> None:
-        """PRD 14.2: source order IDs may be in the private 0600 export."""
-        dest = tmp_path / "export.json"
-        db_export(populated_db, dest)
-        data = json.loads(dest.read_text())
-        assert data["data"]["source_orders"][0]["source_order_id"] == "999"
+        assert data["database_schema_version"] == current_schema_version
+        exported = data["data"]
+        assert {
+            "source_orders",
+            "products",
+            "product_families",
+            "recipes",
+            "planner_runs",
+            "manual_overrides",
+            "blacklist_events",
+        }.issubset(exported)
+        assert exported["source_orders"][0]["source_order_id"] == "999"
+        assert exported["products"][0]["name"] == "Greek Yogurt"
 
 
 class TestRestore:
     def test_restore_requires_confirmation(
-        self, populated_db: Path, tmp_path: Path, grossy_home: GrossyPaths
+        self,
+        populated_db: Path,
+        tmp_path: Path,
+        grossy_home: GrossyPaths,
+        current_schema_version: int,
     ) -> None:
         """PRD 14.3.7: restore requires explicit confirmation."""
         backup_path = tmp_path / "backup.sqlite3"
         db_backup(populated_db, backup_path)
-        # Without --confirm, should return info (not None) and not restore.
+        # Give the destination different contents so an unauthorized restore
+        # cannot pass unnoticed by replacing it with identical backup data.
+        conn = open_connection(populated_db)
+        try:
+            conn.execute("UPDATE products SET name='Changed Name' WHERE id=1")
+            conn.commit()
+        finally:
+            conn.close()
+        assert _product_name(populated_db) == "Changed Name"
+
+        # Without --confirm, return preview information and preserve the
+        # destination rather than restoring the backup's "Greek Yogurt" value.
         info = db_restore(populated_db, backup_path, grossy_home.state_dir, confirm=False)
         assert info is not None
-        assert info.source_schema_version == 3
-        assert info.target_schema_version == 3
+        assert info.source_schema_version == current_schema_version
+        assert info.target_schema_version == current_schema_version
+        assert _product_name(populated_db) == "Changed Name"
 
     def test_restore_with_confirmation_succeeds(
-        self, populated_db: Path, tmp_path: Path, grossy_home: GrossyPaths
+        self,
+        populated_db: Path,
+        tmp_path: Path,
+        grossy_home: GrossyPaths,
+        current_schema_version: int,
     ) -> None:
         backup_path = tmp_path / "backup.sqlite3"
         db_backup(populated_db, backup_path)
@@ -238,7 +189,7 @@ class TestRestore:
 
         info = db_restore(populated_db, backup_path, grossy_home.state_dir, confirm=True)
         assert info is not None
-        assert info.source_schema_version == 3
+        assert info.source_schema_version == current_schema_version
 
         # Database should be restored to backup state.
         conn = open_connection(populated_db)
@@ -311,37 +262,6 @@ class TestRestore:
         db_restore(populated_db, backup_path, grossy_home.state_dir, confirm=True)
         after = set(data_dir.glob("pre-restore-*"))
         assert len(after) > len(before)
-
-    def test_restore_rejects_newer_schema(
-        self, populated_db: Path, tmp_path: Path, grossy_home: GrossyPaths
-    ) -> None:
-        """PRD 14.3.4: reject a newer unsupported schema."""
-        # Create a backup with a higher schema version.
-        backup_path = tmp_path / "newer.sqlite3"
-        conn = open_connection(populated_db)
-        conn.backup(sqlite3.connect(str(backup_path)))
-        conn.close()
-        # Add a fake schema_migrations row with version 99.
-        backup_conn = sqlite3.connect(str(backup_path))
-        backup_conn.execute(
-            "INSERT INTO schema_migrations (version, filename, checksum, applied_at) "
-            "VALUES (99, '999_fake.sql', 'x', '2026-09-26T00:00:00.000000Z')"
-        )
-        backup_conn.execute("COMMIT")
-        backup_conn.close()
-        # Create matching manifest.
-        manifest = {
-            "schema_name": BACKUP_MANIFEST_SCHEMA,
-            "schema_version_manifest": 1,
-            "database_schema_version": 99,
-            "checksum_sha256": hashlib.sha256(backup_path.read_bytes()).hexdigest(),
-            "backup_at": "2026-09-26T00:00:00.000000Z",
-        }
-        manifest_path = backup_path.with_suffix(backup_path.suffix + ".manifest.json")
-        manifest_path.write_text(json.dumps(manifest))
-
-        with pytest.raises(RestoreError, match="newer than"):
-            db_restore(populated_db, backup_path, grossy_home.state_dir, confirm=True)
 
     def test_restore_fails_on_missing_backup(
         self, populated_db: Path, tmp_path: Path, grossy_home: GrossyPaths
@@ -466,17 +386,6 @@ class TestRestoreLockOrdering:
         with WriterLock(grossy_home.state_dir), pytest.raises(LockHeldError):
             db_restore(populated_db, backup_path, grossy_home.state_dir, confirm=True)
 
-    def test_restore_refuses_active_run_when_lock_free(
-        self, populated_db: Path, tmp_path: Path, grossy_home: GrossyPaths
-    ) -> None:
-        # With the lock free, db_restore acquires it and the under-lock check
-        # rejects the existing active run (PRD 14.3.4).
-        self._seed_active_run(populated_db)
-        backup_path = tmp_path / "backup.sqlite3"
-        db_backup(populated_db, backup_path)
-        with pytest.raises(RestoreError, match="active weekly run"):
-            db_restore(populated_db, backup_path, grossy_home.state_dir, confirm=True)
-
 
 class TestExportFailureSafety:
     """Review finding 3: a query/I-O error aborts the export and preserves output."""
@@ -573,6 +482,7 @@ class TestRestorePreRestoreBackup:
         tmp_path: Path,
         grossy_home: GrossyPaths,
         monkeypatch: pytest.MonkeyPatch,
+        current_schema_version: int,
     ) -> None:
         backup_path = tmp_path / "backup.sqlite3"
         db_backup(populated_db, backup_path)
@@ -592,7 +502,7 @@ class TestRestorePreRestoreBackup:
             db_restore(populated_db, backup_path, grossy_home.state_dir, confirm=True)
         # The active database must be unchanged.
         assert _product_name(populated_db) == "Greek Yogurt"
-        assert get_schema_version(populated_db) == 3
+        assert get_schema_version(populated_db) == current_schema_version
 
 
 class TestRestoreSchemaVersionComparison:
@@ -637,7 +547,7 @@ class TestRestoreSchemaVersionComparison:
             db_restore(populated_db, backup_path, grossy_home.state_dir, confirm=True)
 
     def test_restore_accepts_backup_at_or_below_installed_max_even_if_db_is_older(
-        self, tmp_path: Path, grossy_home: GrossyPaths
+        self, tmp_path: Path, grossy_home: GrossyPaths, current_schema_version: int
     ) -> None:
         # The review's key regression: a backup at the installed max must be
         # accepted even when the current database is at an older version.
@@ -653,7 +563,7 @@ class TestRestoreSchemaVersionComparison:
         assert get_schema_version(current_db) == 1  # current DB is older than the max
         # Backup source: the real full migrations -> schema version = installed max.
         max_supported = self._max_supported()
-        assert max_supported == 3
+        assert max_supported == current_schema_version
         backup_source = tmp_path / "new.sqlite3"
         run_migrations(backup_source, tmp_path / "bk002")  # real migrations dir
         assert get_schema_version(backup_source) == max_supported

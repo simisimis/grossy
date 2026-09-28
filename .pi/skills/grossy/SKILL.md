@@ -1,3 +1,8 @@
+---
+name: grossy
+description: Safely run Grossy grocery-history, recipe-planning, and weekly-shopping workflows through its deterministic CLI and approved browser procedures. Use when operating the Grossy project or handling its AB.gr grocery workflows.
+---
+
 # Grossy — AB.gr Weekly Grocery Shopping Automation
 
 ## Invocation
@@ -26,13 +31,22 @@ Synchronize the six currently observable dated AB.gr orders.
 4. Agent emits a `grossy.history.listed-orders.v1` proposal JSON.
 5. `grossy history sync-dry-run --listed-orders <proposal.json>`
 6. If `--dry-run`, stop here.
-7. For each unknown order (oldest first):
+7. `grossy history scan-prepare --listed-orders <proposal.json>`
+   - Returns the exact unknown orders oldest first. It opens no order and
+     inspects no product contents.
+   - If it reports `unknown_order_count == 0` (status `no-op`), it has
+     written the sanitized no-op synchronization summary report; stop.
+8. For each unknown order in the `unknown_orders` list returned by
+   `scan-prepare` (already oldest first):
    - Agent navigates to the order using its stable source ID.
    - Agent scrolls to the bottom until two consecutive passes reveal no new product IDs.
    - Agent extracts only schema-authorized product facts.
-8. Agent emits a `grossy.history.order-scan.v1` proposal JSON.
-9. `grossy history scan-validate <proposal.json>`
-10. `grossy history sync-apply <proposal.json>`
+   - Scan exactly this set: `sync-apply` rejects scans that are missing
+     unknown orders, contain out-of-window orders, or re-scan
+     already-imported orders.
+9. Agent emits a `grossy.history.order-scan.v1` proposal JSON.
+10. `grossy history scan-validate <proposal.json>`
+11. `grossy history sync-apply --listed-orders <listed-proposal.json> <proposal.json>`
 
 **Stop conditions:**
 

@@ -19,6 +19,14 @@ import typer
 from grossy.db import db_backup as _db_backup
 from grossy.db import db_export as _db_export
 from grossy.db import db_restore as _db_restore
+from grossy.history import (
+    HistorySyncError,
+    run_discover_prepare,
+    run_scan_prepare,
+    run_scan_validate,
+    run_sync_apply,
+    run_sync_dry_run,
+)
 from grossy.init import InitError, do_init
 from grossy.paths import resolve_paths
 
@@ -38,6 +46,24 @@ def emit_not_implemented(command: str) -> NoReturn:
     }
     typer.echo(json.dumps(payload, sort_keys=True))
     typer.echo(f"grossy: '{command}' is not implemented yet; refusing to continue", err=True)
+    raise typer.Exit(code=1)
+
+
+def emit_history_error(command: str, exc: Exception) -> NoReturn:
+    """Fail closed for a history synchronization phase error."""
+    typer.echo(
+        json.dumps(
+            {
+                "schema_name": STATUS_SCHEMA_NAME,
+                "schema_version": STATUS_SCHEMA_VERSION,
+                "status": "error",
+                "command": command,
+                "detail": str(exc),
+            },
+            sort_keys=True,
+        )
+    )
+    typer.echo(f"grossy: {exc}", err=True)
     raise typer.Exit(code=1)
 
 
@@ -433,7 +459,12 @@ def db_restore(
 @history_app.command("discover-prepare")
 def history_discover_prepare() -> None:
     """Prepare the observable-six listed-order discovery phase."""
-    emit_not_implemented("history discover-prepare")
+    try:
+        paths = resolve_paths()
+        result = run_discover_prepare(paths)
+    except HistorySyncError as exc:
+        emit_history_error("history discover-prepare", exc)
+    typer.echo(json.dumps(result.to_dict(), sort_keys=True))
 
 
 @history_app.command("sync-dry-run")
@@ -441,7 +472,30 @@ def history_sync_dry_run(
     listed_orders: Annotated[Path, typer.Option("--listed-orders", exists=True, dir_okay=False)],
 ) -> None:
     """Report only the count of unknown listed source order IDs."""
-    emit_not_implemented(f"history sync-dry-run --listed-orders {listed_orders}")
+    try:
+        paths = resolve_paths()
+        result = run_sync_dry_run(listed_orders, paths)
+    except HistorySyncError as exc:
+        emit_history_error(f"history sync-dry-run --listed-orders {listed_orders}", exc)
+    typer.echo(json.dumps(result.to_dict(), sort_keys=True))
+
+
+@history_app.command("scan-prepare")
+def history_scan_prepare(
+    listed_orders: Annotated[Path, typer.Option("--listed-orders", exists=True, dir_okay=False)],
+) -> None:
+    """Expose the exact unknown orders to scan, oldest first (FR-9, FR-14).
+
+    Count-only: no order is opened and no product content is inspected. When
+    there are no unknown orders, writes the sanitized no-op synchronization
+    summary report (FR-28) and reports status no-op.
+    """
+    try:
+        paths = resolve_paths()
+        result = run_scan_prepare(listed_orders, paths)
+    except HistorySyncError as exc:
+        emit_history_error(f"history scan-prepare --listed-orders {listed_orders}", exc)
+    typer.echo(json.dumps(result.to_dict(), sort_keys=True))
 
 
 @history_app.command("scan-validate")
@@ -449,15 +503,29 @@ def history_scan_validate(
     proposal: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
 ) -> None:
     """Deterministically validate an order-scan proposal."""
-    emit_not_implemented(f"history scan-validate {proposal}")
+    try:
+        result = run_scan_validate(proposal)
+    except HistorySyncError as exc:
+        emit_history_error(f"history scan-validate {proposal}", exc)
+    typer.echo(json.dumps(result.to_dict(), sort_keys=True))
 
 
 @history_app.command("sync-apply")
 def history_sync_apply(
     proposal: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
+    listed_orders: Annotated[Path, typer.Option("--listed-orders", exists=True, dir_okay=False)],
 ) -> None:
-    """Apply a validated order-scan proposal in one transaction."""
-    emit_not_implemented(f"history sync-apply {proposal}")
+    """Apply a validated order-scan proposal in one transaction.
+
+    The --listed-orders proposal binds the scan's order identities to the
+    discovered unknown set (FR-23, FR-24, FR-26).
+    """
+    try:
+        paths = resolve_paths()
+        result = run_sync_apply(proposal, paths, listed_orders_path=listed_orders)
+    except HistorySyncError as exc:
+        emit_history_error(f"history sync-apply {proposal}", exc)
+    typer.echo(json.dumps(result.to_dict(), sort_keys=True))
 
 
 @recipes_app.command("import-validate")

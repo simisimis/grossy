@@ -135,21 +135,17 @@ class TestProductIdValidation:
 
 
 class TestUrlValidation:
-    def test_non_ab_gr_host(self) -> None:
+    @pytest.mark.parametrize(
+        "url",
+        [
+            pytest.param("https://www.other.com/en/eshop/Dairy/Yogurt/p/1234567", id="wrong-host"),
+            pytest.param("http://www.ab.gr/en/eshop/Dairy/Yogurt/p/1234567", id="non-https"),
+            pytest.param("https://www.ab.gr/other/Dairy/Yogurt/p/1234567", id="non-eshop-route"),
+        ],
+    )
+    def test_rejects_noncanonical_product_url(self, url: str) -> None:
         data = _valid_data()
-        data["lines"][0]["canonical_url"] = "https://www.other.com/en/eshop/Dairy/Yogurt/p/1234567"
-        with pytest.raises(CartObservationError):
-            validate_cart_observation(data)
-
-    def test_http_not_https(self) -> None:
-        data = _valid_data()
-        data["lines"][0]["canonical_url"] = "http://www.ab.gr/en/eshop/Dairy/Yogurt/p/1234567"
-        with pytest.raises(CartObservationError):
-            validate_cart_observation(data)
-
-    def test_not_eshop_path(self) -> None:
-        data = _valid_data()
-        data["lines"][0]["canonical_url"] = "https://www.ab.gr/other/Dairy/Yogurt/p/1234567"
+        data["lines"][0]["canonical_url"] = url
         with pytest.raises(CartObservationError):
             validate_cart_observation(data)
 
@@ -275,26 +271,26 @@ class TestEncodedContentBypass:
     decoded angle brackets so that ``%3Cscript%3E`` cannot pass validation.
     """
 
-    def test_encoded_script_tag_in_url_rejected(self) -> None:
-        """A URL with percent-encoded <script> must be rejected."""
+    @pytest.mark.parametrize(
+        "url",
+        [
+            pytest.param(
+                "https://www.ab.gr/en/eshop/Dairy/%3Cscript%3Ealert(1)%3Cscript%3E/p/1234567",
+                id="encoded-script-tag",
+            ),
+            pytest.param(
+                "https://www.ab.gr/en/eshop/Dairy/%3Ctest%3E/p/1234567",
+                id="encoded-angle-brackets",
+            ),
+            pytest.param(
+                "https://www.ab.gr/en/eshop/Dairy/item%3E/p/1234567",
+                id="encoded-greater-than-only",
+            ),
+        ],
+    )
+    def test_rejects_encoded_markup_in_product_url(self, url: str) -> None:
         data = _valid_data()
-        data["lines"][0]["canonical_url"] = (
-            "https://www.ab.gr/en/eshop/Dairy/%3Cscript%3Ealert(1)%3Cscript%3E/p/1234567"
-        )
-        with pytest.raises(CartObservationError):
-            validate_cart_observation(data)
-
-    def test_encoded_angle_brackets_in_slug_rejected(self) -> None:
-        """Any percent-encoded angle brackets in a path segment must fail."""
-        data = _valid_data()
-        data["lines"][0]["canonical_url"] = "https://www.ab.gr/en/eshop/Dairy/%3Ctest%3E/p/1234567"
-        with pytest.raises(CartObservationError):
-            validate_cart_observation(data)
-
-    def test_encoded_gt_only_in_slug_rejected(self) -> None:
-        """A lone percent-encoded > in a path segment must fail."""
-        data = _valid_data()
-        data["lines"][0]["canonical_url"] = "https://www.ab.gr/en/eshop/Dairy/item%3E/p/1234567"
+        data["lines"][0]["canonical_url"] = url
         with pytest.raises(CartObservationError):
             validate_cart_observation(data)
 
