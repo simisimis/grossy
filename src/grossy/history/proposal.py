@@ -19,7 +19,7 @@ import math
 import re
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlsplit
 
 from pydantic import (
@@ -46,6 +46,14 @@ LISTED_ORDERS_SCHEMA_VERSION = 1
 
 ORDER_SCAN_SCHEMA_NAME = "grossy.history.order-scan.v1"
 ORDER_SCAN_SCHEMA_VERSION = 1
+
+# Deterministic internal proposal family for high-confidence automatic family
+# links (FR-55, FR-56). The inference pass produces it, it is validated
+# fail-closed, and only the validated links may change persisted family
+# membership. Explicit user links arrive through task-06 correction commands,
+# not through this proposal.
+FAMILY_LINKS_SCHEMA_NAME = "grossy.history.family-links.v1"
+FAMILY_LINKS_SCHEMA_VERSION = 1
 
 # The observable-six window (PRD FR-6): exactly six dated orders are listed.
 OBSERVABLE_ORDER_WINDOW = 6
@@ -433,6 +441,75 @@ class OrderScanProposal(BaseModel):
         return self
 
 
+# --- family-links proposal (grossy.history.family-links.v1) -----------------
+
+
+class FamilyLink(BaseModel):
+    """One high-confidence automatic family link (FR-55).
+
+    Only ``high``-confidence links may enter this proposal: lower-confidence
+    candidates must remain review items with the products left separate
+    (FR-56). ``provenance`` records where the link came from; the inference
+    pass emits deterministic ``inferred`` links only.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    product_id: str = Field(pattern=NUMERIC_ID_PATTERN)
+    target_family_id: str = Field(min_length=1)
+    base_name: str = Field(min_length=1)
+    category: str = Field(min_length=1)
+    confidence: Literal["high"]
+    provenance: Literal["inferred"]
+
+
+class FamilyLinksProposal(BaseModel):
+    """Versioned, schema-bound proposal of automatic family links (FR-55)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_name: str
+    schema_version: StrictInt
+    generated_at: str
+    links: list[FamilyLink]
+
+    @field_validator("schema_name")
+    @classmethod
+    def _check_schema_name(cls, value: str) -> str:
+        if value != FAMILY_LINKS_SCHEMA_NAME:
+            raise HistoryProposalError(
+                f"schema_name must be {FAMILY_LINKS_SCHEMA_NAME!r}, got {value!r}"
+            )
+        return value
+
+    @field_validator("schema_version")
+    @classmethod
+    def _check_schema_version(cls, value: int) -> int:
+        if value != FAMILY_LINKS_SCHEMA_VERSION:
+            raise HistoryProposalError(
+                f"schema_version must be {FAMILY_LINKS_SCHEMA_VERSION}, got {value}"
+            )
+        return value
+
+    @field_validator("generated_at")
+    @classmethod
+    def _check_generated_at(cls, value: str) -> str:
+        _check_generated_at(value)
+        return value
+
+    @model_validator(mode="after")
+    def _check_links(self) -> FamilyLinksProposal:
+        seen: set[str] = set()
+        for link in self.links:
+            if link.product_id in seen:
+                raise HistoryProposalError(
+                    f"duplicate family link for product {link.product_id!r}; a "
+                    "product may be linked at most once per pass"
+                )
+            seen.add(link.product_id)
+        return self
+
+
 # --- public validators (fail closed) ----------------------------------------
 
 
@@ -461,4 +538,23 @@ def validate_order_scan(data: dict[str, Any]) -> OrderScanProposal:
     except ValidationError as exc:
         raise HistoryProposalError(
             f"order-scan proposal validation failed: {_format_validation_error(exc)}"
+        ) from exc
+
+
+def validate_family_links(data: dict[str, Any]) -> FamilyLinksProposal:
+    """Validate a raw family-links proposal dict; fail closed on any violation.
+
+    This is the validated-proposal boundary for automatic family links
+    (FR-55): a proposal that does not validate here must not change any
+    persisted family membership.
+    """
+    try:
+        scan_prohibited_content(data)
+    except ProhibitedContentError as exc:
+        raise HistoryProposalError(str(exc)) from exc
+    try:
+        return FamilyLinksProposal.model_validate(data)
+    except ValidationError as exc:
+        raise HistoryProposalError(
+            f"family-links proposal validation failed: {_format_validation_error(exc)}"
         ) from exc

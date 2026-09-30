@@ -36,6 +36,7 @@ from grossy.db.connection import open_connection
 from grossy.db.lock import WriterLock
 from grossy.db.migrations import get_schema_version, run_migrations
 from grossy.fsutil import atomic_write_text, ensure_private_dir
+from grossy.history.learn import InferenceSummary, run_inference
 from grossy.history.proposal import (
     OBSERVABLE_ORDER_WINDOW,
     ORDER_SCAN_SCHEMA_NAME,
@@ -115,16 +116,69 @@ def _category_name_from_heading(heading: str) -> str:
     return _WHITESPACE_RE.sub(" ", heading).strip().lower()
 
 
-def _get_or_create_category(conn: sqlite3.Connection, heading: str | None, now: str) -> int | None:
-    """Create or reuse a category from a scannable heading (non-inferential).
+# Normalized unit basis for package facts (FR-32, "normalized unit basis where
+# determinable"). The mapping is closed: a displayed unit that cannot be
+# determined with confidence is left NULL (indeterminate), never guessed.
+_UNIT_BASIS_BY_UNIT = {
+    "ml": "ml",
+    "cl": "cl",
+    "l": "l",
+    "lt": "l",
+    "g": "g",
+    "kg": "kg",
+    "mg": "mg",
+    "pc": "count",
+    "pcs": "count",
+    "piece": "count",
+    "pieces": "count",
+    "count": "count",
+    "unit": "count",
+    "units": "count",
+}
 
-    Task 04 preserves the visible heading as a category; confidence-based
-    normalization and reviewable assignment are deferred to task 05.
+
+def _normalize_unit_basis(unit: str | None) -> str | None:
+    """Derive the normalized unit basis from a displayed package unit (FR-32).
+
+    Returns ``None`` when the card carries no unit or the unit is not in the
+    closed mapping (indeterminate); the stored basis is preserved in that
+    case, never overwritten by a guess.
+    """
+    if unit is None:
+        return None
+    return _UNIT_BASIS_BY_UNIT.get(_WHITESPACE_RE.sub(" ", unit).strip().lower())
+
+
+def _unit_basis_changed(old_basis: str | None, unit: str | None) -> bool:
+    """Whether a present, determinable unit differs from the stored basis.
+
+    An absent or indeterminate unit is absence of evidence, not evidence of
+    absence: the stored basis is left unchanged and no change is reported.
+    """
+    derived = _normalize_unit_basis(unit)
+    if derived is None:
+        return False
+    return derived != old_basis
+
+
+def _get_or_create_category(conn: sqlite3.Connection, heading: str | None, now: str) -> int | None:
+    """Create or reuse a normalized category from a scannable heading.
+
+    The visible heading is normalized (whitespace-collapsed, lower-cased) into
+    a stable, reusable category name (FR-36). When a card carries no heading
+    there is nothing to normalize: the product is left unassigned and the
+    learned-state inference (grossy.history.learn) records a reviewable
+    uncertainty instead of creating a forbidden ``misc`` category (FR-37).
+    An explicit ``misc`` heading is treated the same as a missing heading:
+    the product is left unassigned and the inference records a reviewable
+    uncertainty (FR-37: no ``misc`` category is created).
     """
     if heading is None:
         return None
     name = _category_name_from_heading(heading)
     if not name:
+        return None
+    if name == "misc":
         return None
     row = conn.execute("SELECT id FROM categories WHERE name = ?", (name,)).fetchone()
     if row is not None:
@@ -515,6 +569,12 @@ def run_sync_apply(
                 listed_order_count=listed_order_count,
                 unknown_order_count=unknown_order_count,
             )
+            # Learn categories, families, recurrence, and review items from the
+            # imported observations in the SAME transaction as the import
+            # (FR-25, FR-26): if inference fails the whole batch rolls back, and
+            # a re-sync re-runs inference idempotently without touching the fixed
+            # primary (FR-44).
+            inference = run_inference(conn, _now_utc())
             # Build the sanitized report texts and persist the recoverable
             # facts in the SAME transaction as the import (PRD 18): if a
             # report file write fails after commit, the persisted facts carry
@@ -531,7 +591,9 @@ def run_sync_apply(
             redaction_ids = _imported_source_order_ids(conn)
             if listed is not None:
                 redaction_ids = redaction_ids | {o.source_order_id for o in listed.orders}
-            json_text, md_text = _build_apply_report_texts(stats, checksum, redaction_ids)
+            json_text, md_text = _build_apply_report_texts(
+                stats, inference, checksum, redaction_ids
+            )
             report_key = f"apply:{checksum}"
             _persist_sync_report(
                 conn,
@@ -714,6 +776,23 @@ def _scan_mismatch_warning(order: Any) -> str | None:
     )
 
 
+# A product row as read pre-update by ``_read_product_row``.
+_ProductRow = tuple[
+    int,  # row id
+    str,  # name
+    str | None,  # brand
+    float | None,  # package_amount
+    str | None,  # package_unit
+    int | None,  # package_count
+    str | None,  # package_display
+    str | None,  # unit_basis
+    int | None,  # category_id
+    str | None,  # stored category normalized name
+    str | None,  # first_observed_date
+    str | None,  # last_observed_date
+]
+
+
 def _upsert_product(
     conn: sqlite3.Connection,
     product: ScannedProduct,
@@ -726,32 +805,49 @@ def _upsert_product(
 
     ``purchase_order_count`` and observed dates are updated here for every
     appearance in a newly imported order (FR-33). The observed dates use the
-    owning order's normalized date.
+    owning order's normalized date. Optional card facts (brand, package facts,
+    category heading) are best-effort per card (FR-18): a present observation
+    updates the stored fact, while an absent observation leaves the previously
+    stored fact unchanged, so a transient missing heading never erases a
+    learned category (FR-36, FR-37).
     """
     category_id = _get_or_create_category(conn, product.category_heading, now)
     if key in pre_existing:
-        row = conn.execute(
-            "SELECT id, first_observed_date, last_observed_date FROM products "
-            "WHERE retailer = ? AND retailer_product_id = ?",
-            key,
-        ).fetchone()
-        product_row_id = cast(int, row[0])
-        first = min(filter(None, [row[1], order_date]), default=None)
-        last = max(filter(None, [row[2], order_date]), default=None)
+        old = _read_product_row(conn, key)
+        (
+            product_row_id,
+            _name,
+            old_brand,
+            old_pkg_amount,
+            old_pkg_unit,
+            old_pkg_count,
+            old_pkg_display,
+            old_unit_basis,
+            old_category_id,
+            _category_name,
+            old_first,
+            old_last,
+        ) = old
+        first = min(filter(None, [old_first, order_date]), default=None)
+        last = max(filter(None, [old_last, order_date]), default=None)
+        # A determinable unit updates the stored basis; an absent or
+        # indeterminate unit keeps the stored value (COALESCE), never a guess.
         conn.execute(
             "UPDATE products SET name = ?, brand = ?, package_amount = ?, "
             "package_unit = ?, package_count = ?, package_display = ?, "
+            "unit_basis = COALESCE(?, unit_basis), "
             "category_id = ?, first_observed_date = ?, last_observed_date = ?, "
             "purchase_order_count = purchase_order_count + 1, updated_at = ? "
             "WHERE id = ?",
             (
                 product.title,
-                product.brand,
-                product.package_amount,
-                product.package_unit,
-                product.package_count,
-                product.package_display,
-                category_id,
+                product.brand if product.brand is not None else old_brand,
+                product.package_amount if product.package_amount is not None else old_pkg_amount,
+                product.package_unit if product.package_unit is not None else old_pkg_unit,
+                product.package_count if product.package_count is not None else old_pkg_count,
+                product.package_display if product.package_display is not None else old_pkg_display,
+                _normalize_unit_basis(product.package_unit),
+                category_id if category_id is not None else old_category_id,
                 first,
                 last,
                 now,
@@ -763,9 +859,9 @@ def _upsert_product(
     cur = conn.execute(
         "INSERT INTO products (retailer, retailer_product_id, canonical_url, name, "
         "brand, package_amount, package_unit, package_count, package_display, "
-        "category_id, first_observed_date, last_observed_date, purchase_order_count, "
-        "created_at, updated_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
+        "unit_basis, category_id, first_observed_date, last_observed_date, "
+        "purchase_order_count, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
         (
             _RETAILER,
             product.product_id,
@@ -776,6 +872,7 @@ def _upsert_product(
             product.package_unit,
             product.package_count,
             product.package_display,
+            _normalize_unit_basis(product.package_unit),
             category_id,
             order_date,
             order_date,
@@ -787,31 +884,43 @@ def _upsert_product(
     return cast(int, cur.lastrowid)
 
 
-def _read_product_row(conn: sqlite3.Connection, key: tuple[str, str]) -> tuple[Any, ...]:
-    """Read a product's descriptive facts and observed dates (pre-update)."""
+def _read_product_row(conn: sqlite3.Connection, key: tuple[str, str]) -> _ProductRow:
+    """Read a product's row id, stored facts, and observed dates (pre-update).
+
+    The stored category's normalized name is joined in so change detection can
+    compare it against a new heading without writing anything.
+    """
     row = conn.execute(
-        "SELECT name, brand, package_amount, package_unit, package_count, "
-        "package_display, first_observed_date, last_observed_date FROM products "
-        "WHERE retailer = ? AND retailer_product_id = ?",
+        "SELECT p.id, p.name, p.brand, p.package_amount, p.package_unit, "
+        "p.package_count, p.package_display, p.unit_basis, p.category_id, c.name, "
+        "p.first_observed_date, p.last_observed_date "
+        "FROM products p LEFT JOIN categories c ON c.id = p.category_id "
+        "WHERE p.retailer = ? AND p.retailer_product_id = ?",
         key,
     ).fetchone()
     assert row is not None
-    return cast("tuple[Any, ...]", row)
+    return cast("_ProductRow", row)
 
 
-def _is_product_changed(old: tuple[Any, ...], product: ScannedProduct, order_date: str) -> bool:
-    """Whether a pre-existing product's descriptive facts or dates changed.
+def _is_product_changed(old: _ProductRow, product: ScannedProduct, order_date: str) -> bool:
+    """Whether a pre-existing product's stored facts or dates change.
 
     ``old`` is the product row read *before* the update; comparing against the
     pre-update values is what makes the observed-date extension detectable.
+    Optional facts change only when the new observation is present and differs
+    (an absent observation leaves the stored fact unchanged, FR-18).
     """
     (
+        _row_id,
         old_name,
         old_brand,
         old_pkg_amount,
         old_pkg_unit,
         old_pkg_count,
         old_pkg_display,
+        old_unit_basis,
+        _old_category_id,
+        old_category_name,
         old_first,
         old_last,
     ) = old
@@ -819,11 +928,13 @@ def _is_product_changed(old: tuple[Any, ...], product: ScannedProduct, order_dat
     last_changed = old_last is None or order_date > old_last
     facts_changed = (
         old_name != product.title
-        or old_brand != product.brand
-        or _num_differs(old_pkg_amount, product.package_amount)
-        or old_pkg_unit != product.package_unit
-        or old_pkg_count != product.package_count
-        or old_pkg_display != product.package_display
+        or _optional_fact_changed(old_brand, product.brand)
+        or _optional_fact_changed(old_pkg_amount, product.package_amount)
+        or _optional_fact_changed(old_pkg_unit, product.package_unit)
+        or _optional_fact_changed(old_pkg_count, product.package_count)
+        or _optional_fact_changed(old_pkg_display, product.package_display)
+        or _unit_basis_changed(old_unit_basis, product.package_unit)
+        or _category_fact_changed(old_category_name, product.category_heading)
     )
     return bool(first_changed or last_changed or facts_changed)
 
@@ -839,16 +950,43 @@ def _num_differs(old: Any, new: Any) -> bool:
         return bool(old != new)
 
 
-def _change_reason(old: tuple[Any, ...], product: ScannedProduct, order_date: str) -> str:
-    """Sanitized reason a product was changed (no source order IDs)."""
+def _optional_fact_changed(old_value: Any, new_value: Any) -> bool:
+    """Whether a present observation differs from the stored fact.
+
+    ``None`` means the card carried no such fact (FR-18: brand "when
+    determinable"); that is absence of evidence, not evidence of absence, so
+    the stored fact is left unchanged and no change is reported.
+    """
+    if new_value is None:
+        return False
+    return _num_differs(old_value, new_value)
+
+
+def _category_fact_changed(old_category_name: str | None, heading: str | None) -> bool:
+    """Whether a present heading normalizes to a different stored category."""
+    if heading is None or not _category_name_from_heading(heading):
+        return False
+    return _category_name_from_heading(heading) != old_category_name
+
+
+def _change_reason(old: _ProductRow, product: ScannedProduct, order_date: str) -> str:
+    """Sanitized reason a product's stored facts or dates changed.
+
+    No source order IDs; absent optional facts contribute no reason because
+    they leave the stored fact unchanged.
+    """
     reasons: list[str] = []
     (
+        _row_id,
         old_name,
         old_brand,
         old_pkg_amount,
         old_pkg_unit,
         old_pkg_count,
         old_pkg_display,
+        old_unit_basis,
+        _old_category_id,
+        old_category_name,
         old_first,
         old_last,
     ) = old
@@ -858,16 +996,20 @@ def _change_reason(old: tuple[Any, ...], product: ScannedProduct, order_date: st
         reasons.append("last observed date extended later")
     if old_name != product.title:
         reasons.append("name updated")
-    if old_brand != product.brand:
+    if _optional_fact_changed(old_brand, product.brand):
         reasons.append("brand updated")
-    if _num_differs(old_pkg_amount, product.package_amount):
+    if _optional_fact_changed(old_pkg_amount, product.package_amount):
         reasons.append("package amount updated")
-    if old_pkg_unit != product.package_unit:
+    if _optional_fact_changed(old_pkg_unit, product.package_unit):
         reasons.append("package unit updated")
-    if old_pkg_count != product.package_count:
+    if _optional_fact_changed(old_pkg_count, product.package_count):
         reasons.append("package count updated")
-    if old_pkg_display != product.package_display:
+    if _optional_fact_changed(old_pkg_display, product.package_display):
         reasons.append("package display updated")
+    if _unit_basis_changed(old_unit_basis, product.package_unit):
+        reasons.append("unit basis updated")
+    if _category_fact_changed(old_category_name, product.category_heading):
+        reasons.append("category updated")
     return "; ".join(reasons) if reasons else "facts updated"
 
 
@@ -902,14 +1044,18 @@ def _sanitize_untrusted_text(value: str, order_ids: set[str]) -> str:
 
 
 def _build_apply_report_texts(
-    stats: _ApplyStats, checksum: str, redaction_ids: set[str]
+    stats: _ApplyStats,
+    inference: InferenceSummary,
+    checksum: str,
+    redaction_ids: set[str],
 ) -> tuple[str, str]:
     """Build the sanitized apply-report JSON and Markdown texts.
 
     Source order IDs are never included (FR-29): untrusted product facts are
     sanitized and known source order IDs are redacted from all report text.
-    Only counts, sanitized product facts, and diagnostics remain. The returned
-    texts are the exact bytes persisted for recovery and written to files.
+    Only counts, sanitized product facts, learned-state facts, and diagnostics
+    remain. The returned texts are the exact bytes persisted for recovery and
+    written to files.
     """
     generated_at = _now_utc()
 
@@ -927,6 +1073,43 @@ def _build_apply_report_texts(
             "reason": reason,
         }
         for name, cat, reason in stats.changed_product_facts
+    ]
+    # Learned recurrence facts: product IDs (not order IDs) and sanitized names
+    # are safe to surface; the cadence is what the user reviews. Untrusted
+    # names are sanitized and order-ID redacted exactly like the import facts
+    # (FR-29).
+    recurrence = [
+        {
+            "family_id": str(entry.get("family_id", "")),
+            "primary_product_id": str(entry.get("primary_product_id", "")),
+            "name": _sanitize_untrusted_text(str(entry.get("name", "")), redaction_ids),
+            "weeks": entry.get("weeks"),
+            "source": entry.get("source"),
+            "confidence": entry.get("confidence"),
+            "auto_add_eligible": entry.get("auto_add_eligible"),
+        }
+        for entry in inference.recurrence
+    ]
+    # Applied automatic family links (FR-55, surfaced per FR-28). The stable
+    # product and family IDs are safe to surface; base name and category come
+    # from untrusted card text, so they are sanitized like the other names.
+    family_links = [
+        {
+            "product_id": str(entry.get("product_id", "")),
+            "target_family_id": str(entry.get("target_family_id", "")),
+            "base_name": _sanitize_untrusted_text(str(entry.get("base_name", "")), redaction_ids),
+            "category": _sanitize_untrusted_text(str(entry.get("category", "")), redaction_ids),
+        }
+        for entry in inference.family_links
+    ]
+    review_items = [
+        {
+            "kind": item.kind,
+            "target_type": item.target_type,
+            "target_id": item.target_id,
+            "reason": item.reason,
+        }
+        for item in inference.review_items
     ]
 
     payload = {
@@ -954,19 +1137,22 @@ def _build_apply_report_texts(
             "warnings": list(stats.warnings),
         },
         "category_family_recurrence": {
-            "status": "deferred",
-            "note": (
-                "Category normalization, family inference, and recurrence are "
-                "implemented in task 05."
-            ),
+            "status": "applied",
+            "families_created": inference.families_created,
+            "families_updated": inference.families_updated,
+            "family_links": family_links,
+            "recurrence": recurrence,
         },
         "review": {
-            "links_requiring_review": [],
-            "note": "Family links and uncertain category assignments require review (task 05+).",
+            "items": review_items,
+            "note": (
+                "Uncertain category and single-occurrence recurrence assignments "
+                "are reviewable; no `misc` category is created."
+            ),
         },
     }
     json_text = json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
-    md_text = _render_apply_markdown(generated_at, checksum, stats, redaction_ids)
+    md_text = _render_apply_markdown(generated_at, checksum, stats, inference, redaction_ids)
     return json_text, md_text
 
 
@@ -1101,7 +1287,8 @@ def _write_noop_report(paths: GrossyPaths, listed_order_count: int) -> Path:
 
     A normal synchronization with zero unknown orders still must leave the
     required sanitized summary. Source order IDs are never written (FR-29);
-    the report carries only counts, deferred task-05 notes, and diagnostics.
+    the report carries only counts and diagnostics, and states that the
+    existing learned categories, families, and recurrence are unchanged.
     """
     report_dir = _reports_dir(paths)
     stamp = _stamp()
@@ -1133,15 +1320,15 @@ def _write_noop_report(paths: GrossyPaths, listed_order_count: int) -> Path:
             "warnings": [],
         },
         "category_family_recurrence": {
-            "status": "deferred",
+            "status": "no-op",
             "note": (
-                "Category normalization, family inference, and recurrence are "
-                "implemented in task 05."
+                "No new orders to learn from; existing learned categories, "
+                "families, and recurrence are unchanged."
             ),
         },
         "review": {
-            "links_requiring_review": [],
-            "note": "Family links and uncertain category assignments require review (task 05+).",
+            "items": [],
+            "note": "A no-op synchronization introduces no new review items.",
         },
     }
     json_text = json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
@@ -1177,10 +1364,10 @@ def _render_noop_markdown(generated_at: str, listed_order_count: int) -> str:
         "- Warnings: none",
         "",
         "## Category / family / recurrence",
-        "- Deferred to task 05 (learned products, families, recurrence).",
+        "- No new orders to learn from; existing learned state is unchanged.",
         "",
         "## Review",
-        "- No family links or uncertain category assignments require review at this task.",
+        "- A no-op synchronization introduces no new review items.",
         "",
         "_Source order IDs are intentionally omitted from this report (PRD FR-29)._",
     ]
@@ -1188,7 +1375,11 @@ def _render_noop_markdown(generated_at: str, listed_order_count: int) -> str:
 
 
 def _render_apply_markdown(
-    generated_at: str, checksum: str, stats: _ApplyStats, redaction_ids: set[str]
+    generated_at: str,
+    checksum: str,
+    stats: _ApplyStats,
+    inference: InferenceSummary,
+    redaction_ids: set[str],
 ) -> str:
     warnings = list(stats.warnings)
     lines = [
@@ -1234,10 +1425,48 @@ def _render_apply_markdown(
     lines += [
         "",
         "## Category / family / recurrence",
-        "- Deferred to task 05 (learned products, families, recurrence).",
+        f"- Families created this synchronization: {inference.families_created}",
+        f"- Families re-inferred (primary unchanged): {inference.families_updated}",
+    ]
+    if inference.family_links:
+        lines.append("- Family links applied:")
+        for entry in inference.family_links:
+            base = _sanitize_untrusted_text(str(entry.get("base_name", "")), redaction_ids)
+            category = _sanitize_untrusted_text(str(entry.get("category", "")), redaction_ids)
+            lines.append(
+                f"  - {str(entry.get('product_id', ''))} joined family "
+                f"{str(entry.get('target_family_id', ''))} "
+                f"(base name: {base}; category: {category})"
+            )
+    else:
+        lines.append("- Family links applied: none")
+    if inference.recurrence:
+        lines.append("- Recurrence inferences:")
+        for entry in inference.recurrence:
+            name = _sanitize_untrusted_text(str(entry.get("name", "")), redaction_ids)
+            weeks = entry.get("weeks")
+            source = entry.get("source")
+            confidence = entry.get("confidence")
+            eligible = entry.get("auto_add_eligible")
+            lines.append(
+                f"  - {name}: {weeks} week(s), source={source}, "
+                f"confidence={confidence}, auto-add={'eligible' if eligible else 'not eligible'}"
+            )
+    else:
+        lines.append("- Recurrence inferences: none")
+    lines += [
         "",
         "## Review",
-        "- No family links or uncertain category assignments require review at this task.",
+    ]
+    if inference.review_items:
+        lines.append("- Assignments requiring review:")
+        for item in inference.review_items:
+            lines.append(f"  - [{item.kind}] {item.target_type} {item.target_id}: {item.reason}")
+    else:
+        lines.append("- No category or recurrence assignments require review.")
+    lines += [
+        "",
+        "- No `misc` category is created; uncertain categories stay unassigned for review.",
         "",
         "_Source order IDs are intentionally omitted from this report (PRD FR-29)._",
     ]

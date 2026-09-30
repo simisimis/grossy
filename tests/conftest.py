@@ -12,4 +12,4 @@ def current_schema_version() -> int:
     Keep this expectation independent of ``discover_migrations()`` so a missing
     migration cannot make both implementation and expectation agree by accident.
     """
-    return 4
+    return 5
