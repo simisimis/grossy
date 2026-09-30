@@ -37,6 +37,7 @@ from grossy.db.lock import WriterLock
 from grossy.db.migrations import get_schema_version, run_migrations
 from grossy.fsutil import atomic_write_text, ensure_private_dir
 from grossy.history.learn import InferenceSummary, run_inference
+from grossy.history.maintenance import category_rename_target, product_has_category_override
 from grossy.history.proposal import (
     OBSERVABLE_ORDER_WINDOW,
     ORDER_SCAN_SCHEMA_NAME,
@@ -172,6 +173,11 @@ def _get_or_create_category(conn: sqlite3.Connection, heading: str | None, now: 
     An explicit ``misc`` heading is treated the same as a missing heading:
     the product is left unassigned and the inference records a reviewable
     uncertainty (FR-37: no ``misc`` category is created).
+
+    FR-38/FR-68: if the normalized heading matches a category that has been
+    manually renamed, the rename target is resolved (following the chain for
+    multi-step renames) and the existing renamed category is reused rather
+    than re-creating the old name.
     """
     if heading is None:
         return None
@@ -180,9 +186,25 @@ def _get_or_create_category(conn: sqlite3.Connection, heading: str | None, now: 
         return None
     if name == "misc":
         return None
-    row = conn.execute("SELECT id FROM categories WHERE name = ?", (name,)).fetchone()
-    if row is not None:
-        return cast(int, row[0])
+
+    # FR-38/FR-68: follow a rename chain so a later scan with the old heading
+    # does not re-create the old category. Each rename records an override
+    # with target_id=old_name and field_value=new_name; the category row
+    # itself has been updated to the new name. Follow the chain until we
+    # find a name that exists in the categories table.
+    seen: set[str] = set()
+    current = name
+    while current not in seen:
+        seen.add(current)
+        row = conn.execute("SELECT id FROM categories WHERE name = ?", (current,)).fetchone()
+        if row is not None:
+            return cast(int, row[0])
+        renamed_to = category_rename_target(conn, current)
+        if renamed_to is None:
+            break
+        current = renamed_to
+
+    # No existing category (and no rename chain leads to one): create it.
     cur = conn.execute(
         "INSERT INTO categories (name, display_name, created_at) VALUES (?, ?, ?)",
         (name, heading.strip(), now),
@@ -830,6 +852,12 @@ def _upsert_product(
         ) = old
         first = min(filter(None, [old_first, order_date]), default=None)
         last = max(filter(None, [old_last, order_date]), default=None)
+        # FR-38/FR-68: a manually assigned category is never overwritten by
+        # a scanned heading; the stored value is preserved.
+        if product_has_category_override(conn, product.product_id):
+            effective_category_id = old_category_id
+        else:
+            effective_category_id = category_id if category_id is not None else old_category_id
         # A determinable unit updates the stored basis; an absent or
         # indeterminate unit keeps the stored value (COALESCE), never a guess.
         conn.execute(
@@ -847,7 +875,7 @@ def _upsert_product(
                 product.package_count if product.package_count is not None else old_pkg_count,
                 product.package_display if product.package_display is not None else old_pkg_display,
                 _normalize_unit_basis(product.package_unit),
-                category_id if category_id is not None else old_category_id,
+                effective_category_id,
                 first,
                 last,
                 now,

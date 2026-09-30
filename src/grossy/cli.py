@@ -16,6 +16,7 @@ from typing import Annotated, NoReturn
 
 import typer
 
+from grossy.db import LockHeldError
 from grossy.db import db_backup as _db_backup
 from grossy.db import db_export as _db_export
 from grossy.db import db_restore as _db_restore
@@ -26,6 +27,23 @@ from grossy.history import (
     run_scan_validate,
     run_sync_apply,
     run_sync_dry_run,
+)
+from grossy.history.maintenance import (
+    MaintenanceError,
+    run_blacklist_family,
+    run_blacklist_product,
+    run_category_rename,
+    run_disable,
+    run_enable,
+    run_family_link,
+    run_family_merge,
+    run_family_unlink,
+    run_set_category,
+    run_set_primary,
+    run_set_quantity,
+    run_set_recurrence,
+    run_unblacklist_family,
+    run_unblacklist_product,
 )
 from grossy.init import InitError, do_init
 from grossy.paths import resolve_paths
@@ -71,6 +89,24 @@ def require_positive(value: int, name: str) -> None:
     if value <= 0:
         typer.echo(f"grossy: {name} must be a positive integer, got {value}", err=True)
         raise typer.Exit(code=2)
+
+
+def emit_maintenance_error(command: str, exc: Exception) -> NoReturn:
+    """Fail closed for a manual correction command error."""
+    typer.echo(
+        json.dumps(
+            {
+                "schema_name": STATUS_SCHEMA_NAME,
+                "schema_version": STATUS_SCHEMA_VERSION,
+                "status": "error",
+                "command": command,
+                "detail": str(exc),
+            },
+            sort_keys=True,
+        )
+    )
+    typer.echo(f"grossy: {exc}", err=True)
+    raise typer.Exit(code=1)
 
 
 def require_positive_decimal(value: float, name: str) -> None:
@@ -144,92 +180,208 @@ def doctor() -> None:
 
 
 @history_app.command("set-primary")
-def history_set_primary(family_id: str, product_id: str) -> None:
+def history_set_primary(
+    family_id: str,
+    product_id: str,
+    rationale: Annotated[str | None, typer.Option("--rationale")] = None,
+) -> None:
     """Explicitly set the primary product of an established family."""
-    emit_not_implemented(f"history set-primary {family_id} {product_id}")
+    try:
+        paths = resolve_paths()
+        result = run_set_primary(paths, family_id, product_id, rationale)
+    except (MaintenanceError, LockHeldError) as exc:
+        emit_maintenance_error(f"history set-primary {family_id} {product_id}", exc)
+    typer.echo(json.dumps(result, sort_keys=True))
 
 
 @history_app.command("set-recurrence")
 def history_set_recurrence(
     family_id: str,
     weeks: Annotated[int, typer.Option("--weeks")],
+    rationale: Annotated[str | None, typer.Option("--rationale")] = None,
 ) -> None:
     """Explicitly set a family recurrence interval in whole weeks."""
     require_positive(weeks, "--weeks")
-    emit_not_implemented(f"history set-recurrence {family_id} --weeks {weeks}")
+    try:
+        paths = resolve_paths()
+        result = run_set_recurrence(paths, family_id, weeks, rationale)
+    except (MaintenanceError, LockHeldError) as exc:
+        emit_maintenance_error(f"history set-recurrence {family_id} --weeks {weeks}", exc)
+    typer.echo(json.dumps(result, sort_keys=True))
 
 
 @history_app.command("set-quantity")
-def history_set_quantity(product_or_family_id: str, quantity: int) -> None:
+def history_set_quantity(
+    product_or_family_id: str,
+    quantity: int,
+    rationale: Annotated[str | None, typer.Option("--rationale")] = None,
+) -> None:
     """Explicitly set a typical quantity for a product or family."""
     require_positive(quantity, "quantity")
-    emit_not_implemented(f"history set-quantity {product_or_family_id} {quantity}")
+    try:
+        paths = resolve_paths()
+        result = run_set_quantity(paths, product_or_family_id, quantity, rationale)
+    except (MaintenanceError, LockHeldError) as exc:
+        emit_maintenance_error(f"history set-quantity {product_or_family_id} {quantity}", exc)
+    typer.echo(json.dumps(result, sort_keys=True))
 
 
 @history_app.command("disable")
-def history_disable(family_id: str) -> None:
+def history_disable(
+    family_id: str,
+    rationale: Annotated[str | None, typer.Option("--rationale")] = None,
+) -> None:
     """Disable a family, suppressing history-driven recurring prefill."""
-    emit_not_implemented(f"history disable {family_id}")
+    try:
+        paths = resolve_paths()
+        result = run_disable(paths, family_id, rationale)
+    except (MaintenanceError, LockHeldError) as exc:
+        emit_maintenance_error(f"history disable {family_id}", exc)
+    typer.echo(json.dumps(result, sort_keys=True))
 
 
 @history_app.command("enable")
-def history_enable(family_id: str) -> None:
+def history_enable(
+    family_id: str,
+    rationale: Annotated[str | None, typer.Option("--rationale")] = None,
+) -> None:
     """Re-enable a disabled family."""
-    emit_not_implemented(f"history enable {family_id}")
+    try:
+        paths = resolve_paths()
+        result = run_enable(paths, family_id, rationale)
+    except (MaintenanceError, LockHeldError) as exc:
+        emit_maintenance_error(f"history enable {family_id}", exc)
+    typer.echo(json.dumps(result, sort_keys=True))
 
 
 @blacklist_app.command("product")
-def history_blacklist_product(product_id: str) -> None:
+def history_blacklist_product(
+    product_id: str,
+    rationale: Annotated[str | None, typer.Option("--rationale")] = None,
+) -> None:
     """Block an exact product from all automatic selection."""
-    emit_not_implemented(f"history blacklist product {product_id}")
+    try:
+        paths = resolve_paths()
+        result = run_blacklist_product(paths, product_id, rationale)
+    except (MaintenanceError, LockHeldError) as exc:
+        emit_maintenance_error(f"history blacklist product {product_id}", exc)
+    typer.echo(json.dumps(result, sort_keys=True))
 
 
 @blacklist_app.command("family")
-def history_blacklist_family(family_id: str) -> None:
+def history_blacklist_family(
+    family_id: str,
+    rationale: Annotated[str | None, typer.Option("--rationale")] = None,
+) -> None:
     """Block every member of a family everywhere."""
-    emit_not_implemented(f"history blacklist family {family_id}")
+    try:
+        paths = resolve_paths()
+        result = run_blacklist_family(paths, family_id, rationale)
+    except (MaintenanceError, LockHeldError) as exc:
+        emit_maintenance_error(f"history blacklist family {family_id}", exc)
+    typer.echo(json.dumps(result, sort_keys=True))
 
 
 @unblacklist_app.command("product")
-def history_unblacklist_product(product_id: str) -> None:
+def history_unblacklist_product(
+    product_id: str,
+    rationale: Annotated[str | None, typer.Option("--rationale")] = None,
+) -> None:
     """Remove an explicit product blacklist."""
-    emit_not_implemented(f"history unblacklist product {product_id}")
+    try:
+        paths = resolve_paths()
+        result = run_unblacklist_product(paths, product_id, rationale)
+    except (MaintenanceError, LockHeldError) as exc:
+        emit_maintenance_error(f"history unblacklist product {product_id}", exc)
+    typer.echo(json.dumps(result, sort_keys=True))
 
 
 @unblacklist_app.command("family")
-def history_unblacklist_family(family_id: str) -> None:
+def history_unblacklist_family(
+    family_id: str,
+    rationale: Annotated[str | None, typer.Option("--rationale")] = None,
+) -> None:
     """Remove an explicit family blacklist."""
-    emit_not_implemented(f"history unblacklist family {family_id}")
+    try:
+        paths = resolve_paths()
+        result = run_unblacklist_family(paths, family_id, rationale)
+    except (MaintenanceError, LockHeldError) as exc:
+        emit_maintenance_error(f"history unblacklist family {family_id}", exc)
+    typer.echo(json.dumps(result, sort_keys=True))
 
 
 @family_app.command("link")
-def history_family_link(product_id: str, family_id: str) -> None:
+def history_family_link(
+    product_id: str,
+    family_id: str,
+    rationale: Annotated[str | None, typer.Option("--rationale")] = None,
+) -> None:
     """Link an exact product into a family."""
-    emit_not_implemented(f"history family link {product_id} {family_id}")
+    try:
+        paths = resolve_paths()
+        result = run_family_link(paths, product_id, family_id, rationale)
+    except (MaintenanceError, LockHeldError) as exc:
+        emit_maintenance_error(f"history family link {product_id} {family_id}", exc)
+    typer.echo(json.dumps(result, sort_keys=True))
 
 
 @family_app.command("unlink")
-def history_family_unlink(product_id: str) -> None:
+def history_family_unlink(
+    product_id: str,
+    rationale: Annotated[str | None, typer.Option("--rationale")] = None,
+) -> None:
     """Remove a product from its family."""
-    emit_not_implemented(f"history family unlink {product_id}")
+    try:
+        paths = resolve_paths()
+        result = run_family_unlink(paths, product_id, rationale)
+    except (MaintenanceError, LockHeldError) as exc:
+        emit_maintenance_error(f"history family unlink {product_id}", exc)
+    typer.echo(json.dumps(result, sort_keys=True))
 
 
 @family_app.command("merge")
-def history_family_merge(source_family_id: str, target_family_id: str) -> None:
+def history_family_merge(
+    source_family_id: str,
+    target_family_id: str,
+    rationale: Annotated[str | None, typer.Option("--rationale")] = None,
+) -> None:
     """Merge one family into another."""
-    emit_not_implemented(f"history family merge {source_family_id} {target_family_id}")
+    try:
+        paths = resolve_paths()
+        result = run_family_merge(paths, source_family_id, target_family_id, rationale)
+    except (MaintenanceError, LockHeldError) as exc:
+        emit_maintenance_error(f"history family merge {source_family_id} {target_family_id}", exc)
+    typer.echo(json.dumps(result, sort_keys=True))
 
 
 @history_app.command("set-category")
-def history_set_category(product_or_family_id: str, category: str) -> None:
+def history_set_category(
+    product_or_family_id: str,
+    category: str,
+    rationale: Annotated[str | None, typer.Option("--rationale")] = None,
+) -> None:
     """Explicitly assign a normalized category."""
-    emit_not_implemented(f"history set-category {product_or_family_id} {category}")
+    try:
+        paths = resolve_paths()
+        result = run_set_category(paths, product_or_family_id, category, rationale)
+    except (MaintenanceError, LockHeldError) as exc:
+        emit_maintenance_error(f"history set-category {product_or_family_id} {category}", exc)
+    typer.echo(json.dumps(result, sort_keys=True))
 
 
 @category_app.command("rename")
-def history_category_rename(old_name: str, new_name: str) -> None:
+def history_category_rename(
+    old_name: str,
+    new_name: str,
+    rationale: Annotated[str | None, typer.Option("--rationale")] = None,
+) -> None:
     """Rename a normalized category transactionally."""
-    emit_not_implemented(f"history category rename {old_name} {new_name}")
+    try:
+        paths = resolve_paths()
+        result = run_category_rename(paths, old_name, new_name, rationale)
+    except (MaintenanceError, LockHeldError) as exc:
+        emit_maintenance_error(f"history category rename {old_name} {new_name}", exc)
+    typer.echo(json.dumps(result, sort_keys=True))
 
 
 @recipes_app.command("add-file")

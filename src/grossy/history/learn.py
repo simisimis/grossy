@@ -26,6 +26,11 @@ from datetime import date, datetime, timedelta
 from typing import Any, cast
 from zoneinfo import ZoneInfo
 
+from grossy.history.maintenance import (
+    family_has_recurrence_override,
+    product_has_explicit_unlink_override,
+)
+from grossy.history.policy import product_gate
 from grossy.history.proposal import (
     FAMILY_LINKS_SCHEMA_NAME,
     FAMILY_LINKS_SCHEMA_VERSION,
@@ -399,9 +404,15 @@ def run_inference(conn: sqlite3.Connection, now: str) -> InferenceSummary:
     # may be auto-linked (FR-43: the initial primary is inferred when a family
     # is created; FR-44: subsequent synchronization must not recalculate or
     # promote the primary automatically).
+    #
+    # FR-68: a manually unlinked product (explicit empty family_id override)
+    # must not be re-linked by inference. Skip such products entirely so no
+    # family is created and the product is not eligible for auto-linking.
     families_created = 0
     newly_created: set[str] = set()
     for product_row_id, retailer_id, name, _category_id in product_rows:
+        if product_has_explicit_unlink_override(conn, cast(str, retailer_id)):
+            continue
         _family_row_id, created = _ensure_family(
             conn, cast(int, product_row_id), f"fam-{retailer_id}", cast(str, name), now
         )
@@ -490,6 +501,29 @@ def _infer_family_recurrence(
     recurrence_review: list[ReviewItem] = []
     resolved_families: list[str] = []
     for group in _group_families(conn):
+        # FR-68: a manually set recurrence is never overwritten by inference.
+        if family_has_recurrence_override(conn, group.family_id):
+            # Still advance the last_purchase_date (FR-47) but keep the
+            # manually-set recurrence interval, source, and confidence.
+            combined_dates = sorted(
+                {d for member in group.member_row_ids for d in occurrences.get(member, [])}
+            )
+            if combined_dates:
+                last_purchase = max(combined_dates)
+                current = conn.execute(
+                    "SELECT last_purchase_date FROM product_families WHERE id = ?",
+                    (group.row_id,),
+                ).fetchone()
+                current_date = cast("str | None", current[0]) if current is not None else None
+                if current_date is None or current_date < last_purchase:
+                    conn.execute(
+                        "UPDATE product_families SET last_purchase_date = ?, updated_at = ? "
+                        "WHERE id = ?",
+                        (last_purchase, now, group.row_id),
+                    )
+            # Count as resolved so the review item is cleared.
+            resolved_families.append(group.family_id)
+            continue
         combined = sorted(
             {d for member in group.member_row_ids for d in occurrences.get(member, [])}
         )
@@ -884,14 +918,34 @@ class SelectionResult:
 def select_family_product(
     conn: sqlite3.Connection, family_id: str, available_product_ids: frozenset[str]
 ) -> SelectionResult | None:
-    """Select the product to add for a due family (FR-60..FR-62).
+    """Select the product to add for a due family (FR-60..FR-62, FR-63, FR-65, FR-66).
 
     The established primary is tried first; if it is not available, an approved
     policy-compliant alternative may be tried (FR-61). Selecting an alternative
     never promotes it and never changes the stored primary (FR-62), so the next
     due run tries the primary again. Returns ``None`` when no available, approved
     member exists (the caller skips and reports rather than guessing, FR-170).
+
+    Precedence (PRD 7.1): blacklist (level 2) and disabled state (FR-63) are
+    checked before returning a selection. A disabled family suppresses history-
+    driven prefill (FR-63) but does not block explicit YAML or recipe references.
+    A product or family blacklist blocks the member from automatic selection
+    (FR-65, FR-66).
     """
+    # Check family-level gates before any member selection (FR-63, FR-66).
+    family_row = conn.execute(
+        "SELECT enabled, blacklist_state FROM product_families WHERE family_id = ?",
+        (family_id,),
+    ).fetchone()
+    if family_row is None:
+        return None
+    enabled = cast(int, family_row[0])
+    family_blacklist = cast(str, family_row[1])
+    if not enabled:
+        return None  # disabled family: suppress prefill (FR-63)
+    if family_blacklist == "blacklisted":
+        return None  # family blacklist: block all members (FR-66)
+
     rows = conn.execute(
         "SELECT m.role, m.approval_state, p.retailer_product_id "
         "FROM family_members m "
@@ -905,6 +959,13 @@ def select_family_product(
         if approval_state != "approved":
             continue
         if cast(str, retailer_id) not in available_product_ids:
+            continue
+        # Shared policy gate (PRD 7.1, FR-65/FR-66): a product or family
+        # blacklist blocks this member from automatic selection. The family-level
+        # gates above already returned None for a disabled or blacklisted family,
+        # so here the gate blocks on the product blacklist (and, redundantly but
+        # safely, on a family blacklist).
+        if product_gate(conn, cast(str, retailer_id)).is_blocked:
             continue
         role_str = cast(str, role)
         if role_str == "primary":
