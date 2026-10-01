@@ -157,11 +157,6 @@ def test_help_exits_zero() -> None:
 @pytest.mark.parametrize(
     "args",
     [
-        ["recipes", "favorite", "r-1"],
-        ["recipes", "regular", "r-1"],
-        ["recipes", "weight", "r-1", "1.5"],
-        ["recipes", "enable", "r-1"],
-        ["recipes", "disable", "r-1"],
         ["weekly", "finish", "run-1"],
         ["weekly", "finish", "run-1", "--no-recipes"],
         ["weekly", "abandon", "run-1"],
@@ -201,6 +196,11 @@ def test_placeholder_fails_closed_with_versioned_json(args: list[str]) -> None:
         ["history", "family", "merge", "fam-1", "fam-2"],
         ["history", "set-category", "fam-1", "breakfast"],
         ["history", "category", "rename", "old", "new"],
+        ["recipes", "favorite", "r-1"],
+        ["recipes", "regular", "r-1"],
+        ["recipes", "weight", "r-1", "1.5"],
+        ["recipes", "enable", "r-1"],
+        ["recipes", "disable", "r-1"],
     ],
 )
 def test_maintenance_commands_fail_closed_without_database(
@@ -250,8 +250,20 @@ def test_nonnumeric_weeks_rejected_by_parser(isolated_home: GrossyPaths) -> None
         pytest.param(
             ["recipes", "weight", "r-1", "0"],
             "weight must be a positive decimal",
-            "grossy.cli.emit_not_implemented",
+            "grossy.cli.run_recipe_weight",
             id="zero-recipe-weight",
+        ),
+        pytest.param(
+            ["recipes", "weight", "r-1", "inf"],
+            "weight must be a finite decimal",
+            "grossy.cli.run_recipe_weight",
+            id="infinite-recipe-weight",
+        ),
+        pytest.param(
+            ["recipes", "weight", "r-1", "nan"],
+            "weight must be a finite decimal",
+            "grossy.cli.run_recipe_weight",
+            id="nan-recipe-weight",
         ),
         pytest.param(
             ["weekly", "removal-preflight", "run-1", "--product", "1", "--quantity", "-2"],

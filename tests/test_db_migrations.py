@@ -252,6 +252,328 @@ class TestPreMigrationBackupVerification:
         conn.close()
 
 
+class TestRevisionBoundVariantUpgrade:
+    """Upgrade from committed Task 06 history (schema 5) to revision-bound
+    ``recipe_variants`` (schema 6; PRD 12.2.6, 12.2.10).
+
+    A Task 06 database recorded the SHA-256 of the committed 001, whose
+    ``recipe_variants`` was keyed by ``recipe_id``. Rewriting 001 in place
+    made the runner reject every such database with
+    ``MigrationChecksumError`` before any pending migration ran; the
+    revision-bound conversion is therefore delivered as forward migration
+    006, and 001 is pinned byte-for-byte to the committed file.
+    """
+
+    # SHA-256 of src/grossy/migrations/001_initial.sql as committed in the
+    # Task 06 history (commit d42e99c). 001 must never be rewritten: applied
+    # databases recorded this checksum and the runner verifies it first.
+    COMMITTED_001_SHA256 = "38381d7ce04d1aa70f9a9ade8e78f1da7298c3221b5938aeb7222884f8ae809b"
+
+    def test_migration_001_is_byte_identical_to_committed_task06_history(self) -> None:
+        """Rewriting 001 would brick every Task 06 database (PRD 12.2.6)."""
+        mig001 = next(m for m in discover_migrations() if m.version == 1)
+        assert mig001.checksum == self.COMMITTED_001_SHA256
+
+    def _build_task06_v5_database(self, tmp_path: Path) -> Path:
+        """Create a database holding exactly the committed Task 06 history (001-005)."""
+        db = tmp_path / "task06.sqlite3"
+        migs_dir = tmp_path / "task06_migrations"
+        migs_dir.mkdir()
+        for mig in discover_migrations():
+            if mig.version <= 5:
+                (migs_dir / mig.filename).write_text(mig.sql)
+        run_migrations(db, tmp_path / "bk", migrations_dir=migs_dir)
+        assert get_schema_version(db) == 5
+        return db
+
+    def _seed_old_schema_variant_rows(self, db: Path) -> None:
+        """Seed the pre-006 table exactly as the committed 001 schema allows."""
+        conn = open_connection(db)
+        try:
+            now = "2026-10-01T00:00:00.000000Z"
+            for row_id, recipe_id in ((1, "a"), (2, "b"), (3, "c")):
+                conn.execute(
+                    "INSERT INTO recipes (id, recipe_id, title, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (row_id, recipe_id, f"Recipe {recipe_id}", now, now),
+                )
+            # Recipe a has a current revision (id 1); recipe c has a revision
+            # (id 2) but no current_revision_id (legacy drift -> fallback).
+            conn.execute(
+                "INSERT INTO recipe_revisions (id, recipe_id, revision_number, servings, "
+                "steps_json, accepted_at, created_at) VALUES (1, 1, 1, 3.0, '[]', ?, ?)",
+                (now, now),
+            )
+            conn.execute("UPDATE recipes SET current_revision_id = 1 WHERE id = 1")
+            conn.execute(
+                "INSERT INTO recipe_revisions (id, recipe_id, revision_number, servings, "
+                "steps_json, accepted_at, created_at) VALUES (2, 3, 1, 3.0, '[]', ?, ?)",
+                (now, now),
+            )
+            # Old-schema rows keyed by the recipe's integer row id.
+            conn.execute(
+                "INSERT INTO recipe_variants (recipe_id, linked_recipe_id, variant_type, "
+                "created_at) VALUES (1, 2, 'air_fryer', ?)",
+                (now,),
+            )
+            conn.execute(
+                "INSERT INTO recipe_variants (recipe_id, linked_recipe_id, variant_type, "
+                "created_at) VALUES (3, 2, 'other', ?)",
+                (now,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_upgrade_from_task06_history_maps_variant_rows_to_declaring_revisions(
+        self, tmp_path: Path, current_schema_version: int
+    ) -> None:
+        """A committed-history v5 database upgrades to v6 with rows re-keyed.
+
+        This also proves the checksum gate passes: if the working-tree 001
+        diverged from the committed file, ``run_migrations`` would raise
+        ``MigrationChecksumError`` before applying 006.
+        """
+        db = self._build_task06_v5_database(tmp_path)
+        self._seed_old_schema_variant_rows(db)
+
+        result = run_migrations(db, tmp_path / "bk2")
+        assert result.applied_versions == [6]
+        assert get_schema_version(db) == current_schema_version
+
+        conn = open_connection(db)
+        try:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(recipe_variants)")}
+            assert "revision_id" in columns
+            assert "recipe_id" not in columns
+            rows = conn.execute(
+                "SELECT id, revision_id, linked_recipe_id, variant_type FROM recipe_variants "
+                "ORDER BY id"
+            ).fetchall()
+            # Row 1 -> recipe a's current revision (id 1); row 2 -> recipe c's
+            # latest revision (id 2) via the revision_number fallback.
+            assert rows == [(1, 1, 2, "air_fryer"), (2, 2, 2, "other")]
+            tables = {
+                row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            }
+            assert "recipe_variants_old" not in tables
+            assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+        finally:
+            conn.close()
+
+    def test_upgraded_database_accepts_revision_bound_variant_inserts(self, tmp_path: Path) -> None:
+        """The task 07 write path works against an upgraded (not fresh) database."""
+        from grossy.recipes.proposal import RecipeVariantLink
+        from grossy.recipes.repository import insert_recipe_with_revision
+
+        db = self._build_task06_v5_database(tmp_path)
+        self._seed_old_schema_variant_rows(db)
+        run_migrations(db, tmp_path / "bk2")
+
+        conn = open_connection(db)
+        try:
+            now = "2026-10-02T00:00:00.000000Z"
+            _, revision_row_id = insert_recipe_with_revision(
+                conn,
+                recipe_id="d",
+                title="Recipe d",
+                reference_url=None,
+                source_name="user",
+                source_tier="user",
+                cuisine=None,
+                protein_class="vegetarian",
+                total_time_minutes=None,
+                servings=3.0,
+                steps=["step one"],
+                ingredients=[],
+                appliances=[],
+                variants=[RecipeVariantLink(linked_recipe_id="a", variant_type="air_fryer")],
+                base_weight=1.0,
+                is_favorite=False,
+                is_regular=True,
+                enabled=True,
+                provenance="upgrade-test",
+                now=now,
+            )
+            conn.commit()
+            row = conn.execute(
+                "SELECT v.revision_id, l.recipe_id FROM recipe_variants v "
+                "JOIN recipes l ON l.id = v.linked_recipe_id "
+                "WHERE v.revision_id = ?",
+                (revision_row_id,),
+            ).fetchone()
+            assert row is not None
+            assert row[0] == revision_row_id
+            assert row[1] == "a"
+        finally:
+            conn.close()
+
+    def test_upgrade_fails_when_variant_recipe_has_no_revision(self, tmp_path: Path) -> None:
+        """Migration 006 must fail transactionally if a variant row references a
+        recipe with no resolvable revision (PRD 12.2.9: no unauthorized
+        destructive migrations).
+
+        A schema-valid v5 database can contain a variant for a recipe that has
+        neither current_revision_id nor any rows in recipe_revisions. The new
+        schema requires revision_id NOT NULL, so such a row cannot be mapped.
+        The migration must abort before destroying the old table, preserving
+        all prior state.
+        """
+        db = self._build_task06_v5_database(tmp_path)
+
+        # Seed a recipe with NO revision (no current_revision_id, no rows in
+        # recipe_revisions) and a variant row referencing it. This is valid
+        # under the 001 schema (recipe_variants.recipe_id REFERENCES recipes(id),
+        # which does not require a revision to exist).
+        conn = open_connection(db)
+        try:
+            now = "2026-10-01T00:00:00.000000Z"
+            conn.execute(
+                "INSERT INTO recipes (id, recipe_id, title, created_at, updated_at) "
+                "VALUES (1, 'orphan', 'Orphan Recipe', ?, ?)",
+                (now, now),
+            )
+            # A linked recipe (target of the variant).
+            conn.execute(
+                "INSERT INTO recipes (id, recipe_id, title, created_at, updated_at) "
+                "VALUES (2, 'linked', 'Linked Recipe', ?, ?)",
+                (now, now),
+            )
+            # Variant row: recipe 1 (no revision) -> recipe 2.
+            conn.execute(
+                "INSERT INTO recipe_variants (recipe_id, linked_recipe_id, variant_type, "
+                "created_at) VALUES (1, 2, 'air_fryer', ?)",
+                (now,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        # Migration 006 must fail.
+        with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
+            run_migrations(db, tmp_path / "bk2")
+
+        # Verify prior state is fully preserved.
+        conn = open_connection(db)
+        try:
+            # The old table still exists (not renamed, not dropped).
+            tables = {
+                row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            }
+            assert "recipe_variants" in tables
+            assert "recipe_variants_old" not in tables
+
+            # The row values are intact.
+            row = conn.execute(
+                "SELECT id, recipe_id, linked_recipe_id, variant_type FROM recipe_variants"
+            ).fetchone()
+            assert row == (1, 1, 2, "air_fryer")
+
+            # Foreign key state is clean.
+            assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+
+            # schema_migrations has versions 1-5 but NOT 6.
+            versions = sorted(
+                row[0] for row in conn.execute("SELECT version FROM schema_migrations")
+            )
+            assert versions == [1, 2, 3, 4, 5]
+        finally:
+            conn.close()
+
+    def test_upgrade_fails_when_current_revision_id_points_to_other_recipe_revision(
+        self, tmp_path: Path
+    ) -> None:
+        """Migration 006 must reject a schema-valid v5 database where recipe A's
+        current_revision_id points to a revision owned by recipe B (P1 review
+        finding).
+
+        In 001, recipes.current_revision_id is a bare INTEGER with no foreign
+        key or ownership constraint. A corrupt or drifted row can reference
+        another recipe's revision. Migration 006 must validate ownership and
+        fall back to the declaring recipe's own revisions. If the declaring
+        recipe has no revision of its own, the migration must abort
+        transactionally, preserving all prior state.
+        """
+        db = self._build_task06_v5_database(tmp_path)
+
+        conn = open_connection(db)
+        try:
+            now = "2026-10-01T00:00:00.000000Z"
+            # Recipe A (id 1) — declaring recipe for the variant.
+            conn.execute(
+                "INSERT INTO recipes (id, recipe_id, title, created_at, updated_at) "
+                "VALUES (1, 'a', 'Recipe A', ?, ?)",
+                (now, now),
+            )
+            # Recipe B (id 2) — has a revision, is the linked target.
+            conn.execute(
+                "INSERT INTO recipes (id, recipe_id, title, created_at, updated_at) "
+                "VALUES (2, 'b', 'Recipe B', ?, ?)",
+                (now, now),
+            )
+            # Recipe B's revision (id 1, belongs to recipe B: recipe_id = 2).
+            conn.execute(
+                "INSERT INTO recipe_revisions (id, recipe_id, revision_number, servings, "
+                "steps_json, accepted_at, created_at) VALUES (1, 2, 1, 3.0, '[]', ?, ?)",
+                (now, now),
+            )
+            # Recipe A's current_revision_id incorrectly points to recipe B's
+            # revision. This is schema-valid under 001 (bare INTEGER, no FK).
+            conn.execute("UPDATE recipes SET current_revision_id = 1 WHERE id = 1")
+            # Recipe A has NO revision of its own.
+            # Variant row: recipe A (id 1) -> recipe B (id 2).
+            conn.execute(
+                "INSERT INTO recipe_variants (recipe_id, linked_recipe_id, variant_type, "
+                "created_at) VALUES (1, 2, 'air_fryer', ?)",
+                (now,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        # Migration 006 must fail: recipe A's current_revision_id points to
+        # recipe B's revision (ownership mismatch), and recipe A has no own
+        # revision for fallback.
+        with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
+            run_migrations(db, tmp_path / "bk2")
+
+        # Verify prior state is fully preserved (atomic rollback).
+        conn = open_connection(db)
+        try:
+            # The old table still exists with its original schema.
+            tables = {
+                row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            }
+            assert "recipe_variants" in tables
+            assert "recipe_variants_old" not in tables
+
+            # The original column is still recipe_id (not revision_id).
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(recipe_variants)")}
+            assert "recipe_id" in columns
+            assert "revision_id" not in columns
+
+            # The row values are intact.
+            row = conn.execute(
+                "SELECT id, recipe_id, linked_recipe_id, variant_type FROM recipe_variants"
+            ).fetchone()
+            assert row == (1, 1, 2, "air_fryer")
+
+            # Recipe A's current_revision_id is unchanged.
+            crid = conn.execute("SELECT current_revision_id FROM recipes WHERE id = 1").fetchone()
+            assert crid[0] == 1
+
+            # Foreign key state is clean.
+            assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+
+            # schema_migrations has versions 1-5 but NOT 6.
+            versions = sorted(
+                row[0] for row in conn.execute("SELECT version FROM schema_migrations")
+            )
+            assert versions == [1, 2, 3, 4, 5]
+        finally:
+            conn.close()
+
+
 class TestPrimaryFieldConsistency:
     """Review finding P2: primary_product_id is derived from family_members.
 

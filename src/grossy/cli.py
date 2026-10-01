@@ -11,6 +11,7 @@ namespace provides purge or reset (PRD 10.3.10).
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Annotated, NoReturn
 
@@ -47,6 +48,19 @@ from grossy.history.maintenance import (
 )
 from grossy.init import InitError, do_init
 from grossy.paths import resolve_paths
+from grossy.recipes import (
+    RecipeImportError,
+    RecipeMaintenanceError,
+    RecipeYamlError,
+    run_add_file,
+    run_import_apply,
+    run_import_validate,
+    run_recipe_disable,
+    run_recipe_enable,
+    run_recipe_favorite,
+    run_recipe_regular,
+    run_recipe_weight,
+)
 
 STATUS_SCHEMA_NAME = "grossy.cli.status"
 STATUS_SCHEMA_VERSION = 1
@@ -110,9 +124,30 @@ def emit_maintenance_error(command: str, exc: Exception) -> NoReturn:
 
 
 def require_positive_decimal(value: float, name: str) -> None:
+    if not math.isfinite(value):
+        typer.echo(f"grossy: {name} must be a finite decimal, got {value}", err=True)
+        raise typer.Exit(code=2)
     if value <= 0:
         typer.echo(f"grossy: {name} must be a positive decimal, got {value}", err=True)
         raise typer.Exit(code=2)
+
+
+def emit_recipe_error(command: str, exc: Exception) -> NoReturn:
+    """Fail closed for a recipe import, maintenance, or storage error."""
+    typer.echo(
+        json.dumps(
+            {
+                "schema_name": STATUS_SCHEMA_NAME,
+                "schema_version": STATUS_SCHEMA_VERSION,
+                "status": "error",
+                "command": command,
+                "detail": str(exc),
+            },
+            sort_keys=True,
+        )
+    )
+    typer.echo(f"grossy: {exc}", err=True)
+    raise typer.Exit(code=1)
 
 
 app = typer.Typer(
@@ -388,39 +423,85 @@ def history_category_rename(
 def recipes_add_file(
     recipe_file: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
 ) -> None:
-    """Import a user-authored YAML recipe."""
-    emit_not_implemented(f"recipes add-file {recipe_file}")
+    """Import a user-authored YAML recipe (no public URL required)."""
+    try:
+        paths = resolve_paths()
+        result = run_add_file(paths, recipe_file)
+    except (RecipeYamlError, RecipeImportError, RecipeMaintenanceError, LockHeldError) as exc:
+        emit_recipe_error(f"recipes add-file {recipe_file}", exc)
+    typer.echo(json.dumps(result.to_dict(), sort_keys=True))
 
 
 @recipes_app.command("favorite")
-def recipes_favorite(recipe_id: str) -> None:
+def recipes_favorite(
+    recipe_id: str,
+    rationale: Annotated[str | None, typer.Option("--rationale")] = None,
+) -> None:
     """Mark a recipe as favorite (base weight 3)."""
-    emit_not_implemented(f"recipes favorite {recipe_id}")
+    try:
+        paths = resolve_paths()
+        result = run_recipe_favorite(paths, recipe_id, rationale)
+    except (RecipeMaintenanceError, LockHeldError) as exc:
+        emit_recipe_error(f"recipes favorite {recipe_id}", exc)
+    typer.echo(json.dumps(result, sort_keys=True))
 
 
 @recipes_app.command("regular")
-def recipes_regular(recipe_id: str) -> None:
+def recipes_regular(
+    recipe_id: str,
+    rationale: Annotated[str | None, typer.Option("--rationale")] = None,
+) -> None:
     """Mark a recipe as regular (base weight 1)."""
-    emit_not_implemented(f"recipes regular {recipe_id}")
+    try:
+        paths = resolve_paths()
+        result = run_recipe_regular(paths, recipe_id, rationale)
+    except (RecipeMaintenanceError, LockHeldError) as exc:
+        emit_recipe_error(f"recipes regular {recipe_id}", exc)
+    typer.echo(json.dumps(result, sort_keys=True))
 
 
 @recipes_app.command("weight")
-def recipes_weight(recipe_id: str, weight: float) -> None:
+def recipes_weight(
+    recipe_id: str,
+    weight: float,
+    rationale: Annotated[str | None, typer.Option("--rationale")] = None,
+) -> None:
     """Set an explicit base weight for a recipe."""
     require_positive_decimal(weight, "weight")
-    emit_not_implemented(f"recipes weight {recipe_id} {weight}")
+    try:
+        paths = resolve_paths()
+        result = run_recipe_weight(paths, recipe_id, weight, rationale)
+    except (RecipeMaintenanceError, LockHeldError) as exc:
+        emit_recipe_error(f"recipes weight {recipe_id} {weight}", exc)
+    typer.echo(json.dumps(result, sort_keys=True))
 
 
 @recipes_app.command("enable")
-def recipes_enable(recipe_id: str) -> None:
+def recipes_enable(
+    recipe_id: str,
+    rationale: Annotated[str | None, typer.Option("--rationale")] = None,
+) -> None:
     """Enable a recipe."""
-    emit_not_implemented(f"recipes enable {recipe_id}")
+    try:
+        paths = resolve_paths()
+        result = run_recipe_enable(paths, recipe_id, rationale)
+    except (RecipeMaintenanceError, LockHeldError) as exc:
+        emit_recipe_error(f"recipes enable {recipe_id}", exc)
+    typer.echo(json.dumps(result, sort_keys=True))
 
 
 @recipes_app.command("disable")
-def recipes_disable(recipe_id: str) -> None:
+def recipes_disable(
+    recipe_id: str,
+    rationale: Annotated[str | None, typer.Option("--rationale")] = None,
+) -> None:
     """Disable a recipe."""
-    emit_not_implemented(f"recipes disable {recipe_id}")
+    try:
+        paths = resolve_paths()
+        result = run_recipe_disable(paths, recipe_id, rationale)
+    except (RecipeMaintenanceError, LockHeldError) as exc:
+        emit_recipe_error(f"recipes disable {recipe_id}", exc)
+    typer.echo(json.dumps(result, sort_keys=True))
 
 
 @weekly_app.command("finish")
@@ -684,16 +765,36 @@ def history_sync_apply(
 def recipes_import_validate(
     proposal: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
 ) -> None:
-    """Deterministically validate a recipe-import proposal."""
-    emit_not_implemented(f"recipes import-validate {proposal}")
+    """Dry-run preview of a recipe-import proposal (no state change)."""
+    try:
+        result = run_import_validate(proposal)
+    except (RecipeImportError, LockHeldError) as exc:
+        emit_recipe_error(f"recipes import-validate {proposal}", exc)
+    typer.echo(json.dumps(result.to_dict(), sort_keys=True))
 
 
 @recipes_app.command("import-apply")
 def recipes_import_apply(
     proposal: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
+    checksum: Annotated[
+        str,
+        typer.Option(
+            "--checksum",
+            help="The proposal checksum returned by 'recipes import-validate'.",
+        ),
+    ],
 ) -> None:
-    """Apply a validated recipe-import proposal."""
-    emit_not_implemented(f"recipes import-apply {proposal}")
+    """Apply a previewed recipe-import proposal in one transaction.
+
+    Requires the checksum returned by 'recipes import-validate' so apply is
+    bound to the exact content that was previewed (PRD 10.3.6).
+    """
+    try:
+        paths = resolve_paths()
+        result = run_import_apply(proposal, checksum, paths)
+    except (RecipeImportError, LockHeldError) as exc:
+        emit_recipe_error(f"recipes import-apply {proposal}", exc)
+    typer.echo(json.dumps(result.to_dict(), sort_keys=True))
 
 
 @recipes_app.command("refresh-diff")
