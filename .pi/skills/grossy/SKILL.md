@@ -62,8 +62,13 @@ Start a weekly run: history sync, cart baseline, recurring additions, recipe pre
 
 **Phase sequence:**
 
-1. `grossy weekly plan-prepare [--skip-history-sync]`
-2. If not `--skip-history-sync`: execute `history sync` (see above).
+1. Unless `--skip-history-sync` is explicit, execute `history sync` (see above),
+   retaining the validated listed-orders proposal. Stop on any failure.
+2. `grossy weekly plan-prepare --listed-orders <listed-proposal.json>`, or
+   `grossy weekly plan-prepare --skip-history-sync` for an explicit skip.
+   Local history alone is not comparison evidence. These CLI phases never browse.
+   Task 09 implements only the read-only baseline/preview below; subsequent
+   recipe/mutation phases remain unavailable until their tasks are delivered.
 3. Agent reads the current cart using `agent-browser`.
 4. Agent emits a `grossy.cart.observation.v1` JSON.
 5. `grossy weekly baseline-apply <run-id> <cart-observation.json>`

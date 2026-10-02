@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import math
+import sqlite3
 from pathlib import Path
 from typing import Annotated, NoReturn
 
@@ -140,6 +141,24 @@ def require_positive_decimal(value: float, name: str) -> None:
 
 def emit_recipe_error(command: str, exc: Exception) -> NoReturn:
     """Fail closed for a recipe import, maintenance, or storage error."""
+    typer.echo(
+        json.dumps(
+            {
+                "schema_name": STATUS_SCHEMA_NAME,
+                "schema_version": STATUS_SCHEMA_VERSION,
+                "status": "error",
+                "command": command,
+                "detail": str(exc),
+            },
+            sort_keys=True,
+        )
+    )
+    typer.echo(f"grossy: {exc}", err=True)
+    raise typer.Exit(code=1)
+
+
+def emit_weekly_error(command: str, exc: Exception) -> NoReturn:
+    """Fail closed for a weekly planning phase error."""
     typer.echo(
         json.dumps(
             {
@@ -871,9 +890,24 @@ def recipes_seed(
 @weekly_app.command("plan-prepare")
 def weekly_plan_prepare(
     skip_history_sync: Annotated[bool, typer.Option("--skip-history-sync")] = False,
+    listed_orders: Annotated[
+        Path | None, typer.Option("--listed-orders", exists=True, dir_okay=False)
+    ] = None,
 ) -> None:
-    """Prepare a weekly run in the planning lifecycle state."""
-    emit_not_implemented(f"weekly plan-prepare --skip-history-sync={skip_history_sync}")
+    """Prepare planning with listed-order evidence or an explicit history skip."""
+    from grossy.db.migrations import MigrationChecksumError
+    from grossy.weekly import WeeklyPlanError, run_plan_prepare
+
+    try:
+        paths = resolve_paths()
+        result = run_plan_prepare(
+            paths,
+            skip_history_sync=skip_history_sync,
+            listed_orders_path=listed_orders,
+        )
+    except (WeeklyPlanError, LockHeldError, MigrationChecksumError, OSError, sqlite3.Error) as exc:
+        emit_weekly_error(f"weekly plan-prepare --skip-history-sync={skip_history_sync}", exc)
+    typer.echo(json.dumps(result, sort_keys=True))
 
 
 @weekly_app.command("baseline-apply")
@@ -882,7 +916,22 @@ def weekly_baseline_apply(
     cart_observation: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
 ) -> None:
     """Persist the visible cart baseline for a weekly run."""
-    emit_not_implemented(f"weekly baseline-apply {run_id} {cart_observation}")
+    from grossy.db.migrations import MigrationChecksumError
+    from grossy.weekly import WeeklyPlanError, run_baseline_apply
+
+    try:
+        observation_data = json.loads(cart_observation.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        emit_weekly_error(f"weekly baseline-apply {run_id} {cart_observation}", exc)
+    try:
+        paths = resolve_paths()
+        result = run_baseline_apply(paths, run_id, observation_data)
+    except (WeeklyPlanError, LockHeldError, MigrationChecksumError, OSError, sqlite3.Error) as exc:
+        emit_weekly_error(f"weekly baseline-apply {run_id} {cart_observation}", exc)
+    typer.echo(json.dumps(result, sort_keys=True))
+    # PRD 10.3.1: non-zero exit for I/O failure while preserving SQLite truth.
+    if result.get("status") == "error":
+        raise typer.Exit(code=1)
 
 
 @weekly_app.command("recurring-preflight")

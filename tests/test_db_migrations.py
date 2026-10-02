@@ -338,7 +338,7 @@ class TestRevisionBoundVariantUpgrade:
         self._seed_old_schema_variant_rows(db)
 
         result = run_migrations(db, tmp_path / "bk2")
-        assert result.applied_versions == [6, 7]
+        assert result.applied_versions == [6, 7, 8]
         assert get_schema_version(db) == current_schema_version
 
         conn = open_connection(db)
@@ -670,4 +670,96 @@ class TestPrimaryFieldConsistency:
         conn.execute("COMMIT")
         row = conn.execute("SELECT primary_product_id FROM product_families WHERE id=1").fetchone()
         assert row[0] == 2  # updated to the new primary member
+        conn.close()
+
+
+def test_populated_v7_upgrade_preserves_history_and_run_with_verified_backup(
+    tmp_path: Path,
+) -> None:
+    """Task09 migration008 preserves predecessor data and adds report recovery."""
+    from grossy.db.snapshot import verify_sqlite_snapshot
+
+    migrations_dir = tmp_path / "v7-migrations"
+    migrations_dir.mkdir()
+    for migration in discover_migrations():
+        if migration.version <= 7:
+            (migrations_dir / migration.filename).write_text(migration.sql, encoding="utf-8")
+    db = tmp_path / "v7.sqlite3"
+    run_migrations(db, tmp_path / "initial-backups", migrations_dir=migrations_dir)
+    assert get_schema_version(db) == 7
+    now = "2026-10-01T00:00:00Z"
+    conn = open_connection(db)
+    try:
+        conn.execute(
+            "INSERT INTO products (id, retailer_product_id, canonical_url, name, "
+            "purchase_order_count, created_at, updated_at) VALUES "
+            "(1, '1111111', 'https://www.ab.gr/en/eshop/milk/p/1111111', 'Milk', 1, ?, ?)",
+            (now, now),
+        )
+        conn.execute(
+            "INSERT INTO source_orders (id, source_order_id, displayed_label, order_date, "
+            "import_timestamp, created_at) VALUES (1, '100001', '01/01/2026', '2026-01-01', ?, ?)",
+            (now, now),
+        )
+        conn.execute(
+            "INSERT INTO source_order_products (source_order_id, product_id, created_at) "
+            "VALUES (1, 1, ?)",
+            (now,),
+        )
+        conn.execute(
+            "INSERT INTO planner_runs (id, run_id, seed, lifecycle, history_sync_status, "
+            "budget_eur_cents, created_at, updated_at) "
+            "VALUES (1, 'run-predecessor', 'seed', 'planning', NULL, 10000, ?, ?)",
+            (now, now),
+        )
+        conn.execute(
+            "INSERT INTO run_cart_baselines "
+            "(run_id, product_id, quantity, price_cents, created_at) "
+            "VALUES (1, 1, 2, 250, ?)",
+            (now,),
+        )
+        conn.commit()
+        preserved_tables = (
+            "products",
+            "source_orders",
+            "source_order_products",
+            "planner_runs",
+            "run_cart_baselines",
+        )
+        predecessor = {
+            table: conn.execute(f"SELECT * FROM {table} ORDER BY id").fetchall()
+            for table in preserved_tables
+        }
+    finally:
+        conn.close()
+
+    result = run_migrations(db, tmp_path / "upgrade-backups")
+    assert result.applied_versions == [8]
+    assert result.backup_path is not None
+    assert result.backup_path.stat().st_mode & 0o777 == 0o600
+    assert verify_sqlite_snapshot(result.backup_path)[1] == 7
+    assert verify_sqlite_snapshot(db)[1] == 8
+    for path in (db, result.backup_path):
+        conn = open_connection(path)
+        try:
+            for table, expected in predecessor.items():
+                assert conn.execute(f"SELECT * FROM {table} ORDER BY id").fetchall() == expected
+            has_reports = conn.execute(
+                "SELECT name FROM sqlite_master WHERE name = 'weekly_reports'"
+            ).fetchone()
+            assert (has_reports is not None) == (path == db)
+        finally:
+            conn.close()
+    conn = open_connection(db)
+    try:
+        conn.execute(
+            "INSERT INTO weekly_reports (run_id, report_md, report_json, created_at, updated_at) "
+            "VALUES (1, 'preview', '{}', ?, ?)",
+            (now, now),
+        )
+        conn.commit()
+        assert conn.execute("SELECT report_written FROM weekly_reports").fetchone() == (0,)
+        assert conn.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+    finally:
         conn.close()

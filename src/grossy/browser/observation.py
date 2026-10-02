@@ -121,6 +121,7 @@ class CartObservation(BaseModel):
     @field_validator("lines")
     @classmethod
     def _check_lines(cls, v: list[CartObservationLine]) -> list[CartObservationLine]:
+        seen_ids: set[str] = set()
         for line in v:
             url_id = product_id_from_url(line.canonical_url)
             if url_id is not None and url_id != line.product_id:
@@ -128,6 +129,12 @@ class CartObservation(BaseModel):
                     f"product_id {line.product_id!r} disagrees with the ID "
                     f"carried by canonical_url ({url_id!r})"
                 )
+            if line.product_id in seen_ids:
+                raise ValueError(
+                    f"duplicate product_id {line.product_id!r} in observation lines; "
+                    "each stable product identity must appear at most once"
+                )
+            seen_ids.add(line.product_id)
         return v
 
 
