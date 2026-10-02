@@ -47,6 +47,13 @@ def _db(paths: GrossyPaths) -> sqlite3.Connection:
     return open_connection(paths.database_file)
 
 
+def _count_recipe(conn: sqlite3.Connection, recipe_id: str) -> int:
+    """Count recipe rows for a specific recipe_id (isolates from seeded rows)."""
+    return conn.execute(
+        "SELECT COUNT(*) FROM recipes WHERE recipe_id = ?", (recipe_id,)
+    ).fetchone()[0]
+
+
 def _seed(
     paths: GrossyPaths,
     recipe_id: str,
@@ -182,7 +189,7 @@ def test_unknown_recipe_fails_without_event(env: tuple[Path, GrossyPaths]) -> No
     conn = _db(paths)
     try:
         assert conn.execute("SELECT COUNT(*) FROM recipe_events").fetchone()[0] == 0
-        assert conn.execute("SELECT COUNT(*) FROM recipes").fetchone()[0] == 0
+        assert _count_recipe(conn, "ghost-recipe") == 0
     finally:
         conn.close()
 
@@ -263,6 +270,13 @@ def test_maintenance_does_not_touch_revisions(env: tuple[Path, GrossyPaths]) -> 
     conn = _db(paths)
     try:
         # Exactly one revision before and after: maintenance never revisions.
-        assert conn.execute("SELECT COUNT(*) FROM recipe_revisions").fetchone()[0] == 1
+        # Filtered to r-1 so the seeded recipe's revision is not counted.
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM recipe_revisions r "
+                "JOIN recipes p ON p.id = r.recipe_id WHERE p.recipe_id = 'r-1'"
+            ).fetchone()[0]
+            == 1
+        )
     finally:
         conn.close()

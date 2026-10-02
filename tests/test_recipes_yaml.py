@@ -79,6 +79,22 @@ def _db(paths: GrossyPaths) -> sqlite3.Connection:
     return open_connection(paths.database_file)
 
 
+def _count_recipe(conn: sqlite3.Connection, recipe_id: str) -> int:
+    """Count recipe rows for a specific recipe_id (isolates from seeded rows)."""
+    return conn.execute(
+        "SELECT COUNT(*) FROM recipes WHERE recipe_id = ?", (recipe_id,)
+    ).fetchone()[0]
+
+
+def _count_revisions(conn: sqlite3.Connection, recipe_id: str) -> int:
+    """Count revision rows belonging to a specific recipe_id."""
+    return conn.execute(
+        "SELECT COUNT(*) FROM recipe_revisions r "
+        "JOIN recipes p ON p.id = r.recipe_id WHERE p.recipe_id = ?",
+        (recipe_id,),
+    ).fetchone()[0]
+
+
 # --- strict YAML validation (pure, no DB) --------------------------------------
 
 
@@ -206,9 +222,16 @@ def test_yaml_import_without_url_defaults_to_user_tier(env: tuple[Path, GrossyPa
 
     conn = _db(paths)
     try:
-        row = conn.execute("SELECT reference_url, source_name, source_tier FROM recipes").fetchone()
+        row = conn.execute(
+            "SELECT reference_url, source_name, source_tier FROM recipes "
+            "WHERE recipe_id = 'mama-sunday-roast'"
+        ).fetchone()
         assert row == (None, "user", "user")
-        revision = conn.execute("SELECT servings, provenance FROM recipe_revisions").fetchone()
+        revision = conn.execute(
+            "SELECT servings, provenance FROM recipe_revisions r "
+            "JOIN recipes p ON p.id = r.recipe_id "
+            "WHERE p.recipe_id = 'mama-sunday-roast'"
+        ).fetchone()
         assert revision[1] == "user-file"
         # Explicit servings in the file are used as the source servings.
         assert revision[0] == 4.0
@@ -224,7 +247,11 @@ def test_yaml_omitted_servings_default_to_household_target(env: tuple[Path, Gros
     conn = _db(paths)
     try:
         # do_init writes the sample config whose household recipe_servings is 3.
-        revision = conn.execute("SELECT servings FROM recipe_revisions").fetchone()
+        revision = conn.execute(
+            "SELECT servings FROM recipe_revisions r "
+            "JOIN recipes p ON p.id = r.recipe_id "
+            "WHERE p.recipe_id = 'mama-sunday-roast'"
+        ).fetchone()
         assert revision[0] == 3.0
     finally:
         conn.close()
@@ -261,9 +288,11 @@ def test_yaml_collision_rejected_state_unchanged(env: tuple[Path, GrossyPaths]) 
         run_add_file(paths, second)
     conn = _db(paths)
     try:
-        assert conn.execute("SELECT COUNT(*) FROM recipes").fetchone()[0] == 1
-        assert conn.execute("SELECT COUNT(*) FROM recipe_revisions").fetchone()[0] == 1
-        title = conn.execute("SELECT title FROM recipes").fetchone()[0]
+        assert _count_recipe(conn, "mama-sunday-roast") == 1
+        assert _count_revisions(conn, "mama-sunday-roast") == 1
+        title = conn.execute(
+            "SELECT title FROM recipes WHERE recipe_id = ?", ("mama-sunday-roast",)
+        ).fetchone()[0]
         assert title == "Mama's Sunday roast"
     finally:
         conn.close()
@@ -314,7 +343,7 @@ def test_cli_add_file_success(cli_home: tuple[Path, GrossyPaths]) -> None:
     assert stdout["recipe_id"] == "mama-sunday-roast"
     conn = _db(paths)
     try:
-        assert conn.execute("SELECT COUNT(*) FROM recipes").fetchone()[0] == 1
+        assert _count_recipe(conn, "mama-sunday-roast") == 1
     finally:
         conn.close()
 
@@ -334,6 +363,6 @@ def test_cli_add_file_invalid_fails_closed(cli_home: tuple[Path, GrossyPaths]) -
     assert "protein_class" in stdout["detail"]
     conn = _db(paths)
     try:
-        assert conn.execute("SELECT COUNT(*) FROM recipes").fetchone()[0] == 0
+        assert _count_recipe(conn, "mama-sunday-roast") == 0
     finally:
         conn.close()

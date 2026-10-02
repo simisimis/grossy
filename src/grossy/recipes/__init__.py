@@ -1,12 +1,21 @@
-"""Grossy offline recipe library (PRD FR-70..FR-77; task 07).
+"""Grossy offline recipe library (PRD FR-70..FR-102; tasks 07-08).
 
 Revisioned recipe storage, strict ``grossy.recipe.import.v1`` proposal
 validation with checksum-bound preview/apply, user-authored YAML import
-without a public URL, and local maintenance commands. Source text is
-untrusted data: only normalized facts, paraphrased (sourced) or verbatim
-(user-authored) steps, and appliance metadata are persisted (FR-72, FR-73).
+without a public URL, local maintenance commands, ordered source policy
+for explicit discovery, four approved seed recipes with controlled
+missing-seed behavior, appliance capability equivalence, variant
+preference resolution, and checksum-bound refresh diff/apply that creates
+new immutable revisions while retaining historical snapshots.
 """
 
+from grossy.recipes.discovery import (
+    PREFERRED_CUISINES,
+    SOURCE_POLICY_ORDER,
+    DiscoverResult,
+    DiscoveryError,
+    run_recipes_discover,
+)
 from grossy.recipes.imports import (
     AddFileResult,
     ImportApplyResult,
@@ -32,13 +41,51 @@ from grossy.recipes.proposal import (
     proposal_checksum,
     validate_recipe_import,
 )
+from grossy.recipes.refresh import (
+    REFRESH_SCHEMA_NAME,
+    REFRESH_SCHEMA_VERSION,
+    RecipeRefreshError,
+    RecipeRefreshPayload,
+    RecipeRefreshProposal,
+    RefreshApplyResult,
+    RefreshDiffResult,
+    run_refresh_apply,
+    run_refresh_diff,
+    run_refresh_diff_with_paths,
+    validate_recipe_refresh,
+)
 from grossy.recipes.repository import (
     RecipeStorageError,
     get_recipe_row,
     get_revision_snapshot,
     insert_recipe_with_revision,
+    insert_revision_for_existing_recipe,
     list_revisions,
     recipe_exists,
+)
+from grossy.recipes.seeds import (
+    BUNDLED_SEED_FIXTURE_DIR,
+    SEED_CONTENT_REQUIREMENTS,
+    SEED_PROVENANCE,
+    SEED_SPECS,
+    SeedImportError,
+    SeedImportResult,
+    SeedStatus,
+    run_seed_import,
+    seed_fixture_mismatches,
+)
+from grossy.recipes.variants import (
+    ASSUMED_EQUIPMENT,
+    CAPABILITY_EQUIVALENCE,
+    CONFIGURED_APPLIANCES,
+    THERMOMIX_CAPABILITIES,
+    VARIANT_PREFERENCE_ORDER,
+    ApplianceConfig,
+    VariantResolutionError,
+    appliance_satisfies_requirement,
+    check_appliance_eligibility,
+    get_appliance_config_from_yaml,
+    resolve_variant_preference,
 )
 from grossy.recipes.yaml_recipe import (
     RECIPE_YAML_SCHEMA_NAME,
@@ -49,9 +96,17 @@ from grossy.recipes.yaml_recipe import (
 )
 
 __all__ = [
+    "ASSUMED_EQUIPMENT",
     "AddFileResult",
+    "CAPABILITY_EQUIVALENCE",
+    "CONFIGURED_APPLIANCES",
+    "DiscoverResult",
+    "DiscoveryError",
     "ImportApplyResult",
     "ImportValidateResult",
+    "PREFERRED_CUISINES",
+    "REFRESH_SCHEMA_NAME",
+    "REFRESH_SCHEMA_VERSION",
     "RECIPE_IMPORT_SCHEMA_NAME",
     "RECIPE_IMPORT_SCHEMA_VERSION",
     "RECIPE_YAML_SCHEMA_NAME",
@@ -60,23 +115,52 @@ __all__ = [
     "RecipeImportProposal",
     "RecipeIngredient",
     "RecipeMaintenanceError",
+    "RecipeRefreshError",
+    "RecipeRefreshPayload",
+    "RecipeRefreshProposal",
     "RecipeStorageError",
     "RecipeYamlError",
+    "RefreshApplyResult",
+    "RefreshDiffResult",
+    "SEED_CONTENT_REQUIREMENTS",
+    "SEED_PROVENANCE",
+    "SEED_SPECS",
+    "SOURCE_POLICY_ORDER",
+    "THERMOMIX_CAPABILITIES",
+    "ApplianceConfig",
+    "BUNDLED_SEED_FIXTURE_DIR",
+    "SeedImportError",
+    "SeedImportResult",
+    "SeedStatus",
     "UserRecipe",
+    "seed_fixture_mismatches",
+    "VARIANT_PREFERENCE_ORDER",
+    "VariantResolutionError",
+    "appliance_satisfies_requirement",
+    "check_appliance_eligibility",
+    "get_appliance_config_from_yaml",
     "get_recipe_row",
     "get_revision_snapshot",
     "insert_recipe_with_revision",
+    "insert_revision_for_existing_recipe",
     "list_revisions",
     "load_recipe_yaml",
     "proposal_checksum",
     "recipe_exists",
+    "resolve_variant_preference",
     "run_add_file",
     "run_import_apply",
     "run_import_validate",
+    "run_recipes_discover",
+    "run_refresh_apply",
+    "run_refresh_diff",
+    "run_refresh_diff_with_paths",
+    "run_seed_import",
     "run_recipe_disable",
     "run_recipe_enable",
     "run_recipe_favorite",
     "run_recipe_regular",
     "run_recipe_weight",
     "validate_recipe_import",
+    "validate_recipe_refresh",
 ]

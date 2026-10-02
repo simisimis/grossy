@@ -1,0 +1,107 @@
+{
+  "schema_name": "grossy.recipe.import.v1",
+  "schema_version": 1,
+  "generated_at": "2026-09-26T12:00:00+00:00",
+  "recipe": {
+    "recipe_id": "spicy-bean-burgers",
+    "title": "Spicy bean burgers",
+    "reference_url": "https://www.bbcgoodfood.com/recipes/mexican-bean-burgers-lime-yogurt-salsa/",
+    "source_name": "BBC Good Food",
+    "source_tier": "approved_established",
+    "cuisine": "Mexican",
+    "protein_class": "vegetarian",
+    "total_time_minutes": null,
+    "servings": 6.0,
+    "ingredients": [
+      {
+        "name": "kidney beans",
+        "amount": 800.0,
+        "unit": "g",
+        "package_unit": "can",
+        "package_size": 400.0
+      },
+      {
+        "name": "breadcrumbs",
+        "amount": 100.0,
+        "unit": "g"
+      },
+      {
+        "name": "mild chilli powder",
+        "amount": 2.0,
+        "unit": "tsp"
+      },
+      {
+        "name": "coriander",
+        "amount": 1.0,
+        "unit": "bunch"
+      },
+      {
+        "name": "egg",
+        "amount": 1.0,
+        "unit": "pc",
+        "indivisible": true
+      },
+      {
+        "name": "fresh salsa",
+        "amount": 200.0,
+        "unit": "g"
+      },
+      {
+        "name": "natural yogurt",
+        "amount": 150.0,
+        "unit": "ml",
+        "package_unit": "pot",
+        "package_size": 200.0
+      },
+      {
+        "name": "lime juice",
+        "amount": 0.5,
+        "unit": "pc",
+        "indivisible": true
+      },
+      {
+        "name": "wholemeal buns",
+        "amount": 6.0,
+        "unit": "pc",
+        "indivisible": true
+      },
+      {
+        "name": "avocado",
+        "amount": 1.0,
+        "unit": "pc",
+        "indivisible": true
+      },
+      {
+        "name": "red onion",
+        "amount": 1.0,
+        "unit": "pc",
+        "indivisible": true
+      },
+      {
+        "name": "salad leaves",
+        "amount": 50.0,
+        "unit": "g"
+      }
+    ],
+    "steps": [
+      "Drain the kidney beans and roughly mash in a bowl",
+      "Mix in breadcrumbs, chilli powder, chopped coriander, egg, and half the salsa",
+      "Shape the mixture into 6 patties",
+      "Grill the patties for 4-5 minutes per side until crisp",
+      "Mix remaining coriander with yogurt, lime juice, and black pepper",
+      "Serve patties in buns with salad, avocado, red onion, yogurt dressing, and remaining salsa"
+    ],
+    "appliances": [
+      {
+        "type": "conventional_oven",
+        "capability": "baking"
+      }
+    ],
+    "variants": [],
+    "base_weight": 1.0,
+    "is_favorite": false,
+    "is_regular": true,
+    "enabled": true
+  },
+  "checksum": "ae7f94ff19d8274ebeb979a50ec5ce62b3fd0037279549b46163ee317f5a175b"
+}

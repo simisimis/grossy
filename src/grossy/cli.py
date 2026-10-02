@@ -49,9 +49,12 @@ from grossy.history.maintenance import (
 from grossy.init import InitError, do_init
 from grossy.paths import resolve_paths
 from grossy.recipes import (
+    DiscoveryError,
     RecipeImportError,
     RecipeMaintenanceError,
+    RecipeRefreshError,
     RecipeYamlError,
+    SeedImportError,
     run_add_file,
     run_import_apply,
     run_import_validate,
@@ -60,6 +63,9 @@ from grossy.recipes import (
     run_recipe_favorite,
     run_recipe_regular,
     run_recipe_weight,
+    run_recipes_discover,
+    run_refresh_apply,
+    run_seed_import,
 )
 
 STATUS_SCHEMA_NAME = "grossy.cli.status"
@@ -801,16 +807,65 @@ def recipes_import_apply(
 def recipes_refresh_diff(
     proposal: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
 ) -> None:
-    """Produce a refresh diff preview for a recipe."""
-    emit_not_implemented(f"recipes refresh-diff {proposal}")
+    """Produce a refresh diff preview for a recipe (FR-78)."""
+    try:
+        paths = resolve_paths()
+        from grossy.recipes.refresh import run_refresh_diff_with_paths
+
+        result = run_refresh_diff_with_paths(proposal, paths)
+    except (RecipeRefreshError, LockHeldError) as exc:
+        emit_recipe_error(f"recipes refresh-diff {proposal}", exc)
+    typer.echo(json.dumps(result.to_dict(), sort_keys=True))
 
 
 @recipes_app.command("refresh-apply")
 def recipes_refresh_apply(
     proposal: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
+    checksum: Annotated[
+        str,
+        typer.Option(
+            "--checksum",
+            help="The proposal checksum returned by 'recipes refresh-diff'.",
+        ),
+    ],
 ) -> None:
-    """Apply a validated recipe refresh as a new revision."""
-    emit_not_implemented(f"recipes refresh-apply {proposal}")
+    """Apply a validated recipe refresh as a new immutable revision (FR-79)."""
+    try:
+        paths = resolve_paths()
+        result = run_refresh_apply(proposal, checksum, paths)
+    except (RecipeRefreshError, LockHeldError) as exc:
+        emit_recipe_error(f"recipes refresh-apply {proposal}", exc)
+    typer.echo(json.dumps(result.to_dict(), sort_keys=True))
+
+
+@recipes_app.command("discover")
+def recipes_discover(
+    from_classes: Annotated[
+        str, typer.Option("--from", help="Comma-separated class list or 'all'.")
+    ],
+) -> None:
+    """Report the ordered source policy for explicit recipe discovery (FR-81)."""
+    try:
+        result = run_recipes_discover(from_classes)
+    except DiscoveryError as exc:
+        emit_recipe_error(f"recipes discover --from {from_classes}", exc)
+    typer.echo(json.dumps(result.to_dict(), sort_keys=True))
+
+
+@recipes_app.command("seed")
+def recipes_seed(
+    fixture_dir: Annotated[
+        Path,
+        typer.Option("--fixture-dir", exists=True, file_okay=False),
+    ],
+) -> None:
+    """Import the four approved seed recipes from sanitized fixtures (FR-86..FR-88)."""
+    try:
+        paths = resolve_paths()
+        result = run_seed_import(paths, fixture_dir)
+    except (SeedImportError, LockHeldError) as exc:
+        emit_recipe_error("recipes seed", exc)
+    typer.echo(json.dumps(result.to_dict(), sort_keys=True))
 
 
 @weekly_app.command("plan-prepare")

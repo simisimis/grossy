@@ -99,6 +99,8 @@ EXPECTED_COMMANDS = frozenset(
         "recipes import-apply",
         "recipes refresh-diff",
         "recipes refresh-apply",
+        "recipes discover",
+        "recipes seed",
         "weekly finish",
         "weekly abandon",
         "weekly plan-prepare",

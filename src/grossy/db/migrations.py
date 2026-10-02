@@ -124,6 +124,11 @@ def run_migrations(
     conn = _sqlite3.connect(str(db_path), isolation_level=None)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    # The backup that this specific attempt created and verified. It stays
+    # None until after verify_sqlite_snapshot succeeds, so callers can report
+    # a truthful, attempt-bound restore point instead of scanning the backup
+    # directory for unrelated or unverified files (PRD 12.2.4, 18).
+    verified_backup: Path | None = None
     try:
         _ensure_migrations_table(conn)
         applied = _get_applied(conn)
@@ -152,6 +157,7 @@ def run_migrations(
         backup_path.parent.mkdir(parents=True, exist_ok=True)
         _backup_database(conn, backup_path)
         verify_sqlite_snapshot(backup_path)
+        verified_backup = backup_path
 
         applied_now: list[int] = []
         for mig in pending:
@@ -167,6 +173,14 @@ def run_migrations(
             total_applied=len(applied) + len(applied_now),
             backup_path=backup_path,
         )
+    except Exception as exc:
+        # Attach the attempt-bound verified backup (None until created and
+        # verified) to the propagating exception so a caller can report the
+        # restore point for *this* migration attempt only. A checksum mismatch
+        # (which aborts before any backup) and a failed backup verification
+        # both leave verified_backup as None.
+        exc.verified_backup_path = verified_backup  # type: ignore[attr-defined]
+        raise
     finally:
         conn.close()
 

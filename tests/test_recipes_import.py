@@ -120,6 +120,32 @@ def _db(paths: GrossyPaths) -> sqlite3.Connection:
     return open_connection(paths.database_file)
 
 
+def _count_recipe(conn: sqlite3.Connection, recipe_id: str) -> int:
+    """Count recipe rows for a specific recipe_id (isolates from seeded rows)."""
+    return conn.execute(
+        "SELECT COUNT(*) FROM recipes WHERE recipe_id = ?", (recipe_id,)
+    ).fetchone()[0]
+
+
+def _count_revisions(conn: sqlite3.Connection, recipe_id: str) -> int:
+    """Count revision rows belonging to a specific recipe_id."""
+    return conn.execute(
+        "SELECT COUNT(*) FROM recipe_revisions r "
+        "JOIN recipes p ON p.id = r.recipe_id WHERE p.recipe_id = ?",
+        (recipe_id,),
+    ).fetchone()[0]
+
+
+def _count_variants(conn: sqlite3.Connection, recipe_id: str) -> int:
+    """Count variant rows declared by a specific recipe_id."""
+    return conn.execute(
+        "SELECT COUNT(*) FROM recipe_variants v "
+        "JOIN recipe_revisions r ON r.id = v.revision_id "
+        "JOIN recipes p ON p.id = r.recipe_id WHERE p.recipe_id = ?",
+        (recipe_id,),
+    ).fetchone()[0]
+
+
 def _apply(path: Path, paths: GrossyPaths):
     """Preview then apply with the checksum the preview returned (FR-74/10.3.6)."""
     checksum = run_import_validate(path).to_dict()["proposal_checksum"]
@@ -189,7 +215,7 @@ def test_tampered_file_cannot_be_applied(env: tuple[Path, GrossyPaths]) -> None:
         run_import_apply(path, accepted, paths)
     conn = _db(paths)
     try:
-        assert conn.execute("SELECT COUNT(*) FROM recipes").fetchone()[0] == 0
+        assert _count_recipe(conn, "air-fryer-salmon") == 0
     finally:
         conn.close()
 
@@ -204,7 +230,7 @@ def test_apply_requires_accepted_preview_checksum(env: tuple[Path, GrossyPaths])
         run_import_apply(path, "0" * 64, paths)
     conn = _db(paths)
     try:
-        assert conn.execute("SELECT COUNT(*) FROM recipes").fetchone()[0] == 0
+        assert _count_recipe(conn, "air-fryer-salmon") == 0
     finally:
         conn.close()
 
@@ -226,7 +252,7 @@ def test_edited_and_rechecksummed_proposal_cannot_be_applied(env: tuple[Path, Gr
         run_import_apply(path, accepted, paths)
     conn = _db(paths)
     try:
-        assert conn.execute("SELECT COUNT(*) FROM recipes").fetchone()[0] == 0
+        assert _count_recipe(conn, "air-fryer-salmon") == 0
     finally:
         conn.close()
 
@@ -447,7 +473,8 @@ def test_apply_persists_offline_revision(env: tuple[Path, GrossyPaths]) -> None:
         recipe = conn.execute(
             "SELECT title, reference_url, source_name, source_tier, cuisine, "
             "protein_class, total_time_minutes, current_revision_id, base_weight, "
-            "is_favorite, is_regular, enabled FROM recipes"
+            "is_favorite, is_regular, enabled FROM recipes "
+            "WHERE recipe_id = 'air-fryer-salmon'"
         ).fetchone()
         assert recipe is not None
         assert recipe[0] == "Air-fryer ginger-and-soy salmon with broccoli"
@@ -462,15 +489,19 @@ def test_apply_persists_offline_revision(env: tuple[Path, GrossyPaths]) -> None:
         assert (recipe[8], recipe[9], recipe[10], recipe[11]) == (1.0, 0, 1, 1)
 
         revision = conn.execute(
-            "SELECT revision_number, servings, provenance FROM recipe_revisions"
+            "SELECT revision_number, servings, provenance FROM recipe_revisions r "
+            "JOIN recipes p ON p.id = r.recipe_id WHERE p.recipe_id = 'air-fryer-salmon'"
         ).fetchone()
         assert revision[0] == 1
         assert revision[1] == 2.0
         assert revision[2] == "url-import"
 
         ingredients = conn.execute(
-            "SELECT ingredient_name, amount, unit, pantry_eligible, indivisible "
-            "FROM recipe_ingredients ORDER BY id"
+            "SELECT i.ingredient_name, i.amount, i.unit, i.pantry_eligible, i.indivisible "
+            "FROM recipe_ingredients i "
+            "JOIN recipe_revisions r ON r.id = i.revision_id "
+            "JOIN recipes p ON p.id = r.recipe_id "
+            "WHERE p.recipe_id = 'air-fryer-salmon' ORDER BY i.id"
         ).fetchall()
         assert ingredients[0][:3] == ("salmon fillet", 400.0, "g")
         assert ingredients[1][4] == 1  # broccoli indivisible
@@ -503,8 +534,8 @@ def test_apply_rejects_second_import_of_same_id(env: tuple[Path, GrossyPaths]) -
         _apply(path, paths)
     conn = _db(paths)
     try:
-        assert conn.execute("SELECT COUNT(*) FROM recipes").fetchone()[0] == 1
-        assert conn.execute("SELECT COUNT(*) FROM recipe_revisions").fetchone()[0] == 1
+        assert _count_recipe(conn, "air-fryer-salmon") == 1
+        assert _count_revisions(conn, "air-fryer-salmon") == 1
     finally:
         conn.close()
 
@@ -518,9 +549,9 @@ def test_apply_variant_to_unknown_recipe_leaves_nothing(env: tuple[Path, GrossyP
         _apply(path, paths)
     conn = _db(paths)
     try:
-        assert conn.execute("SELECT COUNT(*) FROM recipes").fetchone()[0] == 0
-        assert conn.execute("SELECT COUNT(*) FROM recipe_revisions").fetchone()[0] == 0
-        assert conn.execute("SELECT COUNT(*) FROM recipe_variants").fetchone()[0] == 0
+        assert _count_recipe(conn, "air-fryer-salmon") == 0
+        assert _count_revisions(conn, "air-fryer-salmon") == 0
+        assert _count_variants(conn, "air-fryer-salmon") == 0
     finally:
         conn.close()
 
@@ -679,7 +710,7 @@ def test_cli_import_apply_success(cli_home: tuple[Path, GrossyPaths]) -> None:
     assert stdout["revision_number"] == 1
     conn = _db(paths)
     try:
-        assert conn.execute("SELECT COUNT(*) FROM recipes").fetchone()[0] == 1
+        assert _count_recipe(conn, "air-fryer-salmon") == 1
     finally:
         conn.close()
 
@@ -692,7 +723,7 @@ def test_cli_import_apply_requires_checksum_option(cli_home: tuple[Path, GrossyP
     assert result.exit_code == 2
     conn = _db(paths)
     try:
-        assert conn.execute("SELECT COUNT(*) FROM recipes").fetchone()[0] == 0
+        assert _count_recipe(conn, "air-fryer-salmon") == 0
     finally:
         conn.close()
 
@@ -710,7 +741,7 @@ def test_cli_import_apply_wrong_preview_checksum_fails_closed(
     assert "accepted preview checksum" in stdout["detail"]
     conn = _db(paths)
     try:
-        assert conn.execute("SELECT COUNT(*) FROM recipes").fetchone()[0] == 0
+        assert _count_recipe(conn, "air-fryer-salmon") == 0
     finally:
         conn.close()
 
@@ -728,6 +759,6 @@ def test_cli_import_apply_tampered_fails_closed(cli_home: tuple[Path, GrossyPath
     assert "checksum does not match" in stdout["detail"]
     conn = _db(paths)
     try:
-        assert conn.execute("SELECT COUNT(*) FROM recipes").fetchone()[0] == 0
+        assert _count_recipe(conn, "air-fryer-salmon") == 0
     finally:
         conn.close()

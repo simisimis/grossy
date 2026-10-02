@@ -141,8 +141,8 @@ def insert_recipe_with_revision(
         conn.execute(
             "INSERT INTO recipe_revisions (recipe_id, revision_number, source_name, "
             "reference_url, cuisine, servings, total_time_minutes, steps_json, "
-            "provenance, accepted_at, created_at) "
-            "VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "provenance, accepted_at, created_at, title, source_tier, protein_class) "
+            "VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 recipe_row_id,
                 source_name,
@@ -154,6 +154,9 @@ def insert_recipe_with_revision(
                 provenance,
                 now,
                 now,
+                title,
+                source_tier,
+                protein_class,
             ),
         ).lastrowid,
     )
@@ -223,7 +226,7 @@ def list_revisions(conn: sqlite3.Connection, recipe_id: str) -> list[dict[str, A
     rows = conn.execute(
         "SELECT r.id, r.revision_number, r.source_name, r.reference_url, r.cuisine, "
         "r.servings, r.total_time_minutes, r.steps_json, r.provenance, r.accepted_at, "
-        "r.created_at "
+        "r.created_at, r.title, r.source_tier, r.protein_class "
         "FROM recipe_revisions r JOIN recipes p ON p.id = r.recipe_id "
         "WHERE p.recipe_id = ? ORDER BY r.revision_number",
         (recipe_id,),
@@ -241,6 +244,9 @@ def list_revisions(conn: sqlite3.Connection, recipe_id: str) -> list[dict[str, A
             "provenance": row[8],
             "accepted_at": cast(str, row[9]),
             "created_at": cast(str, row[10]),
+            "title": row[11],
+            "source_tier": row[12],
+            "protein_class": row[13],
         }
         for row in rows
     ]
@@ -250,12 +256,13 @@ def get_revision_snapshot(conn: sqlite3.Connection, revision_id: int) -> dict[st
     """Return the exact persisted snapshot of one immutable revision.
 
     This is what a historical run keeps referencing (FR-80): the stored
-    steps, ingredients, appliance requirements, and revision-bound variant
-    links byte-for-byte, with no re-derivation from the current recipe state.
+    steps, ingredients, appliance requirements, variant links, and provenance
+    byte-for-byte, with no re-derivation from the current recipe state.
     """
     revision = conn.execute(
         "SELECT id, recipe_id, revision_number, servings, total_time_minutes, "
-        "steps_json FROM recipe_revisions WHERE id = ?",
+        "steps_json, title, source_tier, protein_class, provenance "
+        "FROM recipe_revisions WHERE id = ?",
         (revision_id,),
     ).fetchone()
     if revision is None:
@@ -285,6 +292,10 @@ def get_revision_snapshot(conn: sqlite3.Connection, revision_id: int) -> dict[st
         "servings": cast(float, revision[3]),
         "total_time_minutes": revision[4],
         "steps": json.loads(cast(str, revision[5])),
+        "title": revision[6],
+        "source_tier": revision[7],
+        "protein_class": revision[8],
+        "provenance": revision[9],
         "ingredients": [
             {
                 "name": cast(str, row[0]),
@@ -322,3 +333,145 @@ def _revision_recipe_id(conn: sqlite3.Connection, revision_id: int) -> str:
         (revision_id,),
     ).fetchone()
     return cast(str, row[0]) if row is not None else ""
+
+
+def insert_revision_for_existing_recipe(
+    conn: sqlite3.Connection,
+    *,
+    recipe_id: str,
+    title: str,
+    reference_url: str | None,
+    source_name: str,
+    source_tier: str,
+    cuisine: str | None,
+    protein_class: str,
+    total_time_minutes: int | None,
+    servings: float,
+    steps: list[str],
+    ingredients: list[RecipeIngredient],
+    appliances: list[ApplianceRequirement],
+    variants: list[RecipeVariantLink],
+    provenance: str,
+    now: str,
+) -> tuple[int, int]:
+    """Create a new immutable revision for an existing recipe (FR-79, FR-80).
+
+    Must run inside the caller's open transaction. The recipe must already
+    exist (unlike :func:`insert_recipe_with_revision` which creates it).
+    The new revision gets the next sequence number; the recipe's
+    ``current_revision_id`` is updated to point to it. All prior revisions
+    are retained unchanged (FR-79, FR-80).
+
+    Returns ``(revision_row_id, revision_number)``.
+    """
+    recipe_row_id = _get_recipe_row_id(conn, recipe_id)
+    if recipe_row_id is None:
+        raise RecipeStorageError(f"recipe {recipe_id!r} does not exist; import it first")
+
+    # Determine the next revision number
+    row = conn.execute(
+        "SELECT MAX(revision_number) FROM recipe_revisions WHERE recipe_id = ?",
+        (recipe_row_id,),
+    ).fetchone()
+    max_num = cast(int, row[0]) if row and row[0] is not None else 0
+    next_number = max_num + 1
+
+    # Validate variant links reference known recipes
+    for variant in variants:
+        if _get_recipe_row_id(conn, variant.linked_recipe_id) is None:
+            raise RecipeStorageError(
+                f"variant link references unknown recipe "
+                f"{variant.linked_recipe_id!r}; import the linked recipe first"
+            )
+
+    revision_row_id = cast(
+        int,
+        conn.execute(
+            "INSERT INTO recipe_revisions (recipe_id, revision_number, source_name, "
+            "reference_url, cuisine, servings, total_time_minutes, steps_json, "
+            "provenance, accepted_at, created_at, title, source_tier, protein_class) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                recipe_row_id,
+                next_number,
+                source_name,
+                reference_url,
+                cuisine,
+                servings,
+                total_time_minutes,
+                json.dumps(steps, ensure_ascii=False),
+                provenance,
+                now,
+                now,
+                title,
+                source_tier,
+                protein_class,
+            ),
+        ).lastrowid,
+    )
+
+    # Update the recipe row to reflect the new current revision's identity fields
+    conn.execute(
+        "UPDATE recipes SET title = ?, reference_url = ?, source_name = ?, "
+        "source_tier = ?, cuisine = ?, protein_class = ?, total_time_minutes = ?, "
+        "current_revision_id = ?, updated_at = ? WHERE id = ?",
+        (
+            title,
+            reference_url,
+            source_name,
+            source_tier,
+            cuisine,
+            protein_class,
+            total_time_minutes,
+            revision_row_id,
+            now,
+            recipe_row_id,
+        ),
+    )
+
+    for ingredient in ingredients:
+        conn.execute(
+            "INSERT INTO recipe_ingredients (revision_id, ingredient_name, amount, "
+            "unit, pantry_eligible, indivisible, package_unit, package_size, notes) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                revision_row_id,
+                ingredient.name,
+                ingredient.amount,
+                ingredient.unit,
+                1 if ingredient.pantry_eligible else 0,
+                1 if ingredient.indivisible else 0,
+                ingredient.package_unit,
+                ingredient.package_size,
+                ingredient.notes,
+            ),
+        )
+
+    for appliance in appliances:
+        conn.execute(
+            "INSERT INTO recipe_appliance_requirements (revision_id, appliance_type, "
+            "capability, model_constraint, capacity_constraint, capacity_unit) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                revision_row_id,
+                appliance.type,
+                appliance.capability,
+                appliance.model_constraint,
+                appliance.capacity_constraint,
+                appliance.capacity_unit,
+            ),
+        )
+
+    for variant in variants:
+        conn.execute(
+            "INSERT INTO recipe_variants (revision_id, linked_recipe_id, variant_type, "
+            "created_at) VALUES (?, ?, ?, ?)",
+            (
+                revision_row_id,
+                _get_recipe_row_id(conn, variant.linked_recipe_id),
+                variant.variant_type,
+                now,
+            ),
+        )
+
+    return revision_row_id, next_number

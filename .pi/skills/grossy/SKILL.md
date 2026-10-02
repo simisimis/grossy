@@ -166,14 +166,35 @@ Import a recipe from a URL.
 4. If `--dry-run`, stop here.
 5. `grossy recipes import-apply <proposal.json>`
 
+**Stop conditions:**
+
+- Consent wall, authentication barrier, access control, robots challenge, or
+  anti-bot mechanism → stop without bypass (FR-76). Do not attempt to
+  circumvent. Report the inaccessible source and move to an approved
+  alternate source tier or request user-authored input (FR-77).
+- No silent substitution or AI generation: a missing or inaccessible source
+  is reported, not filled (FR-88).
+
 ### `recipes discover --from <class-list>`
 
 Discover recipes for the given protein classes.
 
 **Phase sequence:**
 
-1. Agent follows the ordered source policy (PRD FR-81).
-2. Agent emits discovery results for user review.
+1. `grossy recipes discover --from <class-list>`
+   - Returns the ordered source policy, within-tier preferences, preferred
+     cuisines, safety constraints (FR-76/77), and next-step guidance.
+2. Agent follows the ordered source policy from the output.
+3. Agent emits discovery results for user review.
+
+**Stop conditions:**
+
+- Consent wall, authentication barrier, access control, robots challenge, or
+  anti-bot mechanism → stop without bypass (FR-76). Do not attempt to
+  circumvent. Report the inaccessible source and move to the next tier or
+  request user-authored input (FR-77).
+- No silent substitution or AI generation: a missing source is reported, not
+  filled (FR-88).
 
 ### `recipes refresh <recipe-id> --dry-run | --apply`
 
@@ -184,8 +205,19 @@ Refresh a recipe from its source.
 1. Agent re-fetches the source page.
 2. Agent emits a `grossy.recipe.refresh.v1` proposal.
 3. `grossy recipes refresh-diff <proposal.json>`
+   - The diff output includes `proposal_checksum`.
 4. If `--dry-run`, stop here.
-5. `grossy recipes refresh-apply <proposal.json>`
+5. `grossy recipes refresh-apply <proposal.json> --checksum <proposal_checksum>`
+   - Use the exact `proposal_checksum` value returned by the diff preview
+     in step 3.
+
+**Stop conditions:**
+
+- Consent wall, authentication barrier, access control, robots challenge, or
+  anti-bot mechanism encountered while re-fetching → stop without bypass
+  (FR-76). Report the inaccessible source; do not generate a replacement.
+- If the source is no longer available, report it and suggest an approved
+  alternate source or user-authored input (FR-77).
 
 ## Phase failure rule (fail-closed)
 

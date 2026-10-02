@@ -1,8 +1,10 @@
-"""``grossy init`` implementation (PRD FR-1, FR-2, sections 12, 13).
+"""``grossy init`` implementation (PRD FR-1, FR-2, FR-86, FR-88; sections 12, 13).
 
 Creates XDG directories, sample configuration, initial database with
 migrations applied, process-lock location, and required permissions.
-Refuses to overwrite an existing configuration or database.
+Bootstraps the approved bundled seed fixtures and reports controlled
+missing seeds (never substituted or generated). Refuses to overwrite an
+existing configuration or database.
 """
 
 from __future__ import annotations
@@ -11,6 +13,7 @@ from grossy.db.lock import WriterLock
 from grossy.db.migrations import get_schema_version, run_migrations
 from grossy.fsutil import FILE_MODE, atomic_write_text, ensure_private_dir
 from grossy.paths import GrossyPaths
+from grossy.recipes.seeds import BUNDLED_SEED_FIXTURE_DIR, run_seed_import
 
 SAMPLE_CONFIG = """\
 schema_version: 1
@@ -81,6 +84,11 @@ def do_init(paths: GrossyPaths) -> dict[str, object]:
     - state directory (0700) with writer lock location
     - browser profile directory (0700)
 
+    Then bootstraps the approved bundled seed fixtures into the recipe
+    library and reports every seed's status: seeds without a bundled
+    fixture are reported as controlled missing, never substituted or
+    generated (FR-86, FR-88).
+
     Fails if config or database already exists (non-overwrite, PRD FR-2).
     """
     # FR-2: Refuse to overwrite existing config or database.
@@ -115,6 +123,14 @@ def do_init(paths: GrossyPaths) -> dict[str, object]:
 
     schema_version = get_schema_version(paths.database_file)
 
+    # Bootstrap the approved bundled seed fixtures and report controlled
+    # missing seeds (FR-86, FR-88). The report is part of the installation
+    # output: a missing seed is reported with its controlled later import
+    # path, never silently substituted or generated.
+    seed_report = run_seed_import(paths, BUNDLED_SEED_FIXTURE_DIR).to_dict()
+    seed_report.pop("schema_name", None)
+    seed_report.pop("schema_version", None)
+
     return {
         "schema_name": "grossy.init.result",
         "schema_version": 1,
@@ -125,4 +141,5 @@ def do_init(paths: GrossyPaths) -> dict[str, object]:
         "migrations_applied": result.applied_versions,
         "backups_dir": str(paths.backups_dir),
         "state_dir": str(paths.state_dir),
+        "recipe_seeds": seed_report,
     }

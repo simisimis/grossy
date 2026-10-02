@@ -338,7 +338,7 @@ class TestRevisionBoundVariantUpgrade:
         self._seed_old_schema_variant_rows(db)
 
         result = run_migrations(db, tmp_path / "bk2")
-        assert result.applied_versions == [6]
+        assert result.applied_versions == [6, 7]
         assert get_schema_version(db) == current_schema_version
 
         conn = open_connection(db)
