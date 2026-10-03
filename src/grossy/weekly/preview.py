@@ -7,11 +7,13 @@ lookup is performed. Proposal facts are explicitly unverified projections.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import unicodedata
 from decimal import ROUND_CEILING, Decimal
 from typing import Any
 
+from grossy.browser.observation import validate_cart_observation
 from grossy.config.models import GrossyConfigModel, product_id_from_url
 from grossy.history.policy import product_gate
 from grossy.weekly.plan import WeeklyPlanError
@@ -215,13 +217,26 @@ def build_recipe_preview(
     matches: dict[tuple[str, str], IngredientMatch],
 ) -> dict[str, Any]:
     baseline = {
-        r[0]: (Decimal(r[1]), r[2])
+        r[0]: (Decimal(r[1]), Decimal(r[2]) if r[2] is not None else None)
         for r in conn.execute(
             "SELECT p.retailer_product_id, b.quantity, b.price_cents FROM run_cart_baselines b "
             "JOIN products p ON p.id=b.product_id WHERE b.run_id=?",
             (snapshot["run_row_id"],),
         )
     }
+    verified = conn.execute(
+        "SELECT o.observed_json FROM run_mutation_observations o "
+        "JOIN run_mutation_manifests m ON m.id=o.manifest_id "
+        "WHERE m.run_id=? AND m.stage='recurring' AND o.failure_class='none' "
+        "ORDER BY o.id DESC LIMIT 1",
+        (snapshot["run_row_id"],),
+    ).fetchone()
+    if verified:
+        cart_observation = validate_cart_observation(json.loads(verified[0]))
+        baseline = {
+            line.product_id: (Decimal(line.quantity), Decimal(line.displayed_price_eur) * 100)
+            for line in cart_observation.lines
+        }
     remaining = {pid: qty for pid, (qty, _) in baseline.items()}
     ingredients = []
     total = Decimal(0)
@@ -260,7 +275,9 @@ def build_recipe_preview(
                 "indivisible target rounded upward"
                 if ingredient["indivisible"]
                 else "divisible culinary target retained exactly",
-                "cart credit uses immutable baseline only; recurring preview is not an addition",
+                "cart credit uses latest verified/reconciled recurring cart observation"
+                if verified
+                else "cart credit uses immutable baseline; no verified recurring observation",
                 "offline observations are unverified; no live availability or price validation",
                 "approved family fallback identity is not availability/price/hard-limit approval; "
                 "fallback is previewed, not automatically selected",

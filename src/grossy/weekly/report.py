@@ -155,6 +155,12 @@ def build_markdown_report(data: dict[str, Any]) -> str:
             "- **Projected recurring additions:** EUR "
             f"{budget.get('projected_recurring_eur', '0.00')}"
         )
+        if "verified_recurring_eur" in budget and "projected_recipe_eur" not in budget:
+            lines.append(
+                f"- **Verified recurring additions:** EUR {budget['verified_recurring_eur']}"
+            )
+        if "resulting_total_eur" in budget:
+            lines.append(f"- **Resulting visible cart:** EUR {budget['resulting_total_eur']}")
         if "projected_recipe_eur" in budget:
             lines.append(
                 f"- **Projected recipe additions:** EUR "
@@ -267,10 +273,19 @@ def build_markdown_report(data: dict[str, Any]) -> str:
             lines.append(f"- {err}")
         lines.append("")
 
+    if data.get("recurring_mutation_evidence"):
+        lines.append("## Recurring mutation evidence")
+        for evidence in data["recurring_mutation_evidence"]:
+            lines.append(f"- {json.dumps(evidence, sort_keys=True)}")
+        lines.append("")
     lines.append("---")
     lines.append(
-        "_This is a read-only preview. No cart mutation has occurred. "
-        "Baseline availability and prices come from the cart observation; recipe-match "
+        (
+            "_Recurring intent/readback evidence is recorded above. "
+            if data.get("recurring_mutation_evidence")
+            else "_This is a read-only preview. No cart mutation has occurred. "
+        )
+        + "Baseline availability and prices come from the cart observation; recipe-match "
         "availability and prices come from unverified offline recipe-options observations. "
         "Neither guarantees current live store availability or prices._"
     )

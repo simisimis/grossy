@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import json
 import sqlite3
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,7 @@ from grossy.recipes.proposal import (
     proposal_checksum,
 )
 from grossy.recipes.repository import insert_recipe_with_revision
+from grossy.weekly.mutation import run_recurring_intent, run_recurring_preflight
 from grossy.weekly.plan import WeeklyPlanError, run_baseline_apply, run_plan_prepare
 from grossy.weekly.proposal import validate_recipe_options
 from grossy.weekly.recipes import (
@@ -129,7 +131,28 @@ def prepare(paths: GrossyPaths, pids: list[str] | None = None) -> str:
         },
     )
     assert result["status"] == "success"
+    complete_recurring(paths, str(run_id), pids)
     return str(run_id)
+
+
+def complete_recurring(paths: GrossyPaths, run_id: str, pids: list[str] | None = None) -> None:
+    observation = {
+        "schema_name": "grossy.cart.observation.v1",
+        "schema_version": 1,
+        "generated_at": datetime.now(UTC).isoformat(),
+        "lines": [
+            {
+                "product_id": pid,
+                "canonical_url": f"https://www.ab.gr/en/eshop/rice/p/{pid}",
+                "quantity": 1,
+                "displayed_price_eur": "2.50",
+            }
+            for pid in pids or []
+        ],
+    }
+    accepted = run_recurring_preflight(paths, run_id, observation)
+    assert not accepted["manifest"]["additions"]
+    assert run_recurring_intent(paths, run_id, accepted["manifest"])["addition"] is None
 
 
 def stored(paths: GrossyPaths, sql: str, args: tuple[Any, ...] = ()) -> list[Any]:
@@ -370,6 +393,8 @@ def test_determinism_seen_exclusion_cross_class_scope_and_no_candidate(home: Gro
     run_id = prepare(home)
     original_baseline = stored(home, "SELECT * FROM run_cart_baselines")
     original_recurring = stored(home, "SELECT * FROM run_recurring_items")
+    original_manifests = stored(home, "SELECT * FROM run_mutation_manifests")
+    original_observations = stored(home, "SELECT * FROM run_mutation_observations")
     first = run_recipes_apply(home, run_id, proposal(run_id))
     candidates, _ = plan_snapshot(home)
     assert weighted_choice(list(reversed(candidates)), derive_seed(run_id)) == weighted_choice(
@@ -393,9 +418,9 @@ def test_determinism_seen_exclusion_cross_class_scope_and_no_candidate(home: Gro
     assert len(stored(home, "SELECT * FROM run_recipe_seen")) == 5
     assert stored(home, "SELECT * FROM run_cart_baselines") == original_baseline
     assert stored(home, "SELECT * FROM run_recurring_items") == original_recurring
+    assert stored(home, "SELECT * FROM run_mutation_manifests") == original_manifests
+    assert stored(home, "SELECT * FROM run_mutation_observations") == original_observations
     for table in (
-        "run_mutation_manifests",
-        "run_mutation_observations",
         "run_recipe_selections",
         "run_ingredient_targets",
     ):
@@ -622,6 +647,7 @@ def test_lifecycle_lock_policy_and_immutable_snapshots(home: GrossyPaths) -> Non
     )
     with WriterLock(home.state_dir), pytest.raises(LockHeldError):
         run_recipes_apply(home, run_id, proposal(run_id))
+    complete_recurring(home, run_id)
     run_recipes_apply(home, run_id, proposal(run_id))
     before = stored(home, "SELECT candidates_json FROM run_recipe_plans")
     execute(home, "UPDATE recipes SET base_weight=900, current_revision_id=NULL")

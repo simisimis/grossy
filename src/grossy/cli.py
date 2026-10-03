@@ -940,7 +940,25 @@ def weekly_recurring_preflight(
     cart_observation: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
 ) -> None:
     """Re-read the cart and validate recurring additions before mutation."""
-    emit_not_implemented(f"weekly recurring-preflight {run_id} {cart_observation}")
+    from grossy.db.migrations import MigrationChecksumError
+    from grossy.weekly.mutation import run_recurring_preflight
+    from grossy.weekly.plan import WeeklyPlanError
+
+    try:
+        data = json.loads(cart_observation.read_text(encoding="utf-8"))
+        result = run_recurring_preflight(resolve_paths(), run_id, data)
+    except (
+        ValueError,
+        WeeklyPlanError,
+        LockHeldError,
+        MigrationChecksumError,
+        OSError,
+        sqlite3.Error,
+    ) as exc:
+        emit_weekly_error("weekly recurring-preflight", exc)
+    typer.echo(json.dumps(result, sort_keys=True))
+    if result.get("status") == "error":
+        raise typer.Exit(code=1)
 
 
 @weekly_app.command("recurring-intent")
@@ -949,7 +967,25 @@ def weekly_recurring_intent(
     mutation_manifest: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
 ) -> None:
     """Persist the recurring mutation manifest before browser mutation."""
-    emit_not_implemented(f"weekly recurring-intent {run_id} {mutation_manifest}")
+    from grossy.db.migrations import MigrationChecksumError
+    from grossy.weekly.mutation import run_recurring_intent
+    from grossy.weekly.plan import WeeklyPlanError
+
+    try:
+        data = json.loads(mutation_manifest.read_text(encoding="utf-8"))
+        result = run_recurring_intent(resolve_paths(), run_id, data)
+    except (
+        ValueError,
+        WeeklyPlanError,
+        LockHeldError,
+        MigrationChecksumError,
+        OSError,
+        sqlite3.Error,
+    ) as exc:
+        emit_weekly_error("weekly recurring-intent", exc)
+    typer.echo(json.dumps(result, sort_keys=True))
+    if result.get("status") == "error":
+        raise typer.Exit(code=1)
 
 
 @weekly_app.command("recurring-observe")
@@ -958,7 +994,25 @@ def weekly_recurring_observe(
     cart_observation: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
 ) -> None:
     """Reconcile intended and observed recurring additions."""
-    emit_not_implemented(f"weekly recurring-observe {run_id} {cart_observation}")
+    from grossy.db.migrations import MigrationChecksumError
+    from grossy.weekly.mutation import run_recurring_observe
+    from grossy.weekly.plan import WeeklyPlanError
+
+    try:
+        data = json.loads(cart_observation.read_text(encoding="utf-8"))
+        result = run_recurring_observe(resolve_paths(), run_id, data)
+    except (
+        ValueError,
+        WeeklyPlanError,
+        LockHeldError,
+        MigrationChecksumError,
+        OSError,
+        sqlite3.Error,
+    ) as exc:
+        emit_weekly_error("weekly recurring-observe", exc)
+    typer.echo(json.dumps(result, sort_keys=True))
+    if result.get("status") == "error":
+        raise typer.Exit(code=1)
 
 
 @weekly_app.command("recipes-apply")
@@ -1092,7 +1146,25 @@ def weekly_resume_prepare(
     cart_observation: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
 ) -> None:
     """Reconcile persisted and live state, planning only missing positive deltas."""
-    emit_not_implemented(f"weekly resume-prepare {run_id} {cart_observation}")
+    from grossy.db.migrations import MigrationChecksumError
+    from grossy.weekly.mutation import run_resume_prepare
+    from grossy.weekly.plan import WeeklyPlanError
+
+    try:
+        data = json.loads(cart_observation.read_text(encoding="utf-8"))
+        result = run_resume_prepare(resolve_paths(), run_id, data)
+    except (
+        ValueError,
+        WeeklyPlanError,
+        LockHeldError,
+        MigrationChecksumError,
+        OSError,
+        sqlite3.Error,
+    ) as exc:
+        emit_weekly_error("weekly resume-prepare", exc)
+    typer.echo(json.dumps(result, sort_keys=True))
+    if result.get("status") == "error":
+        raise typer.Exit(code=1)
 
 
 def main() -> None:

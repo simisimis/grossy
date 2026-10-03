@@ -58,7 +58,7 @@ Synchronize the six currently observable dated AB.gr orders.
 
 ### `weekly plan [--skip-history-sync]`
 
-Start a read-only weekly run: history sync, cart baseline, recurring preview and recipe options.
+Start Stage1: history sync, whole-cart baseline, owner-confirmed recurring additions/readback, then read-only recipe options.
 
 **Phase sequence:**
 
@@ -67,12 +67,14 @@ Start a read-only weekly run: history sync, cart baseline, recurring preview and
 2. `grossy weekly plan-prepare --listed-orders <listed-proposal.json>`, or
    `grossy weekly plan-prepare --skip-history-sync` for an explicit skip.
    Local history alone is not comparison evidence. These CLI phases never browse.
-   Tasks 09–10 implement read-only baseline, recurring preview, recipe options
-   and rerolls. Mutation phases remain unavailable; do not invoke them.
+   This CLI never browses. Recipe ingredients and removal remain unavailable.
 3. Agent reads the current cart using `agent-browser`.
 4. Agent emits a `grossy.cart.observation.v1` JSON.
 5. `grossy weekly baseline-apply <run-id> <cart-observation.json>`
-6. Emit a closed `grossy.weekly.recipe-options.v1` proposal for offline
+6. Execute **Recurring additions** below. Recipe planning MUST wait for a
+   recorded recurring completion, including an accepted zero-addition intent.
+   Planning-only predecessor runs are not permission to bypass FR129.
+7. Emit a closed `grossy.weekly.recipe-options.v1` proposal for offline
    ingredient observations only. Required fields: `schema_name`,
    `schema_version: 1`, timezone-aware `generated_at`, `run_id`, `matches`,
    and `checksum` (SHA-256 of sorted compact UTF-8 JSON excluding checksum).
@@ -87,16 +89,67 @@ Start a read-only weekly run: history sync, cart baseline, recurring preview and
    ingredient/product-or-family identity. Leave unsupported matches unresolved;
    never guess ambiguous matches or invent availability/price. Proposal facts
    remain explicitly unverified offline projections.
-7. `grossy weekly recipes-apply <run-id> <recipe-proposal.json>`
+8. `grossy weekly recipes-apply <run-id> <recipe-proposal.json>`
    CLI owns full eligibility, linked variant preferences, candidates, weights,
    deterministic slots and revision/policy/match snapshots, not the agent.
-8. Reports retain baseline and recurring preview; run enters
-   `awaiting-recipe-selection` without adding recurring or recipe ingredients.
+9. Reports retain baseline and recurring mutation evidence; run enters
+   `awaiting-recipe-selection` without adding recipe ingredients.
    Identical recipes-apply retries regenerate stored reports, never replan.
    Stop on non-zero exit; SQLite retains report recovery truth after I/O failure.
 
-The future recurring mutation sequence is not enabled in this read-only phase.
-Do not invoke recurring-preflight/intent/observe or perform browser additions.
+#### Recurring additions (deterministic, fail-closed)
+
+1. Read the entire current cart and rendered current product facts without a
+   write. Emit `grossy.cart.observation.v1`; optional
+   `recurring_product_facts` is a list of closed records containing only
+   `product_id`, `canonical_url`, `displayed_price_eur` (positive two-place
+   decimal string), and `availability` (`available|unavailable|unknown`).
+   Overlapping cart/fact prices must agree; contradictory prices fail closed.
+   Use stable numeric IDs agreeing with canonical AB.gr URLs. Facts must be
+   freshly observed (within five minutes); never infer stock/price from history
+   or cart absence. Missing/unknown facts block additions and are reported.
+2. `grossy weekly recurring-preflight <run-id> <cart-observation.json>`.
+   Require exit zero, versioned accepted output, and its exact `manifest`.
+   It computes positive missing deltas with compatible credit, approved
+   unavailable-primary fallback, blacklists and hard product/line limits.
+   Baseline and excess stay untouched. It never authorizes removals or price
+   substitutions based on incomparable/unknown units.
+3. Present the exact manifest product ID, canonical URL, positive quantity,
+   current price, substitution/blocked decisions and whole-cart budget warning
+   to the owner. Require explicit cart confirmation for EACH nonempty action.
+   Denial/revocation stops without browser writes.
+4. Immediately re-read cart/facts and rerun recurring-preflight. If the proposed
+   delta or facts changed since confirmation, stop for renewed review. Use only
+   the newly accepted exact manifest (one addition maximum), including its
+   `schema_name: grossy.cart.mutation-manifest.v1`, strict version `1`,
+   timezone-aware `generated_at`, `run_id`, `stage: recurring`,
+   `preflight_checksum`, `additions`, and `checksum`. Each addition has only
+   `product_id`, `canonical_url`, positive integer `quantity`, and `price_eur`.
+   Checksum is SHA-256 of sorted compact UTF-8 JSON excluding `checksum`.
+5. `grossy weekly recurring-intent <run-id> <mutation-manifest.json>`.
+   Require exit zero and versioned `status: persisted` authorization for that
+   checksum. This persists intent and explicit incomplete-readback evidence,
+   transitions to `recurring-apply`, and rechecks accepted policy/facts binding
+   BEFORE ANY browser write. Source cart/facts must still be within five minutes
+   at intent, not merely recently accepted. Never reuse/retry an outstanding authorization.
+   A zero-addition intent records completion with no browser action.
+6. For the authorized nonempty action ONLY, add its positive quantity through
+   rendered stable identity controls. Never set an absolute cart quantity,
+   decrement, replace, remove, compensate, enter checkout, or continue on
+   authentication loss, ambiguity, unsafe exposure or anti-bot challenge.
+7. Read the entire cart back after this ONE attempted action. Attach closed
+   `mutation_result: {manifest_checksum, outcome}` to the observation, with
+   outcome `readback`, `failed`, or `incomplete`. On failure, persist safe last
+   known observation with explicit incomplete outcome; do not claim verification.
+   `grossy weekly recurring-observe <run-id> <cart-observation.json>`.
+   Require successful reconciliation; mismatch/failure stops ALL further
+   additions without compensation. Intent's incomplete evidence survives an
+   interruption even if readback cannot be submitted.
+8. Read fresh cart/facts and repeat preflight, owner confirmation, intent and
+   one-add/readback until an accepted zero-addition intent completes the phase.
+   Only then run recipes-apply. All phases fail closed on nonzero exit/malformed
+   output. The separate additive adapter is offline-testable orchestration;
+   neither CLI nor doctor launches a browser or gains implicit mutation power.
 
 **Stop conditions:**
 
@@ -165,23 +218,27 @@ Explicit bounded removal.
 
 Resume an interrupted run.
 
-**Phase sequence:**
+**Phase sequence (recurring only in Task11):**
 
-1. Agent re-reads the cart.
-2. `grossy weekly resume-prepare <run-id> <cart-observation.json>`
-3. Agent presents the exact resumed deltas from the persisted manifest
-   (product IDs and positive quantities still missing) to the user for
-   confirmation.
-4. If the user does not approve, abort; no browser mutation is performed.
-5. Agent performs missing additions via `agent-browser`.
-6. Agent re-reads the cart.
-7. Observation phase as appropriate.
-
-**Stop conditions:**
-
-- `resume-prepare` exits non-zero or returns no accepted manifest → stop before any browser action.
-- User does not approve the resumed deltas → abort; no browser mutation is performed.
-- Resume never removes unexpected excess.
+1. Re-read the whole cart and fresh current product facts, no write.
+2. `grossy weekly resume-prepare <run-id> <cart-observation.json>`.
+   Require accepted versioned output/manifest. It reconciles outstanding intent
+   against readback, preserves unexpected excess, and computes only remaining
+   positive deltas. Require a complete fresh reread (within five minutes), even
+   for cart-only observations. Never resubmit recorded failed/incomplete last-known
+   state as reconciliation; rejection leaves the outstanding intent untouched.
+   Unrelated changes or baseline loss stop for attention.
+3. Follow Recurring additions steps 3–8: explicit owner confirmation, immediate
+   re-read/preflight, durable recurring-intent, one positive addition and
+   recurring-observe. Resume preparation is NOT browser-write authorization.
+   Agent presents the exact resumed deltas from the persisted manifest
+   (product IDs and positive quantities still missing) to the user for confirmation.
+   If the user does not approve, abort; no browser mutation is performed.
+   `resume-prepare` exits non-zero or returns no accepted manifest
+   → stop before any browser action.
+4. On any failure stop additions with no compensation/removal. No recipe,
+   removal or later-stage recovery is enabled. Existing legacy recipe snapshots
+   can regenerate exact reports but never grant retrospective recurring adds.
 
 ### `recipes add <url> --dry-run | --apply`
 

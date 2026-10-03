@@ -369,12 +369,12 @@ def _save_reports(
     complete = all(s["preview"] is None or s["preview"]["cost_complete"] for s in slots)
     budget = data["budget"]
     total = (
-        Decimal(budget["baseline_subtotal_eur"])
+        Decimal(budget.get("resulting_total_eur", budget["baseline_subtotal_eur"]))
         + Decimal(budget["projected_recurring_eur"])
         + known_cost
     )
     budget.update(
-        verified_recurring_eur="0.00",
+        verified_recurring_eur=budget.get("verified_recurring_eur", "0.00"),
         verified_recipe_eur="0.00",
         projected_recipe_eur=f"{known_cost:.2f}" if complete else None,
         known_projected_recipe_eur=f"{known_cost:.2f}",
@@ -508,15 +508,24 @@ def run_recipes_apply(paths: GrossyPaths, run_id: str, data: dict[str, Any]) -> 
                     "SELECT report_json FROM weekly_reports WHERE run_id=?", (row_id,)
                 ).fetchone()
                 return _write_reports(conn, paths, row_id, run_id, json.loads(stored[0]))
-            if lifecycle != "planning" or existing or history not in ("success", "skipped"):
-                raise WeeklyPlanError(
-                    "recipes-apply requires verified planning state without an existing recipe plan"
-                )
             if (
                 conn.execute("SELECT 1 FROM weekly_reports WHERE run_id=?", (row_id,)).fetchone()
                 is None
             ):
                 raise WeeklyPlanError("immutable cart baseline must be applied before recipes")
+            if lifecycle != "recurring-apply" or existing or history not in ("success", "skipped"):
+                raise WeeklyPlanError(
+                    "recipes-apply requires verified recurring completion "
+                    "without an existing recipe plan"
+                )
+            if not conn.execute(
+                "SELECT 1 FROM run_events complete WHERE run_id=? "
+                "AND event_type='recurring-complete' AND id > "
+                "(SELECT COALESCE(MAX(id),0) FROM run_events "
+                "WHERE run_id=? AND event_type='recurring-preflight')",
+                (row_id, row_id),
+            ).fetchone():
+                raise WeeklyPlanError("recurring additions/readback must complete before recipes")
             candidates, exclusions = _candidate_snapshots(conn, row_id, config, proposal)
             now, seed = _now_utc(), derive_seed(run_id)
             conn.execute(
@@ -574,7 +583,7 @@ def run_recipes_apply(paths: GrossyPaths, run_id: str, data: dict[str, Any]) -> 
             conn.execute(
                 "INSERT INTO run_events (run_id, event_type, detail, "
                 "created_at) VALUES (?, 'recipe-preview-applied', 'read-only "
-                "planning complete; no recurring or recipe mutation', ?)",
+                "recurring completion followed by read-only recipe planning', ?)",
                 (row_id, now),
             )
             return _save_reports(conn, paths, row_id, run_id, now)

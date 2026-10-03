@@ -12,9 +12,9 @@ from __future__ import annotations
 import re
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator, model_validator
 
 from grossy.config.models import NUMERIC_ID_PATTERN, product_id_from_url
 
@@ -76,6 +76,23 @@ class CartObservationLine(BaseModel):
         return v
 
 
+class RecurringProductFact(BaseModel):
+    """Current rendered product facts; no guessed stock or historical quantities."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    product_id: str = Field(pattern=NUMERIC_ID_PATTERN)
+    canonical_url: str
+    displayed_price_eur: str
+    availability: Literal["available", "unavailable", "unknown"]
+
+
+class MutationResult(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    manifest_checksum: str = Field(pattern=r"^[0-9a-f]{64}$")
+    outcome: Literal["readback", "failed", "incomplete"]
+
+
 class CartObservation(BaseModel):
     """Versioned cart observation envelope (grossy.cart.observation.v1)."""
 
@@ -87,6 +104,39 @@ class CartObservation(BaseModel):
     schema_version: StrictInt
     generated_at: str
     lines: list[CartObservationLine]
+    recurring_product_facts: list[RecurringProductFact] = Field(default_factory=list)
+    mutation_result: MutationResult | None = None
+
+    @model_validator(mode="after")
+    def _check_current_prices(self) -> CartObservation:
+        prices = {line.product_id: Decimal(line.displayed_price_eur) for line in self.lines}
+        for fact in self.recurring_product_facts:
+            if fact.product_id in prices and prices[fact.product_id] != Decimal(
+                fact.displayed_price_eur
+            ):
+                raise ValueError("contradictory current cart and product fact prices")
+        return self
+
+    @field_validator("recurring_product_facts")
+    @classmethod
+    def _check_facts(cls, value: list[RecurringProductFact]) -> list[RecurringProductFact]:
+        cls._check_lines(
+            [
+                CartObservationLine.model_validate(
+                    {
+                        "product_id": fact.product_id,
+                        "canonical_url": fact.canonical_url,
+                        "displayed_price_eur": fact.displayed_price_eur,
+                        "quantity": 1,
+                    }
+                )
+                for fact in value
+            ]
+        )
+        for fact in value:
+            if not re.fullmatch(r"(?:0|[1-9][0-9]*)\.[0-9]{2}", fact.displayed_price_eur):
+                raise ValueError("current product price must have exactly two decimal places")
+        return value
 
     @field_validator("schema_name")
     @classmethod
