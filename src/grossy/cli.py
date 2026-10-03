@@ -967,7 +967,27 @@ def weekly_recipes_apply(
     recipe_proposal: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
 ) -> None:
     """Persist the recipe options for a weekly run."""
-    emit_not_implemented(f"weekly recipes-apply {run_id} {recipe_proposal}")
+    from grossy.db.migrations import MigrationChecksumError
+    from grossy.db.snapshot import SnapshotError
+    from grossy.weekly.plan import WeeklyPlanError
+    from grossy.weekly.recipes import run_recipes_apply
+
+    try:
+        data = json.loads(recipe_proposal.read_text(encoding="utf-8"))
+        result = run_recipes_apply(resolve_paths(), run_id, data)
+    except (
+        WeeklyPlanError,
+        LockHeldError,
+        MigrationChecksumError,
+        SnapshotError,
+        OSError,
+        sqlite3.Error,
+        ValueError,
+    ) as exc:
+        emit_weekly_error(f"weekly recipes-apply {run_id}", exc)
+    typer.echo(json.dumps(result, sort_keys=True))
+    if result.get("status") == "error":
+        raise typer.Exit(code=1)
 
 
 @weekly_app.command("reroll-apply")
@@ -977,7 +997,26 @@ def weekly_reroll_apply(
     from_classes: Annotated[str, typer.Option("--from")],
 ) -> None:
     """Reroll one recipe slot from the given classes."""
-    emit_not_implemented(f"weekly reroll-apply {run_id} {recipe_slot} --from {from_classes}")
+    from grossy.db.migrations import MigrationChecksumError
+    from grossy.db.snapshot import SnapshotError
+    from grossy.weekly.plan import WeeklyPlanError
+    from grossy.weekly.recipes import run_reroll_apply
+
+    try:
+        result = run_reroll_apply(resolve_paths(), run_id, recipe_slot, from_classes)
+    except (
+        WeeklyPlanError,
+        LockHeldError,
+        MigrationChecksumError,
+        SnapshotError,
+        OSError,
+        sqlite3.Error,
+        ValueError,
+    ) as exc:
+        emit_weekly_error(f"weekly reroll-apply {run_id} {recipe_slot}", exc)
+    typer.echo(json.dumps(result, sort_keys=True))
+    if result.get("status") == "error":
+        raise typer.Exit(code=1)
 
 
 @weekly_app.command("selection-apply")

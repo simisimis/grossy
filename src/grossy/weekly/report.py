@@ -155,7 +155,19 @@ def build_markdown_report(data: dict[str, Any]) -> str:
             "- **Projected recurring additions:** EUR "
             f"{budget.get('projected_recurring_eur', '0.00')}"
         )
-        lines.append(f"- **Projected total:** EUR {budget.get('projected_total_eur', '0.00')}")
+        if "projected_recipe_eur" in budget:
+            lines.append(
+                f"- **Projected recipe additions:** EUR "
+                f"{budget['projected_recipe_eur'] or 'unknown'}"
+            )
+            lines.append(
+                f"- **Verified recurring additions:** EUR {budget['verified_recurring_eur']}"
+            )
+            lines.append(f"- **Verified recipe additions:** EUR {budget['verified_recipe_eur']}")
+            lines.extend(f"- {assumption}" for assumption in budget["assumptions"])
+        lines.append(
+            f"- **Projected total (known costs):** EUR {budget.get('projected_total_eur', '0.00')}"
+        )
         lines.append(f"- **Weekly budget:** EUR {budget.get('weekly_budget_eur', '0.00')}")
         variance = budget.get("variance_eur", "0.00")
         try:
@@ -177,6 +189,76 @@ def build_markdown_report(data: dict[str, Any]) -> str:
         lines.append("_No budget data._")
     lines.append("")
 
+    # Read-only recipe options; never expose unselected preparation steps.
+    if "recipe_slots" in data:
+        lines.append("## Recipe Options (three full servings; read-only)")
+        lines.append(f"- Recipe plan persisted: {data['recipe_planned_at']}")
+        lines.append(f"- Offline proposal timestamp: {data['recipe_observation_generated_at']}")
+        for slot in data["recipe_slots"]:
+            lines.append(f"### {slot['slot']} — {slot['protein_class']}")
+            preview = slot.get("preview")
+            if preview is None:
+                lines.append(slot["empty_reason"])
+                continue
+            lines.append(f"**{preview['title']}** — {preview['summary']}")
+            lines.append(
+                f"- Accepted revision: {preview['accepted_revision']} (ID {preview['revision_id']})"
+            )
+            lines.append(f"- Source: {json.dumps(preview['source'], ensure_ascii=False)}")
+            lines.append(
+                f"- Scaling: source {preview['source_servings']} → "
+                f"{preview['target_servings']} full servings"
+            )
+            lines.append(f"- Appliances: {json.dumps(preview['appliances'], ensure_ascii=False)}")
+            lines.append(
+                "- Configured appliance metadata: "
+                + json.dumps(preview["appliance_configuration"], ensure_ascii=False)
+            )
+            for ingredient in preview["ingredients"]:
+                lines.append(
+                    f"- {ingredient['name']}: target {ingredient['target']} {ingredient['unit']}; "
+                    f"pantry={ingredient['pantry_covered']}; cart "
+                    f"credit={ingredient['cart_credit']}; "
+                    f"missing={ingredient['missing_target']}; status={ingredient['status']}; "
+                    f"exact match={json.dumps(ingredient['exact_match'], ensure_ascii=False)}; "
+                    "approved fallback="
+                    f"{json.dumps(ingredient['approved_family_fallbacks'], ensure_ascii=False)}; "
+                    f"packages={ingredient['package_quantity']}; incremental EUR "
+                    f"{ingredient['incremental_cost_eur'] or 'unknown'}; {ingredient['reason']}"
+                )
+                lines.append(
+                    f"  - Offline availability: {ingredient['availability']}; "
+                    f"price EUR {ingredient.get('price_eur') or 'unknown'}; "
+                    "evidence: "
+                    f"{ingredient.get('evidence', 'local exact identity or unresolved')}; "
+                    f"rationale: {ingredient.get('rationale', ingredient['reason'])}"
+                )
+                lines.append(
+                    "  - Recipe package annotation: "
+                    + json.dumps(ingredient["recipe_package_annotation"], ensure_ascii=False)
+                )
+                for assumption in ingredient["assumptions"]:
+                    lines.append(f"  - {assumption}")
+            lines.append(
+                f"- Estimated incremental cost: EUR "
+                f"{preview['estimated_incremental_cost_eur'] or 'unknown'}"
+            )
+            lines.extend(f"- {assumption}" for assumption in preview["assumptions"])
+            lines.append("")
+        lines.append("## Recipe Eligibility Decisions")
+        for recipe_id, reasons in data["recipe_exclusions"].items():
+            lines.append(f"- {recipe_id}: {'; '.join(reasons)}")
+        lines.append("## Reroll History")
+        lines.extend(f"- {json.dumps(r, ensure_ascii=False)}" for r in data["reroll_history"])
+        if not data["reroll_history"]:
+            lines.append("_No rerolls._")
+        lines.append("## Pantry Assumptions")
+        lines.extend(f"- {name}" for name in data["pantry_assumptions"])
+        lines.append("## Rough Coverage")
+        lines.append(json.dumps(data["rough_coverage"], ensure_ascii=False))
+        lines.append(data["coverage_assumptions"])
+        lines.append("")
+
     # Errors section.
     errors = data.get("errors", [])
     if errors:
@@ -188,8 +270,9 @@ def build_markdown_report(data: dict[str, Any]) -> str:
     lines.append("---")
     lines.append(
         "_This is a read-only preview. No cart mutation has occurred. "
-        "Availability and prices are from the cart observation only and "
-        "do not guarantee live store availability._"
+        "Baseline availability and prices come from the cart observation; recipe-match "
+        "availability and prices come from unverified offline recipe-options observations. "
+        "Neither guarantees current live store availability or prices._"
     )
     lines.append("")
 

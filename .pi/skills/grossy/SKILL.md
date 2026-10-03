@@ -58,7 +58,7 @@ Synchronize the six currently observable dated AB.gr orders.
 
 ### `weekly plan [--skip-history-sync]`
 
-Start a weekly run: history sync, cart baseline, recurring additions, recipe preview.
+Start a read-only weekly run: history sync, cart baseline, recurring preview and recipe options.
 
 **Phase sequence:**
 
@@ -67,20 +67,36 @@ Start a weekly run: history sync, cart baseline, recurring additions, recipe pre
 2. `grossy weekly plan-prepare --listed-orders <listed-proposal.json>`, or
    `grossy weekly plan-prepare --skip-history-sync` for an explicit skip.
    Local history alone is not comparison evidence. These CLI phases never browse.
-   Task 09 implements only the read-only baseline/preview below; subsequent
-   recipe/mutation phases remain unavailable until their tasks are delivered.
+   Tasks 09–10 implement read-only baseline, recurring preview, recipe options
+   and rerolls. Mutation phases remain unavailable; do not invoke them.
 3. Agent reads the current cart using `agent-browser`.
 4. Agent emits a `grossy.cart.observation.v1` JSON.
 5. `grossy weekly baseline-apply <run-id> <cart-observation.json>`
-6. `grossy weekly recurring-preflight <run-id> <cart-observation.json>`
-7. `grossy weekly recurring-intent <run-id> <mutation-manifest.json>`
-8. Agent presents the exact product/quantity deltas to the user for confirmation.
-9. If the user does not approve, abort; no browser mutation is performed.
-10. Agent performs recurring additions via `agent-browser`.
-11. Agent re-reads the cart.
-12. `grossy weekly recurring-observe <run-id> <cart-observation.json>`
-13. `grossy weekly recipes-apply <run-id> <recipe-proposal.json>`
-14. Run enters `awaiting-recipe-selection`.
+6. Emit a closed `grossy.weekly.recipe-options.v1` proposal for offline
+   ingredient observations only. Required fields: `schema_name`,
+   `schema_version: 1`, timezone-aware `generated_at`, `run_id`, `matches`,
+   and `checksum` (SHA-256 of sorted compact UTF-8 JSON excluding checksum).
+   `matches` may be empty. Each record has `recipe_id`, string `revision_id`,
+   exact stored `ingredient_name`, numeric string `product_id`, unique bounded
+   `fallback_product_ids`, `availability` (`available|unavailable|unknown`),
+   `price_eur` (two-place positive decimal string or null), `evidence`
+   (`exact_product_identity|exact_family_identity`), and bounded `rationale`.
+   Use accepted local recipe revisions and local product facts only; never fetch
+   recipe sources or look up live products during this phase. Purchase approval
+   or family membership does not prove compatibility: require exact normalized
+   ingredient/product-or-family identity. Leave unsupported matches unresolved;
+   never guess ambiguous matches or invent availability/price. Proposal facts
+   remain explicitly unverified offline projections.
+7. `grossy weekly recipes-apply <run-id> <recipe-proposal.json>`
+   CLI owns full eligibility, linked variant preferences, candidates, weights,
+   deterministic slots and revision/policy/match snapshots, not the agent.
+8. Reports retain baseline and recurring preview; run enters
+   `awaiting-recipe-selection` without adding recurring or recipe ingredients.
+   Identical recipes-apply retries regenerate stored reports, never replan.
+   Stop on non-zero exit; SQLite retains report recovery truth after I/O failure.
+
+The future recurring mutation sequence is not enabled in this read-only phase.
+Do not invoke recurring-preflight/intent/observe or perform browser additions.
 
 **Stop conditions:**
 
@@ -97,11 +113,19 @@ Reroll one recipe slot.
 **Phase sequence:**
 
 1. `grossy weekly reroll-apply <run-id> <recipeN> --from <class-list|all>`
-2. Agent presents the new recipe option.
+2. Agent presents the persisted new recipe option and report; no browser writes.
+   `--from` can be any unique subset of `meat,fish,poultry,vegetarian`, or `all`;
+   it need not match the original slot class. Every previously shown recipe and
+   linked dish is excluded. No unseen candidate preserves the previous option
+   with an explanation; each command persists its reroll counter.
+   A changed policy or lifecycle stops the operation for renewed review.
 
 ### `weekly add <run-id> <recipe-list|all>`
 
 Add ingredients for selected recipes (Stage 2).
+
+This mutation workflow is not implemented in Tasks 09–10. Stop with an
+unavailable-phase explanation; do not execute the future sequence below.
 
 **Phase sequence:**
 

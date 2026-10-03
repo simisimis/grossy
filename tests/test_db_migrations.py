@@ -338,7 +338,7 @@ class TestRevisionBoundVariantUpgrade:
         self._seed_old_schema_variant_rows(db)
 
         result = run_migrations(db, tmp_path / "bk2")
-        assert result.applied_versions == [6, 7, 8]
+        assert result.applied_versions == [6, 7, 8, 9]
         assert get_schema_version(db) == current_schema_version
 
         conn = open_connection(db)
@@ -734,11 +734,11 @@ def test_populated_v7_upgrade_preserves_history_and_run_with_verified_backup(
         conn.close()
 
     result = run_migrations(db, tmp_path / "upgrade-backups")
-    assert result.applied_versions == [8]
+    assert result.applied_versions == [8, 9]
     assert result.backup_path is not None
     assert result.backup_path.stat().st_mode & 0o777 == 0o600
     assert verify_sqlite_snapshot(result.backup_path)[1] == 7
-    assert verify_sqlite_snapshot(db)[1] == 8
+    assert verify_sqlite_snapshot(db)[1] == 9
     for path in (db, result.backup_path):
         conn = open_connection(path)
         try:
@@ -760,6 +760,58 @@ def test_populated_v7_upgrade_preserves_history_and_run_with_verified_backup(
         conn.commit()
         assert conn.execute("SELECT report_written FROM weekly_reports").fetchone() == (0,)
         assert conn.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("prior_version", range(1, 9), ids=lambda v: f"v{v}-to-v9")
+def test_recipe_planning_upgrade_preserves_supported_schema(
+    tmp_path: Path,
+    prior_version: int,
+) -> None:
+    """Forward009 preserves existing runs/slots/rerolls across supported upgrades."""
+    from grossy.db.snapshot import verify_sqlite_snapshot
+
+    prior = tmp_path / "prior-migrations"
+    prior.mkdir()
+    for migration in discover_migrations():
+        if migration.version <= prior_version:
+            (prior / migration.filename).write_text(migration.sql)
+    db = tmp_path / "prior.sqlite3"
+    run_migrations(db, tmp_path / "before", migrations_dir=prior)
+    conn = open_connection(db)
+    try:
+        conn.execute(
+            "INSERT INTO planner_runs (id,run_id,seed,lifecycle,created_at,updated_at) "
+            "VALUES (1,'historical-run','historical-seed','completed','old','old')"
+        )
+        conn.execute(
+            "INSERT INTO run_recipe_slots (run_id,slot_name,protein_class,eligibility_result,"
+            "empty_reason,created_at) VALUES (1,'recipe1','meat','empty','old reason','old')"
+        )
+        conn.execute(
+            "INSERT INTO run_rerolls (run_id,slot_name,reroll_number,candidate_scope,result,"
+            "reason,created_at) VALUES (1,'recipe1',1,'meat','no_candidate','old reason','old')"
+        )
+        conn.commit()
+        expected = {
+            table: conn.execute(f"SELECT * FROM {table}").fetchall()
+            for table in ("planner_runs", "run_recipe_slots", "run_rerolls")
+        }
+    finally:
+        conn.close()
+    result = run_migrations(db, tmp_path / "after")
+    assert result.applied_versions == list(range(prior_version + 1, 10))
+    assert result.backup_path is not None
+    assert verify_sqlite_snapshot(result.backup_path)[1] == prior_version
+    assert verify_sqlite_snapshot(db)[1] == 9
+    conn = open_connection(db)
+    try:
+        for table, rows in expected.items():
+            assert conn.execute(f"SELECT * FROM {table}").fetchall() == rows
+        assert conn.execute("SELECT * FROM run_recipe_plans").fetchall() == []
+        assert conn.execute("SELECT * FROM run_recipe_seen").fetchall() == []
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
     finally:
         conn.close()

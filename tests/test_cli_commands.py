@@ -162,7 +162,6 @@ def test_help_exits_zero() -> None:
         ["weekly", "finish", "run-1"],
         ["weekly", "finish", "run-1", "--no-recipes"],
         ["weekly", "abandon", "run-1"],
-        ["weekly", "reroll-apply", "run-1", "recipe1", "--from", "meat"],
         ["weekly", "selection-apply", "run-1", "recipe1,recipe2"],
         ["weekly", "removal-preflight", "run-1", "--product", "1234567"],
     ],

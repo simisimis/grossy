@@ -66,6 +66,8 @@ _EXPORT_TABLES = (
     "run_recurring_items",
     "run_recipe_slots",
     "run_rerolls",
+    "run_recipe_plans",
+    "run_recipe_seen",
     "run_recipe_selections",
     "run_ingredient_targets",
     "run_mutation_manifests",
@@ -194,15 +196,16 @@ def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
 def _required_export_tables(schema_version: int) -> frozenset[str]:
     """Return the set of export tables that must exist at the given schema version.
 
-    All tables in ``_EXPORT_TABLES`` are created by migration 001, so they are
-    required for any database at schema version >= 1. A table that is absent
-    at a supported schema version indicates a damaged database (PRD 14.2, 18).
-    Future migrations that introduce new export tables would conditionally
-    require them only for versions >= the creating migration.
+    Recipe planning snapshots and the seen ledger were introduced by migration
+    009; the remaining inventory dates to migration 001. Missing tables are
+    corruption only when the declared schema requires them (PRD 14.2, 18).
     """
-    if schema_version >= 1:
-        return frozenset(_EXPORT_TABLES)
-    return frozenset()
+    if schema_version < 1:
+        return frozenset()
+    recipe_planning_tables = {"run_recipe_plans", "run_recipe_seen"}
+    if schema_version < 9:
+        return frozenset(_EXPORT_TABLES) - recipe_planning_tables
+    return frozenset(_EXPORT_TABLES)
 
 
 def _table_rows(conn: sqlite3.Connection, name: str) -> list[dict[str, Any]]:

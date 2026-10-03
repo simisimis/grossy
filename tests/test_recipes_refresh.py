@@ -855,18 +855,19 @@ def test_revision_snapshot_retains_identity_fields(env: tuple[Path, GrossyPaths]
 
 
 def _simulate_schema_v6(paths: GrossyPaths) -> None:
-    """Downgrade the database to schema-v6 by reverting migrations 007 and 008.
+    """Simulate schema-v6, including removal of Task10's empty planning tables.
 
-    Drops the title/source_tier/protein_class columns from recipe_revisions
-    and removes migrations 007 and 008 from schema_migrations. This simulates
-    a database created before those migrations were added to the codebase.
+    Drops later recipe columns/tables and their migration markers. This helper
+    operates only on the isolated recipe test fixture, which has no weekly plans.
     """
     conn = open_connection(paths.database_file)
     try:
         conn.execute("ALTER TABLE recipe_revisions DROP COLUMN title")
         conn.execute("ALTER TABLE recipe_revisions DROP COLUMN source_tier")
         conn.execute("ALTER TABLE recipe_revisions DROP COLUMN protein_class")
-        conn.execute("DELETE FROM schema_migrations WHERE version IN (7, 8)")
+        conn.execute("DROP TABLE run_recipe_seen")
+        conn.execute("DROP TABLE run_recipe_plans")
+        conn.execute("DELETE FROM schema_migrations WHERE version > 6")
         conn.commit()
     finally:
         conn.close()
@@ -874,6 +875,7 @@ def _simulate_schema_v6(paths: GrossyPaths) -> None:
 
 def test_refresh_diff_upgrades_v6_with_backup_then_apply_retains_snapshot(
     env: tuple[Path, GrossyPaths],
+    current_schema_version: int,
 ) -> None:
     """One production upgrade flow proves backup fidelity, backfill and retained revisions."""
     from grossy.db.migrations import get_schema_version
@@ -889,7 +891,7 @@ def test_refresh_diff_upgrades_v6_with_backup_then_apply_retains_snapshot(
     assert diff["status"] == "preview"
     assert diff["recipe_id"] == "test-recipe"
     assert diff["has_changes"] is True
-    assert get_schema_version(paths.database_file) == 8
+    assert get_schema_version(paths.database_file) == current_schema_version
     new_backups = _main_backups(paths) - backups_before
     assert len(new_backups) == 1
     backup = new_backups.pop()
@@ -1013,7 +1015,10 @@ def test_refresh_diff_checksum_failure_never_reports_a_backup(
 
 @pytest.mark.parametrize("via_cli", [False, True], ids=["service", "cli-json"])
 def test_refresh_diff_migration_sql_failure_reports_verified_backup(
-    cli_home: tuple[Path, GrossyPaths], monkeypatch: pytest.MonkeyPatch, via_cli: bool
+    cli_home: tuple[Path, GrossyPaths],
+    monkeypatch: pytest.MonkeyPatch,
+    via_cli: bool,
+    current_schema_version: int,
 ) -> None:
     """Real write-then-fail migration: current verified backup, exact rollback, no preview."""
     import re
@@ -1024,7 +1029,7 @@ def test_refresh_diff_migration_sql_failure_reports_verified_backup(
     tmp_path, paths = cli_home
     migrations = tmp_path / "bad-migrations"
     migrations.mkdir()
-    (migrations / "009_regression_bad.sql").write_text(
+    (migrations / f"{current_schema_version + 1:03}_regression_bad.sql").write_text(
         "CREATE TABLE grossy_regression_probe (id INTEGER PRIMARY KEY);\n"
         "INSERT INTO grossy_regression_probe VALUES (42);\n"
         "SELECT * FROM grossy_regression_bad_table;\n",
