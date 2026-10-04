@@ -1,9 +1,11 @@
-"""Recurring-only durable positive additions. No browser is launched here.
+"""Durable positive additions shared by recurring and selected-recipe stages.
 
 A manifest authorizes exactly one addition. Every next addition needs another
 cart read, preflight and durable intent; a pending intent is never reauthorized.
 Run events store accepted preflights; existing append-only manifest/observation
 tables store intent and interruption evidence without changing shipped schemas.
+Recipe preflight events retain exact decimal targets and recipe contributions;
+legacy REAL ingredient-target columns are not used for quantity arithmetic.
 """
 
 from __future__ import annotations
@@ -54,7 +56,7 @@ class MutationManifest(BaseModel):
     schema_version: StrictInt
     generated_at: str
     run_id: str = Field(pattern=r"^[A-Za-z0-9_-]+$", max_length=100)
-    stage: Literal["recurring"]
+    stage: Literal["recurring", "recipe"]
     preflight_checksum: str = Field(pattern=r"^[0-9a-f]{64}$")
     additions: list[Addition] = Field(max_length=1)
     checksum: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -92,7 +94,24 @@ def _locked(paths: GrossyPaths) -> Iterator[tuple[sqlite3.Connection, GrossyConf
             conn.close()
 
 
-def _run(conn: sqlite3.Connection, run_id: str) -> int:
+def _run(conn: sqlite3.Connection, run_id: str, stage: str = "recurring") -> int:
+    if stage == "recipe":
+        row = conn.execute(
+            "SELECT id,lifecycle FROM planner_runs WHERE run_id=?", (run_id,)
+        ).fetchone()
+        if not row or row[1] not in (
+            "awaiting-recipe-selection",
+            "recipe-apply",
+            "awaiting-user-verification",
+            "partial-failure",
+            "needs-attention",
+        ):
+            raise WeeklyPlanError("recipe phase requires a recoverable Stage2 run")
+        if not conn.execute(
+            "SELECT 1 FROM run_recipe_selections WHERE run_id=?", (row[0],)
+        ).fetchone():
+            raise WeeklyPlanError("explicit persisted recipe selection required")
+        return int(row[0])
     row = conn.execute(
         "SELECT id,lifecycle,history_sync_status FROM planner_runs WHERE run_id=?", (run_id,)
     ).fetchone()
@@ -133,6 +152,42 @@ def _cart(obs: CartObservation) -> dict[str, int]:
     return {line.product_id: line.quantity for line in obs.lines}
 
 
+def _cart_lines(obs: CartObservation) -> dict[str, dict[str, Any]]:
+    return {line.product_id: line.model_dump(mode="json") for line in obs.lines}
+
+
+def _expected_recipe_lines(
+    before: CartObservation, additions: list[dict[str, Any]]
+) -> dict[str, dict[str, Any]]:
+    lines = _cart_lines(before)
+    for addition in additions:
+        pid = addition["product_id"]
+        quantity = lines.get(pid, {}).get("quantity", 0) + addition["quantity"]
+        lines[pid] = {
+            "product_id": pid,
+            "canonical_url": addition["canonical_url"],
+            "quantity": quantity,
+            "displayed_price_eur": addition["price_eur"],
+        }
+    return lines
+
+
+def _recipe_anchor(conn: sqlite3.Connection, rid: int) -> CartObservation | None:
+    # Verified observations retain full identity/price even for older cart events
+    # that recorded only quantities. Never downgrade their anchor to quantities.
+    row = conn.execute(
+        "SELECT o.observed_json FROM run_mutation_observations o "
+        "JOIN run_mutation_manifests m ON m.id=o.manifest_id "
+        "WHERE m.run_id=? AND m.stage='recipe' AND o.failure_class='none' "
+        "ORDER BY o.id DESC LIMIT 1",
+        (rid,),
+    ).fetchone()
+    if row:
+        return validate_cart_observation(json.loads(row[0]))
+    accepted = _latest(conn, rid, "recipe-preflight")
+    return validate_cart_observation(accepted["cart"]) if accepted else None
+
+
 def _baseline(conn: sqlite3.Connection, rid: int) -> dict[str, int]:
     return dict(
         conn.execute(
@@ -143,14 +198,16 @@ def _baseline(conn: sqlite3.Connection, rid: int) -> dict[str, int]:
     )
 
 
-def _pending(conn: sqlite3.Connection, rid: int) -> sqlite3.Row | tuple[Any, ...] | None:
+def _pending(
+    conn: sqlite3.Connection, rid: int, stage: str = "recurring"
+) -> sqlite3.Row | tuple[Any, ...] | None:
     return cast(
         "tuple[Any, ...] | None",
         conn.execute(
             "SELECT id,manifest_json,checksum FROM run_mutation_manifests m WHERE run_id=? "
-            "AND stage='recurring' AND NOT EXISTS (SELECT 1 FROM run_mutation_observations o "
+            "AND stage=? AND NOT EXISTS (SELECT 1 FROM run_mutation_observations o "
             "WHERE o.manifest_id=m.id AND o.failure_class='none') ORDER BY id DESC LIMIT 1",
-            (rid,),
+            (rid, stage),
         ).fetchone(),
     )
 
@@ -163,7 +220,9 @@ def _policy(conn: sqlite3.Connection, config: GrossyConfigModel) -> str:
             "products": [
                 list(r)
                 for r in conn.execute(
-                    "SELECT id,blacklist_state,typical_quantity FROM products ORDER BY id"
+                    "SELECT id,blacklist_state,typical_quantity,name,canonical_url,package_amount,"
+                    "package_unit,package_count,observation_state,purchase_order_count "
+                    "FROM products ORDER BY id"
                 )
             ],
             "families": [
@@ -324,30 +383,32 @@ def _reports(
     run_id: str,
     lifecycle: str,
     evidence: dict[str, Any],
+    *,
+    stage: str = "recurring",
 ) -> None:
     row = conn.execute("SELECT report_json FROM weekly_reports WHERE run_id=?", (rid,)).fetchone()
     data = json.loads(row[0])
     data["lifecycle"] = lifecycle
-    data.setdefault("recurring_mutation_evidence", []).append(evidence)
+    data.setdefault(f"{stage}_mutation_evidence", []).append(evidence)
     verified = Decimal(0)
     for raw, discrepancy in conn.execute(
         "SELECT m.manifest_json,o.discrepancies_json FROM run_mutation_manifests m "
         "JOIN run_mutation_observations o ON o.manifest_id=m.id "
-        "WHERE m.run_id=? AND m.stage='recurring' AND o.failure_class='none'",
-        (rid,),
+        "WHERE m.run_id=? AND m.stage=? AND o.failure_class='none'",
+        (rid, stage),
     ):
         manifest = json.loads(raw)
         detail = json.loads(discrepancy or "{}")
         for addition in manifest["additions"]:
             quantity = detail.get("verified_quantity", addition["quantity"])
             verified += Decimal(addition["price_eur"]) * quantity
-    data["budget"]["verified_recurring_eur"] = f"{verified:.2f}"
+    data["budget"][f"verified_{stage}_eur"] = f"{verified:.2f}"
     observed = evidence.get("observation")
     if observed and observed.get("mutation_result", {}).get("outcome") != "incomplete":
         total = sum(
             Decimal(line["displayed_price_eur"]) * line["quantity"] for line in observed["lines"]
         )
-        remaining = Decimal(data["budget"]["projected_recurring_eur"])
+        remaining = Decimal(data["budget"][f"projected_{stage}_eur"])
         if evidence["status"] == "verified":
             last = json.loads(
                 conn.execute(
@@ -362,10 +423,20 @@ def _reports(
             )
         data["budget"].update(
             resulting_total_eur=f"{total:.2f}",
-            projected_recurring_eur=f"{remaining:.2f}",
+            **{f"projected_{stage}_eur": f"{remaining:.2f}"},
             projected_total_eur=f"{total + remaining:.2f}",
             variance_eur=f"{total + remaining - Decimal(data['budget']['weekly_budget_eur']):.2f}",
         )
+    if (
+        stage == "recipe"
+        and observed
+        and observed.get("mutation_result", {}).get("outcome") != "incomplete"
+    ):
+        data["budget"]["known_projected_recipe_eur"] = data["budget"]["projected_recipe_eur"]
+    from grossy.weekly.plan import _get_source_order_ids
+    from grossy.weekly.recipes import _sanitize_tree
+
+    data = _sanitize_tree(data, _get_source_order_ids(conn))
     md = build_markdown_report(data)
     conn.execute(
         "UPDATE weekly_reports SET report_json=?,report_md=?,report_written=0 WHERE run_id=?",
@@ -378,7 +449,7 @@ def _reports(
         atomic_write_text(directory / "report.json", build_json_report(data))
         atomic_write_text(directory / "report.md", md)
     except OSError:
-        _event(conn, rid, "report-failure", {"status": "recurring-report-recovery-required"})
+        _event(conn, rid, "report-failure", {"status": f"{stage}-report-recovery-required"})
         conn.commit()
         raise
     conn.execute("UPDATE weekly_reports SET report_written=1 WHERE run_id=?", (rid,))
@@ -398,10 +469,16 @@ def _prepare(
     rid: int,
     run_id: str,
     obs: CartObservation,
+    stage: str = "recurring",
 ) -> dict[str, Any]:
-    if obs.recurring_product_facts:
+    if stage == "recipe" or obs.recurring_product_facts:
         _require_fresh_observation(obs)
-    additions, decisions = _plan(conn, rid, config, obs)
+    if stage == "recipe":
+        from grossy.weekly.selection import recipe_plan
+
+        additions, decisions = recipe_plan(conn, rid, config, obs)
+    else:
+        additions, decisions = _plan(conn, rid, config, obs)
     preflight = {
         "cart": obs.model_dump(mode="json"),
         "policy_checksum": _policy(conn, config),
@@ -414,11 +491,22 @@ def _prepare(
         conn.execute("SELECT report_json FROM weekly_reports WHERE run_id=?", (rid,)).fetchone()[0]
     )
     report["budget"].update(
-        projected_recurring_eur=f"{projected:.2f}",
+        **{f"projected_{stage}_eur": f"{projected:.2f}"},
         resulting_total_eur=f"{current_total:.2f}",
         projected_total_eur=f"{current_total + projected:.2f}",
         variance_eur=f"{current_total + projected - config.weekly_budget:.2f}",
     )
+    if stage == "recipe":
+        report["budget"].update(
+            known_projected_recipe_eur=f"{projected:.2f}", recipe_cost_complete=True
+        )
+        report["recipe_pantry_assumptions"] = config.pantry_assumptions
+        report["recipe_preflight_decisions"] = decisions
+        report["budget"]["assumptions"] = [
+            "selected passing recipes only; compatible cart credit used once; "
+            "positive additions only",
+            "whole-cart budget warning does not override hard limits",
+        ]
     conn.execute(
         "UPDATE weekly_reports SET report_json=? WHERE run_id=?", (json.dumps(report), rid)
     )
@@ -426,7 +514,7 @@ def _prepare(
     _event(
         conn,
         rid,
-        "recurring-preflight",
+        f"{stage}-preflight",
         {**preflight, "checksum": checksum, "accepted_at": _now_utc()},
     )
     body = {
@@ -434,15 +522,23 @@ def _prepare(
         "schema_version": 1,
         "generated_at": _now_utc(),
         "run_id": run_id,
-        "stage": "recurring",
+        "stage": stage,
         "preflight_checksum": checksum,
         "additions": additions[:1],
     }
     manifest = {**body, "checksum": proposal_checksum(body)}
     lifecycle = conn.execute("SELECT lifecycle FROM planner_runs WHERE id=?", (rid,)).fetchone()[0]
-    _reports(conn, paths, rid, run_id, lifecycle, {"status": "preflight", "decisions": decisions})
+    _reports(
+        conn,
+        paths,
+        rid,
+        run_id,
+        lifecycle,
+        {"status": "preflight", "decisions": decisions},
+        stage=stage,
+    )
     return {
-        "schema_name": "grossy.weekly.recurring-preflight.v1",
+        "schema_name": f"grossy.weekly.{stage}-preflight.v1",
         "schema_version": 1,
         "status": "accepted",
         "manifest": manifest,
@@ -452,44 +548,71 @@ def _prepare(
 
 
 def run_recurring_preflight(
-    paths: GrossyPaths, run_id: str, data: dict[str, Any]
+    paths: GrossyPaths, run_id: str, data: dict[str, Any], *, stage: str = "recurring"
 ) -> dict[str, Any]:
     obs = validate_cart_observation(data)
     with _locked(paths) as (conn, config):
-        rid = _run(conn, run_id)
-        if _pending(conn, rid):
+        rid = _run(conn, run_id, stage)
+        if _pending(conn, rid, stage):
             raise WeeklyPlanError("unreconciled intent requires resume-prepare")
-        expected = _latest(conn, rid, "recurring-cart")
-        if _cart(obs) != (expected["quantities"] if expected else _baseline(conn, rid)):
+        expected = _latest(conn, rid, f"{stage}-cart")
+        unexpected = (stage == "recurring" or expected) and _cart(obs) != (
+            expected["quantities"] if expected else _baseline(conn, rid)
+        )
+        if stage == "recipe":
+            anchor = _recipe_anchor(conn, rid)
+            unexpected = anchor is not None and _cart_lines(obs) != _cart_lines(anchor)
+        if unexpected:
             conn.execute("UPDATE planner_runs SET lifecycle='needs-attention' WHERE id=?", (rid,))
-            _event(conn, rid, "recurring-unexpected-cart", {"quantities": _cart(obs)})
-            _reports(conn, paths, rid, run_id, "needs-attention", {"status": "unexpected-cart"})
+            _event(conn, rid, f"{stage}-unexpected-cart", {"quantities": _cart(obs), "cart": data})
+            _reports(
+                conn,
+                paths,
+                rid,
+                run_id,
+                "needs-attention",
+                {"status": "unexpected-cart"},
+                stage=stage,
+            )
             raise WeeklyPlanError("unexpected cart change; no addition authorized")
-        return _prepare(conn, config, paths, rid, run_id, obs)
+        return _prepare(conn, config, paths, rid, run_id, obs, stage)
 
 
-def run_recurring_intent(paths: GrossyPaths, run_id: str, data: dict[str, Any]) -> dict[str, Any]:
+def run_recurring_intent(
+    paths: GrossyPaths, run_id: str, data: dict[str, Any], *, stage: str = "recurring"
+) -> dict[str, Any]:
     try:
         manifest = MutationManifest.model_validate(data)
     except ValueError as exc:
-        raise WeeklyPlanError("invalid recurring mutation manifest") from exc
+        raise WeeklyPlanError(f"invalid {stage} mutation manifest") from exc
     if (
-        manifest.run_id != run_id
+        manifest.stage != stage
+        or manifest.run_id != run_id
         or proposal_checksum({k: v for k, v in data.items() if k != "checksum"})
         != manifest.checksum
     ):
         raise WeeklyPlanError("manifest checksum or run mismatch")
     with _locked(paths) as (conn, config):
-        rid = _run(conn, run_id)
-        if _pending(conn, rid):
+        rid = _run(conn, run_id, stage)
+        if _pending(conn, rid, stage):
             raise WeeklyPlanError("intent already persisted; reread via resume-prepare")
-        accepted = _latest(conn, rid, "recurring-preflight")
+        accepted = _latest(conn, rid, f"{stage}-preflight")
         if not accepted or accepted["checksum"] != manifest.preflight_checksum:
             raise WeeklyPlanError("accepted preflight required")
+        if (
+            stage == "recipe"
+            and conn.execute(
+                "SELECT 1 FROM run_events WHERE run_id=? AND event_type='recipe-unexpected-cart' "
+                "AND id > (SELECT MAX(id) FROM run_events WHERE run_id=? "
+                "AND event_type='recipe-preflight')",
+                (rid, rid),
+            ).fetchone()
+        ):
+            raise WeeklyPlanError("unexpected cart change requires reconciliation before intent")
         if conn.execute(
-            "SELECT 1 FROM run_mutation_manifests WHERE run_id=? AND stage='recurring' "
+            "SELECT 1 FROM run_mutation_manifests WHERE run_id=? AND stage=? "
             "AND json_extract(manifest_json,'$.preflight_checksum')=?",
-            (rid, manifest.preflight_checksum),
+            (rid, stage, manifest.preflight_checksum),
         ).fetchone():
             raise WeeklyPlanError("preflight already consumed; reread before another intent")
         accepted_age = (
@@ -501,12 +624,20 @@ def run_recurring_intent(paths: GrossyPaths, run_id: str, data: dict[str, Any]) 
         _require_fresh_observation(validate_cart_observation(accepted["cart"]))
         if accepted["policy_checksum"] != _policy(conn, config):
             raise WeeklyPlanError("policy changed since preflight")
+        if stage == "recipe":
+            from grossy.weekly.selection import recipe_plan
+
+            additions, decisions = recipe_plan(
+                conn, rid, config, validate_cart_observation(accepted["cart"])
+            )
+            if additions != accepted["additions"] or decisions != accepted["decisions"]:
+                raise WeeklyPlanError("current recipe matching changed since preflight")
         if data["additions"] != accepted["additions"][:1]:
             raise WeeklyPlanError("manifest must equal accepted positive delta")
         cursor = conn.execute(
             "INSERT INTO run_mutation_manifests(run_id,stage,manifest_json,checksum,created_at) "
-            "VALUES (?,'recurring',?,?,?)",
-            (rid, json.dumps(data), manifest.checksum, _now_utc()),
+            "VALUES (?,?,?,?,?)",
+            (rid, stage, json.dumps(data), manifest.checksum, _now_utc()),
         )
         mid = cursor.lastrowid
         # Durable incomplete evidence exists even if process/browser dies before readback.
@@ -521,9 +652,20 @@ def run_recurring_intent(paths: GrossyPaths, run_id: str, data: dict[str, Any]) 
                 _now_utc(),
             ),
         )
-        conn.execute("UPDATE planner_runs SET lifecycle='recurring-apply' WHERE id=?", (rid,))
+        lifecycle = f"{stage}-apply"
+        conn.execute("UPDATE planner_runs SET lifecycle=? WHERE id=?", (lifecycle, rid))
         if not manifest.additions:
-            _event(conn, rid, "recurring-complete", {"status": "zero-additions"})
+            if stage == "recipe":
+                _event(
+                    conn,
+                    rid,
+                    "recipe-cart",
+                    {"quantities": _cart(validate_cart_observation(accepted["cart"]))},
+                )
+            _event(conn, rid, f"{stage}-complete", {"status": "zero-additions"})
+            if stage == "recipe":
+                lifecycle = "awaiting-user-verification"
+                conn.execute("UPDATE planner_runs SET lifecycle=? WHERE id=?", (lifecycle, rid))
             conn.execute(
                 "INSERT INTO run_mutation_observations(manifest_id,observed_json,"
                 "failure_class,created_at) VALUES (?,?,'none',?)",
@@ -535,11 +677,17 @@ def run_recurring_intent(paths: GrossyPaths, run_id: str, data: dict[str, Any]) 
             paths,
             rid,
             run_id,
-            "recurring-apply",
-            {"manifest": data, "status": "intent-persisted"},
+            lifecycle,
+            {
+                "manifest": data,
+                "status": "intent-persisted",
+                "before_observation": accepted["cart"],
+                "attempt_status": "authorized-readback-incomplete",
+            },
+            stage=stage,
         )
         return {
-            "schema_name": "grossy.weekly.recurring-authorization.v1",
+            "schema_name": f"grossy.weekly.{stage}-authorization.v1",
             "schema_version": 1,
             "status": "persisted",
             "manifest_checksum": manifest.checksum,
@@ -547,11 +695,13 @@ def run_recurring_intent(paths: GrossyPaths, run_id: str, data: dict[str, Any]) 
         }
 
 
-def run_recurring_observe(paths: GrossyPaths, run_id: str, data: dict[str, Any]) -> dict[str, Any]:
+def run_recurring_observe(
+    paths: GrossyPaths, run_id: str, data: dict[str, Any], *, stage: str = "recurring"
+) -> dict[str, Any]:
     obs = validate_cart_observation(data)
     with _locked(paths) as (conn, config):
-        rid = _run(conn, run_id)
-        pending = _pending(conn, rid)
+        rid = _run(conn, run_id, stage)
+        pending = _pending(conn, rid, stage)
         if (
             not pending
             or obs.mutation_result is None
@@ -559,14 +709,20 @@ def run_recurring_observe(paths: GrossyPaths, run_id: str, data: dict[str, Any])
         ):
             raise WeeklyPlanError("observation must identify the pending manifest")
         manifest = json.loads(pending[1])
-        accepted = _latest(conn, rid, "recurring-preflight")
+        accepted = _latest(conn, rid, f"{stage}-preflight")
         assert accepted is not None
-        before = _cart(validate_cart_observation(accepted["cart"]))
+        before_observation = validate_cart_observation(accepted["cart"])
+        before = _cart(before_observation)
         expected = dict(before)
         for addition in manifest["additions"]:
             pid = addition["product_id"]
             expected[pid] = expected.get(pid, 0) + addition["quantity"]
-        success = obs.mutation_result.outcome == "readback" and _cart(obs) == expected
+        expected_lines = _expected_recipe_lines(before_observation, manifest["additions"])
+        success = (
+            obs.mutation_result.outcome == "readback"
+            and _cart(obs) == expected
+            and (stage != "recipe" or _cart_lines(obs) == expected_lines)
+        )
         conn.execute(
             "INSERT INTO run_mutation_observations("
             "manifest_id,observed_json,discrepancies_json,"
@@ -579,18 +735,25 @@ def run_recurring_observe(paths: GrossyPaths, run_id: str, data: dict[str, Any])
                         "expected": expected,
                         "observed": _cart(obs),
                         "outcome": obs.mutation_result.outcome,
+                        **(
+                            {"expected_lines": expected_lines, "observed_lines": _cart_lines(obs)}
+                            if stage == "recipe"
+                            else {}
+                        ),
                     }
                 ),
                 "none" if success else "partial",
                 _now_utc(),
             ),
         )
-        lifecycle = "recurring-apply" if success else "partial-failure"
+        lifecycle = f"{stage}-apply" if success else "partial-failure"
+        if success and stage == "recipe" and len(accepted["additions"]) <= 1:
+            lifecycle = "awaiting-user-verification"
         conn.execute("UPDATE planner_runs SET lifecycle=? WHERE id=?", (lifecycle, rid))
         if success:
-            _event(conn, rid, "recurring-cart", {"quantities": _cart(obs)})
+            _event(conn, rid, f"{stage}-cart", {"quantities": _cart(obs), "cart": data})
             if len(accepted["additions"]) <= 1:
-                _event(conn, rid, "recurring-complete", {"status": "readback-verified"})
+                _event(conn, rid, f"{stage}-complete", {"status": "readback-verified"})
         _reports(
             conn,
             paths,
@@ -598,16 +761,32 @@ def run_recurring_observe(paths: GrossyPaths, run_id: str, data: dict[str, Any])
             run_id,
             lifecycle,
             {"status": "verified" if success else "partial-failure", "observation": data},
+            stage=stage,
         )
         return {
-            "schema_name": "grossy.weekly.recurring-observe.v1",
+            "schema_name": f"grossy.weekly.{stage}-observe.v1",
             "schema_version": 1,
             "status": "success" if success else "error",
             "lifecycle": lifecycle,
         }
 
 
-def run_resume_prepare(paths: GrossyPaths, run_id: str, data: dict[str, Any]) -> dict[str, Any]:
+def run_resume_prepare(
+    paths: GrossyPaths, run_id: str, data: dict[str, Any], *, stage: str = "recurring"
+) -> dict[str, Any]:
+    if stage == "recurring":
+        _check_database_exists(paths)
+        conn = open_connection(paths.database_file)
+        try:
+            selected = conn.execute(
+                "SELECT 1 FROM run_recipe_selections s JOIN planner_runs r ON r.id=s.run_id "
+                "WHERE r.run_id=?",
+                (run_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+        if selected:
+            stage = "recipe"
     obs = validate_cart_observation(data)
     if obs.mutation_result is not None and obs.mutation_result.outcome != "readback":
         raise WeeklyPlanError(
@@ -615,15 +794,28 @@ def run_resume_prepare(paths: GrossyPaths, run_id: str, data: dict[str, Any]) ->
         )
     _require_fresh_observation(obs)
     with _locked(paths) as (conn, config):
-        rid = _run(conn, run_id)
-        pending = _pending(conn, rid)
+        rid = _run(conn, run_id, stage)
+        pending = _pending(conn, rid, stage)
         if pending:
-            accepted = _latest(conn, rid, "recurring-preflight")
+            accepted = _latest(conn, rid, f"{stage}-preflight")
             assert accepted is not None
             before = _cart(validate_cart_observation(accepted["cart"]))
             manifest = json.loads(pending[1])
             allowed = {a["product_id"] for a in manifest["additions"]}
             current = _cart(obs)
+            if stage == "recipe":
+                before_obs = validate_cart_observation(accepted["cart"])
+                lines = _expected_recipe_lines(before_obs, manifest["additions"])
+                observed_lines = _cart_lines(obs)
+                if any(
+                    pid not in lines
+                    or any(
+                        line[key] != lines[pid][key]
+                        for key in ("canonical_url", "displayed_price_eur")
+                    )
+                    for pid, line in observed_lines.items()
+                ):
+                    raise WeeklyPlanError("unexplained cart identity/price change on resume")
             if any(
                 current.get(p, 0) != before.get(p, 0)
                 for p in set(current) | set(before)
@@ -653,10 +845,16 @@ def run_resume_prepare(paths: GrossyPaths, run_id: str, data: dict[str, Any]) ->
                     _now_utc(),
                 ),
             )
-            _event(conn, rid, "recurring-cart", {"quantities": current})
+            _event(conn, rid, f"{stage}-cart", {"quantities": current})
         else:
-            expected = _latest(conn, rid, "recurring-cart")
-            if _cart(obs) != (expected["quantities"] if expected else _baseline(conn, rid)):
+            expected = _latest(conn, rid, f"{stage}-cart")
+            if stage == "recipe":
+                anchor = _recipe_anchor(conn, rid)
+                if anchor is not None and _cart_lines(obs) != _cart_lines(anchor):
+                    raise WeeklyPlanError("unexplained cart change on resume")
+            if (stage == "recurring" or expected) and _cart(obs) != (
+                expected["quantities"] if expected else _baseline(conn, rid)
+            ):
                 raise WeeklyPlanError("unexplained cart change on resume")
-        _event(conn, rid, "recurring-resume", {"quantities": _cart(obs)})
-        return _prepare(conn, config, paths, rid, run_id, obs)
+        _event(conn, rid, f"{stage}-resume", {"quantities": _cart(obs)})
+        return _prepare(conn, config, paths, rid, run_id, obs, stage)

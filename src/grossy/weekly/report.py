@@ -265,6 +265,27 @@ def build_markdown_report(data: dict[str, Any]) -> str:
         lines.append(data["coverage_assumptions"])
         lines.append("")
 
+    if data.get("selected_dinners"):
+        lines.append("## Selected dinners and recipe → dinner mapping")
+        for dinner in data["selected_dinners"]:
+            lines.append(f"### {dinner['slot']} → {dinner['dinner']} — {dinner['title']}")
+            lines.append(f"- Accepted revision: {dinner['revision_id']}")
+            lines.extend(f"{n}. {step}" for n, step in enumerate(dinner["preparation_steps"], 1))
+        lines.append("## Current recipe preflight decisions and quantities")
+        lines.append(
+            "- Current pantry policy: " + json.dumps(data.get("recipe_pantry_assumptions", []))
+        )
+        lines.extend(
+            json.dumps(d, ensure_ascii=False, sort_keys=True)
+            for d in data.get("recipe_preflight_decisions", [])
+        )
+        lines.append("## Recipe mutation evidence")
+        lines.extend(
+            json.dumps(e, ensure_ascii=False, sort_keys=True)
+            for e in data.get("recipe_mutation_evidence", [])
+        )
+        lines.append("")
+
     # Errors section.
     errors = data.get("errors", [])
     if errors:
@@ -281,8 +302,8 @@ def build_markdown_report(data: dict[str, Any]) -> str:
     lines.append("---")
     lines.append(
         (
-            "_Recurring intent/readback evidence is recorded above. "
-            if data.get("recurring_mutation_evidence")
+            "_Cart intent/readback evidence is recorded above. "
+            if data.get("recurring_mutation_evidence") or data.get("recipe_mutation_evidence")
             else "_This is a read-only preview. No cart mutation has occurred. "
         )
         + "Baseline availability and prices come from the cart observation; recipe-match "

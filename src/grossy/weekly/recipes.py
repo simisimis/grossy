@@ -622,6 +622,10 @@ def run_reroll_apply(
             if row is None or row[1] != "awaiting-recipe-selection":
                 raise WeeklyPlanError("reroll requires awaiting-recipe-selection")
             row_id = row[0]
+            if conn.execute(
+                "SELECT 1 FROM run_recipe_selections WHERE run_id=?", (row_id,)
+            ).fetchone():
+                raise WeeklyPlanError("persisted dinner selection prevents reroll")
             plan = conn.execute(
                 "SELECT candidates_json, policy_json FROM run_recipe_plans WHERE run_id=?",
                 (row_id,),

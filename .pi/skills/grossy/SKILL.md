@@ -177,28 +177,58 @@ Reroll one recipe slot.
 
 Add ingredients for selected recipes (Stage 2).
 
-This mutation workflow is not implemented in Tasks 09–10. Stop with an
-unavailable-phase explanation; do not execute the future sequence below.
+**Phase sequence (Stage2 only):**
 
-**Phase sequence:**
+1. `grossy weekly selection-apply <run-id> <recipe-list|all>` persists the unique
+   nonempty selection and `recipeN → dinnerN` mapping in argument order. Identical
+   retries retain it; changing a persisted selection fails closed.
+2. Read the entire current cart and fresh rendered recipe product facts without
+   writes. Emit `grossy.cart.observation.v1` with optional closed
+   `recipe_product_facts` records: `product_id`, `canonical_url`,
+   `displayed_price_eur` (positive two-place decimal string), `availability`
+   (`available|unavailable|unknown`), `package_amount` (positive decimal string),
+   `package_unit` (`g|kg|ml|l|piece|pieces|count`), `package_count` (positive integer),
+   and `sale_kind` (`packaged|weighed`). One positive adapter quantity unit supplies
+   `package_amount × package_count`. For weighed goods `package_count` is one and
+   amount is a rendered available purchasable increment, never guessed from recipe
+   annotations/history. Facts and cart must be within five minutes; contradictory
+   overlapping facts fail. Missing or dimensionally incompatible facts block the
+   affected recipe. Do not restore unrelated removed recurring items.
+3. `grossy weekly recipe-preflight <run-id> <cart-observation.json>` independently
+   classifies every selected dinner before any additions, consolidates only passing
+   recipes, credits compatible cart quantity once, and returns an accepted versioned
+   exact manifest with at most ONE positive action. Blocked recipes never contribute.
+4. Present exact identity, delta, current price, conversion assumptions, blocked or
+   substituted decisions and whole-cart budget warning. Require owner confirmation
+   for EACH nonempty action. Denial/revocation stops without writes.
+5. Immediately re-read the entire cart/facts and repeat recipe-preflight. Compare
+   complete cart lines by stable identity, including quantities and prices, not only
+   selected ingredient deltas. Unexplained cart drift stops for attention/reconciliation;
+   changed deltas, facts or decisions require renewed confirmation. Stage1 removals
+   before the initial Stage2 read are allowed, but do not waive this comparison.
+   Use only that exact accepted manifest
+   (`grossy.cart.mutation-manifest.v1`, strict version1, stage `recipe`, run ID,
+   aware generated_at, preflight_checksum, additions, checksum).
+6. `grossy weekly recipe-intent <run-id> <mutation-manifest.json>`. Require exit zero
+   and versioned `status: persisted` authorization for its checksum BEFORE action.
+   This records incomplete readback evidence and enters `recipe-apply`. Never reuse
+   an outstanding authorization. Zero-add intent completes without browser action.
+7. For the one authorized addition, use rendered stable identity controls to add a
+   positive number of adapter units. Never set absolute quantity, decrement, remove,
+   compensate or enter checkout. Read the entire cart after EVERY attempted action.
+   Attach `mutation_result: {manifest_checksum, outcome}` (`readback|failed|incomplete`).
+   On read failure submit safe last known state explicitly marked incomplete.
+   `grossy weekly recipe-observe <run-id> <cart-observation.json>` must reconcile;
+   mismatch/failure stops ALL additions without removal, retaining partial evidence.
+8. Repeat fresh preflight, confirmation, intent and one-action/readback until zero
+   remaining additions. Successful Stage2 enters `awaiting-user-verification`.
+   Reports retain mapping, selected steps, exact targets versus retail quantities,
+   assumptions, passing/blocked decisions, budget and mutation evidence.
 
-1. Agent re-reads the cart.
-2. `grossy weekly selection-apply <run-id> <recipe-list|all>`
-3. `grossy weekly recipe-preflight <run-id> <cart-observation.json>`
-4. For each passing recipe:
-   - `grossy weekly recipe-intent <run-id> <mutation-manifest.json>`
-   - Agent presents the exact product/quantity deltas to the user for confirmation.
-   - If the user does not approve, abort; no browser mutation is performed.
-   - Agent performs additions via `agent-browser`.
-   - Agent re-reads the cart.
-   - `grossy weekly recipe-observe <run-id> <cart-observation.json>`
-5. Run enters `awaiting-user-verification`.
-
-**Stop conditions:**
-
-- Run not in `awaiting-recipe-selection` → fail.
-- Blocked recipe → do not start; other passing recipes may proceed.
-- Mid-mutation failure → stop additions; no rollback; record partial state.
+**Stop conditions:** lifecycle/selection mismatch, stale or ambiguous materially
+changed identity/matching, missing facts, blacklists/hard limits, authentication
+loss, unsafe UI or anti-bot challenge. Passing recipes may proceed despite other
+blocked dinners. Weekly budget alone warns, never removes or overrides hard limits.
 
 ### `weekly remove <run-id> --product <product-id> [--quantity N] [--include-preexisting]`
 
@@ -218,7 +248,7 @@ Explicit bounded removal.
 
 Resume an interrupted run.
 
-**Phase sequence (recurring only in Task11):**
+**Phase sequence (recurring or persisted selected Stage2):**
 
 1. Re-read the whole cart and fresh current product facts, no write.
 2. `grossy weekly resume-prepare <run-id> <cart-observation.json>`.
@@ -228,7 +258,8 @@ Resume an interrupted run.
    for cart-only observations. Never resubmit recorded failed/incomplete last-known
    state as reconciliation; rejection leaves the outstanding intent untouched.
    Unrelated changes or baseline loss stop for attention.
-3. Follow Recurring additions steps 3–8: explicit owner confirmation, immediate
+3. For a returned `stage: recurring` manifest ONLY, follow Recurring additions
+   steps 3–8: explicit owner confirmation, immediate
    re-read/preflight, durable recurring-intent, one positive addition and
    recurring-observe. Resume preparation is NOT browser-write authorization.
    Agent presents the exact resumed deltas from the persisted manifest
@@ -236,8 +267,10 @@ Resume an interrupted run.
    If the user does not approve, abort; no browser mutation is performed.
    `resume-prepare` exits non-zero or returns no accepted manifest
    → stop before any browser action.
-4. On any failure stop additions with no compensation/removal. No recipe,
-   removal or later-stage recovery is enabled. Existing legacy recipe snapshots
+4. For a persisted recipe selection, `resume-prepare` returns a recipe-stage
+   manifest and decisions; follow Stage2 steps 4–8, never recurring restoration.
+   On any failure stop additions with no compensation/removal. Removal/closure
+   recovery remains unavailable. Existing legacy recipe snapshots
    can regenerate exact reports but never grant retrospective recurring adds.
 
 ### `recipes add <url> --dry-run | --apply`

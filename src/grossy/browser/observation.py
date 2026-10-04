@@ -86,6 +86,28 @@ class RecurringProductFact(BaseModel):
     availability: Literal["available", "unavailable", "unknown"]
 
 
+class RecipeProductFact(RecurringProductFact):
+    """One adapter unit supplies amount * count; weighed amount is a rendered increment."""
+
+    package_amount: str
+    package_unit: Literal["g", "kg", "ml", "l", "piece", "pieces", "count"]
+    package_count: StrictInt = Field(gt=0)
+    sale_kind: Literal["packaged", "weighed"]
+
+    @field_validator("package_amount")
+    @classmethod
+    def _amount(cls, value: str) -> str:
+        if not re.fullmatch(r"(?:0|[1-9][0-9]*)(?:\.[0-9]+)?", value) or Decimal(value) <= 0:
+            raise ValueError("package amount must be a positive exact decimal string")
+        return value
+
+    @model_validator(mode="after")
+    def _weighed_count(self) -> RecipeProductFact:
+        if self.sale_kind == "weighed" and self.package_count != 1:
+            raise ValueError("weighed increment count must be one")
+        return self
+
+
 class MutationResult(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
@@ -105,19 +127,33 @@ class CartObservation(BaseModel):
     generated_at: str
     lines: list[CartObservationLine]
     recurring_product_facts: list[RecurringProductFact] = Field(default_factory=list)
+    recipe_product_facts: list[RecipeProductFact] = Field(default_factory=list)
     mutation_result: MutationResult | None = None
 
     @model_validator(mode="after")
     def _check_current_prices(self) -> CartObservation:
         prices = {line.product_id: Decimal(line.displayed_price_eur) for line in self.lines}
-        for fact in self.recurring_product_facts:
+        facts = [*self.recurring_product_facts, *self.recipe_product_facts]
+        identities = {line.product_id: line.canonical_url for line in self.lines}
+        availability: dict[str, str] = {}
+        for fact in facts:
+            if (
+                fact.product_id in availability
+                and availability[fact.product_id] != fact.availability
+            ):
+                raise ValueError("contradictory current product availability")
+            availability[fact.product_id] = fact.availability
+            if fact.product_id in identities and identities[fact.product_id] != fact.canonical_url:
+                raise ValueError("contradictory current product identity")
+            identities[fact.product_id] = fact.canonical_url
             if fact.product_id in prices and prices[fact.product_id] != Decimal(
                 fact.displayed_price_eur
             ):
                 raise ValueError("contradictory current cart and product fact prices")
+            prices[fact.product_id] = Decimal(fact.displayed_price_eur)
         return self
 
-    @field_validator("recurring_product_facts")
+    @field_validator("recurring_product_facts", "recipe_product_facts")
     @classmethod
     def _check_facts(cls, value: list[RecurringProductFact]) -> list[RecurringProductFact]:
         cls._check_lines(

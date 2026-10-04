@@ -1073,10 +1073,47 @@ def weekly_reroll_apply(
         raise typer.Exit(code=1)
 
 
+def _recipe_phase(phase: str, run_id: str, argument: str | Path) -> None:
+    from grossy.db.migrations import MigrationChecksumError
+    from grossy.db.snapshot import SnapshotError
+    from grossy.weekly.plan import WeeklyPlanError
+    from grossy.weekly.selection import (
+        run_recipe_intent,
+        run_recipe_observe,
+        run_recipe_preflight,
+        run_selection_apply,
+    )
+
+    try:
+        if phase == "selection-apply":
+            result = run_selection_apply(resolve_paths(), run_id, str(argument))
+        else:
+            data = json.loads(Path(argument).read_text(encoding="utf-8"))
+            handler = {
+                "recipe-preflight": run_recipe_preflight,
+                "recipe-intent": run_recipe_intent,
+                "recipe-observe": run_recipe_observe,
+            }[phase]
+            result = handler(resolve_paths(), run_id, data)
+    except (
+        WeeklyPlanError,
+        LockHeldError,
+        MigrationChecksumError,
+        SnapshotError,
+        OSError,
+        sqlite3.Error,
+        ValueError,
+    ) as exc:
+        emit_weekly_error(f"weekly {phase}", exc)
+    typer.echo(json.dumps(result, sort_keys=True))
+    if result.get("status") == "error":
+        raise typer.Exit(code=1)
+
+
 @weekly_app.command("selection-apply")
 def weekly_selection_apply(run_id: str, recipe_list: str) -> None:
     """Persist the explicit recipe selection for a weekly run."""
-    emit_not_implemented(f"weekly selection-apply {run_id} {recipe_list}")
+    _recipe_phase("selection-apply", run_id, recipe_list)
 
 
 @weekly_app.command("recipe-preflight")
@@ -1085,7 +1122,7 @@ def weekly_recipe_preflight(
     cart_observation: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
 ) -> None:
     """Classify every selected recipe as passing or blocked before additions."""
-    emit_not_implemented(f"weekly recipe-preflight {run_id} {cart_observation}")
+    _recipe_phase("recipe-preflight", run_id, cart_observation)
 
 
 @weekly_app.command("recipe-intent")
@@ -1094,7 +1131,7 @@ def weekly_recipe_intent(
     mutation_manifest: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
 ) -> None:
     """Persist the recipe mutation manifest before browser mutation."""
-    emit_not_implemented(f"weekly recipe-intent {run_id} {mutation_manifest}")
+    _recipe_phase("recipe-intent", run_id, mutation_manifest)
 
 
 @weekly_app.command("recipe-observe")
@@ -1103,7 +1140,7 @@ def weekly_recipe_observe(
     cart_observation: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
 ) -> None:
     """Reconcile intended and observed recipe additions."""
-    emit_not_implemented(f"weekly recipe-observe {run_id} {cart_observation}")
+    _recipe_phase("recipe-observe", run_id, cart_observation)
 
 
 @weekly_app.command("removal-preflight")

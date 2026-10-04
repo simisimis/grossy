@@ -38,27 +38,47 @@ def apply_recurring(
     confirm: Callable[[dict[str, Any]], bool],
     *,
     resume: bool = False,
+    _stage: str = "recurring",
 ) -> dict[str, Any]:
     """Offline-testable skill orchestration, never implicitly invoked by CLI.
 
     Each accepted manifest has at most one action. After any failure this
     invocation stops; another invocation must explicitly use resume and reread.
     """
+    if _stage == "recipe":
+        from grossy.weekly.selection import (
+            run_recipe_intent,
+            run_recipe_observe,
+            run_recipe_preflight,
+        )
+
+        preflight, intent, observe = run_recipe_preflight, run_recipe_intent, run_recipe_observe
+    else:
+        preflight, intent, observe = (
+            run_recurring_preflight,
+            run_recurring_intent,
+            run_recurring_observe,
+        )
     before = adapter.read_cart().model_dump(mode="json")
-    prepared = (run_resume_prepare if resume else run_recurring_preflight)(paths, run_id, before)
+    prepared = (run_resume_prepare if resume else preflight)(paths, run_id, before)
     while True:
         manifest = prepared["manifest"]
         if manifest["additions"] and not confirm(manifest):
             return {"status": "cancelled"}
         # Confirmation does not waive the immediately-before-mutation reread.
         current = adapter.read_cart().model_dump(mode="json")
-        refreshed = run_recurring_preflight(paths, run_id, current)
-        if refreshed["manifest"]["additions"] != manifest["additions"] or current.get(
-            "recurring_product_facts"
-        ) != before.get("recurring_product_facts"):
+        refreshed = preflight(paths, run_id, current)
+        if (
+            refreshed["manifest"]["additions"] != manifest["additions"]
+            or {line["product_id"]: line for line in current["lines"]}
+            != {line["product_id"]: line for line in before["lines"]}
+            or current.get("recurring_product_facts") != before.get("recurring_product_facts")
+            or current.get("recipe_product_facts") != before.get("recipe_product_facts")
+            or refreshed["decisions"] != prepared["decisions"]
+        ):
             raise WeeklyPlanError("confirmed delta changed; renewed owner confirmation required")
         manifest = refreshed["manifest"]
-        authorization = run_recurring_intent(paths, run_id, manifest)
+        authorization = intent(paths, run_id, manifest)
         addition = authorization["addition"]
         if addition is None:
             return {"status": "success"}
@@ -80,10 +100,22 @@ def apply_recurring(
             "manifest_checksum": manifest["checksum"],
             "outcome": outcome,
         }
-        result = run_recurring_observe(paths, run_id, observed)
+        result = observe(paths, run_id, observed)
         if error is not None or result["status"] != "success":
             if isinstance(error, (KeyboardInterrupt, SystemExit)):
                 raise error
             return {"status": "error", "lifecycle": "partial-failure"}
         before = adapter.read_cart().model_dump(mode="json")
-        prepared = run_recurring_preflight(paths, run_id, before)
+        prepared = preflight(paths, run_id, before)
+
+
+def apply_recipes(
+    paths: GrossyPaths,
+    run_id: str,
+    adapter: AdditiveCartAdapter,
+    confirm: Callable[[dict[str, Any]], bool],
+    *,
+    resume: bool = False,
+) -> dict[str, Any]:
+    """Selected Stage2 only: no recurring baseline restoration or implicit browser."""
+    return apply_recurring(paths, run_id, adapter, confirm, resume=resume, _stage="recipe")
