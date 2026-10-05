@@ -14,7 +14,7 @@ import json
 import math
 import sqlite3
 from pathlib import Path
-from typing import Annotated, NoReturn
+from typing import Annotated, Any, NoReturn
 
 import typer
 
@@ -535,13 +535,13 @@ def weekly_finish(
     no_recipes: Annotated[bool, typer.Option("--no-recipes")] = False,
 ) -> None:
     """Record that the user reviewed the prepared cart."""
-    emit_not_implemented(f"weekly finish {run_id} --no-recipes={no_recipes}")
+    _closure_phase("finish", run_id, no_recipes=no_recipes)
 
 
 @weekly_app.command("abandon")
 def weekly_abandon(run_id: str) -> None:
     """Close a run without removing any cart additions."""
-    emit_not_implemented(f"weekly abandon {run_id}")
+    _closure_phase("abandon", run_id)
 
 
 @db_app.command("backup")
@@ -1147,15 +1147,22 @@ def weekly_recipe_observe(
 def weekly_removal_preflight(
     run_id: str,
     product: Annotated[str, typer.Option("--product")],
+    cart_observation: Annotated[
+        Path, typer.Option("--cart-observation", exists=True, dir_okay=False)
+    ],
     quantity: Annotated[int | None, typer.Option("--quantity")] = None,
     include_preexisting: Annotated[bool, typer.Option("--include-preexisting")] = False,
 ) -> None:
     """Validate an explicit bounded removal before mutation."""
     if quantity is not None:
         require_positive(quantity, "--quantity")
-    emit_not_implemented(
-        f"weekly removal-preflight {run_id} --product {product} "
-        f"--quantity={quantity} --include-preexisting={include_preexisting}"
+    _removal_phase(
+        "preflight",
+        run_id,
+        cart_observation,
+        product=product,
+        quantity=quantity,
+        include_preexisting=include_preexisting,
     )
 
 
@@ -1165,7 +1172,7 @@ def weekly_removal_intent(
     mutation_manifest: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
 ) -> None:
     """Persist the removal manifest before browser mutation."""
-    emit_not_implemented(f"weekly removal-intent {run_id} {mutation_manifest}")
+    _removal_phase("intent", run_id, mutation_manifest)
 
 
 @weekly_app.command("removal-observe")
@@ -1174,7 +1181,7 @@ def weekly_removal_observe(
     cart_observation: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
 ) -> None:
     """Reconcile intended and observed removal results."""
-    emit_not_implemented(f"weekly removal-observe {run_id} {cart_observation}")
+    _removal_phase("observe", run_id, cart_observation)
 
 
 @weekly_app.command("resume-prepare")
@@ -1206,6 +1213,82 @@ def weekly_resume_prepare(
 
 def main() -> None:
     app()
+
+
+def _removal_phase(phase: str, run_id: str, proposal: Path, **kwargs: Any) -> None:
+    from grossy.db.migrations import MigrationChecksumError
+    from grossy.weekly.plan import WeeklyPlanError
+    from grossy.weekly.removal import (
+        RemovalManifest,
+        run_removal_intent,
+        run_removal_observe,
+        run_removal_preflight,
+    )
+
+    try:
+        data = json.loads(proposal.read_text(encoding="utf-8"))
+        if phase == "intent":
+            manifest = RemovalManifest.model_validate(data)
+            action = manifest.removals[0]
+            import sys
+            from contextlib import redirect_stdout
+
+            with redirect_stdout(sys.stderr):
+                confirmed = typer.confirm(
+                    f"Remove {action.quantity} of product {action.product_id} "
+                    f"({manifest.run_attributed_quantity} current-run, "
+                    f"{manifest.preexisting_quantity} pre-existing)?",
+                    err=True,
+                )
+            result = run_removal_intent(resolve_paths(), run_id, data, confirmed=confirmed)
+        elif phase == "preflight":
+            result = run_removal_preflight(resolve_paths(), run_id, data, **kwargs)
+        else:
+            result = run_removal_observe(resolve_paths(), run_id, data)
+    except (
+        ValueError,
+        WeeklyPlanError,
+        LockHeldError,
+        MigrationChecksumError,
+        OSError,
+        sqlite3.Error,
+        typer.Abort,
+    ) as exc:
+        emit_weekly_error(f"weekly removal-{phase}", exc)
+    typer.echo(json.dumps(result, sort_keys=True))
+    if result.get("status") == "error":
+        raise typer.Exit(code=1)
+
+
+def _closure_phase(phase: str, run_id: str, *, no_recipes: bool = False) -> None:
+    from grossy.db.migrations import MigrationChecksumError
+    from grossy.weekly.closure import run_close, run_report_regenerate
+    from grossy.weekly.plan import WeeklyPlanError
+
+    try:
+        result = (
+            run_report_regenerate(resolve_paths(), run_id)
+            if phase == "report-regenerate"
+            else run_close(
+                resolve_paths(), run_id, abandon=phase == "abandon", no_recipes=no_recipes
+            )
+        )
+    except (
+        ValueError,
+        WeeklyPlanError,
+        LockHeldError,
+        MigrationChecksumError,
+        OSError,
+        sqlite3.Error,
+    ) as exc:
+        emit_weekly_error(f"weekly {phase}", exc)
+    typer.echo(json.dumps(result, sort_keys=True))
+
+
+@weekly_app.command("report-regenerate")
+def weekly_report_regenerate(run_id: str) -> None:
+    """Regenerate persisted reports without replaying mutations or changing lifecycle."""
+    _closure_phase("report-regenerate", run_id)
 
 
 if __name__ == "__main__":

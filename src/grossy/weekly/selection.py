@@ -147,6 +147,24 @@ def recipe_plan(
     if resolve_yaml_policy(config, conn).has_conflicts:
         raise WeeklyPlanError("YAML blacklist conflict blocks recipe additions")
     facts = {f.product_id: f for f in obs.recipe_product_facts}
+    removed = {
+        json.loads(row[0])["product_id"]
+        for row in conn.execute(
+            "SELECT detail FROM run_events WHERE run_id=? AND event_type='removal-verified'", (rid,)
+        )
+    }
+    removed_equivalents = set(removed)
+    for removed_pid in removed:
+        removed_equivalents.update(
+            row[0]
+            for row in conn.execute(
+                "SELECT p.retailer_product_id FROM family_members m "
+                "JOIN products p ON p.id=m.product_id "
+                "WHERE m.family_id=(SELECT fm.family_id FROM family_members fm "
+                "JOIN products rp ON rp.id=fm.product_id WHERE rp.retailer_product_id=?)",
+                (removed_pid,),
+            )
+        )
     decisions: list[dict[str, Any]] = []
     from grossy.weekly.recipes import _eligibility
 
@@ -245,6 +263,7 @@ def recipe_plan(
                 continue
             basis, factor = _UNITS[unit.casefold()]
             item.update(
+                removal_protected=bool(set(ids) & removed_equivalents),
                 status="exact" if pid == exact["product_id"] else "substituted",
                 product_id=pid,
                 preferred_product_id=exact["product_id"],
@@ -312,6 +331,11 @@ def recipe_plan(
             quantity = int(
                 (missing / Decimal(sample["base_size"])).to_integral_value(rounding=ROUND_CEILING)
             )
+            if quantity and any(i["removal_protected"] for _, i in contributions):
+                blocked.update(d["slot"] for d, _ in contributions)
+                for d, _ in contributions:
+                    d["reasons"].append("explicit removal would be undone; renewed review required")
+                continue
             intended = int(
                 (target / Decimal(sample["base_size"])).to_integral_value(rounding=ROUND_CEILING)
             )

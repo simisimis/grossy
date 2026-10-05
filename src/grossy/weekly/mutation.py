@@ -95,6 +95,20 @@ def _locked(paths: GrossyPaths) -> Iterator[tuple[sqlite3.Connection, GrossyConf
 
 
 def _run(conn: sqlite3.Connection, run_id: str, stage: str = "recurring") -> int:
+    removal_run = conn.execute("SELECT id FROM planner_runs WHERE run_id=?", (run_id,)).fetchone()
+    if removal_run:
+        if _pending(conn, int(removal_run[0]), "removal"):
+            raise WeeklyPlanError(
+                "outstanding removal requires readback; never replay through additions"
+            )
+        if (
+            stage == "recurring"
+            and conn.execute(
+                "SELECT 1 FROM run_events WHERE run_id=? AND event_type='removal-verified'",
+                (removal_run[0],),
+            ).fetchone()
+        ):
+            raise WeeklyPlanError("explicit removal cannot be restored by recurring additions")
     if stage == "recipe":
         row = conn.execute(
             "SELECT id,lifecycle FROM planner_runs WHERE run_id=?", (run_id,)
@@ -182,6 +196,13 @@ def _recipe_anchor(conn: sqlite3.Connection, rid: int) -> CartObservation | None
         "ORDER BY o.id DESC LIMIT 1",
         (rid,),
     ).fetchone()
+    anchor_event = conn.execute(
+        "SELECT event_type,detail FROM run_events WHERE run_id=? "
+        "AND event_type IN ('removal-cart','recipe-cart') ORDER BY id DESC LIMIT 1",
+        (rid,),
+    ).fetchone()
+    if anchor_event and anchor_event[0] == "removal-cart":
+        return validate_cart_observation(json.loads(anchor_event[1])["cart"])
     if row:
         return validate_cart_observation(json.loads(row[0]))
     accepted = _latest(conn, rid, "recipe-preflight")
@@ -660,7 +681,10 @@ def run_recurring_intent(
                     conn,
                     rid,
                     "recipe-cart",
-                    {"quantities": _cart(validate_cart_observation(accepted["cart"]))},
+                    {
+                        "quantities": _cart(validate_cart_observation(accepted["cart"])),
+                        "cart": accepted["cart"],
+                    },
                 )
             _event(conn, rid, f"{stage}-complete", {"status": "zero-additions"})
             if stage == "recipe":
@@ -845,14 +869,14 @@ def run_resume_prepare(
                     _now_utc(),
                 ),
             )
-            _event(conn, rid, f"{stage}-cart", {"quantities": current})
+            _event(conn, rid, f"{stage}-cart", {"quantities": current, "cart": data})
         else:
             expected = _latest(conn, rid, f"{stage}-cart")
-            if stage == "recipe":
-                anchor = _recipe_anchor(conn, rid)
-                if anchor is not None and _cart_lines(obs) != _cart_lines(anchor):
+            anchor = _recipe_anchor(conn, rid) if stage == "recipe" else None
+            if anchor is not None:
+                if _cart_lines(obs) != _cart_lines(anchor):
                     raise WeeklyPlanError("unexplained cart change on resume")
-            if (stage == "recurring" or expected) and _cart(obs) != (
+            elif (stage == "recurring" or expected) and _cart(obs) != (
                 expected["quantities"] if expected else _baseline(conn, rid)
             ):
                 raise WeeklyPlanError("unexplained cart change on resume")

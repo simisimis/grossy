@@ -67,7 +67,7 @@ Start Stage1: history sync, whole-cart baseline, owner-confirmed recurring addit
 2. `grossy weekly plan-prepare --listed-orders <listed-proposal.json>`, or
    `grossy weekly plan-prepare --skip-history-sync` for an explicit skip.
    Local history alone is not comparison evidence. These CLI phases never browse.
-   This CLI never browses. Recipe ingredients and removal remain unavailable.
+   This CLI never browses. No CLI phase launches a browser.
 3. Agent reads the current cart using `agent-browser`.
 4. Agent emits a `grossy.cart.observation.v1` JSON.
 5. `grossy weekly baseline-apply <run-id> <cart-observation.json>`
@@ -236,13 +236,40 @@ Explicit bounded removal.
 
 **Phase sequence:**
 
-1. `grossy weekly removal-preflight <run-id> --product <product-id> [--quantity N] [--include-preexisting]`
-2. `grossy weekly removal-intent <run-id> <mutation-manifest.json>`
-3. Agent presents the exact removal (product ID and quantity) to the user for confirmation.
-4. If the user does not approve, abort; no browser mutation is performed.
-5. Agent performs removal via `agent-browser`.
-6. Agent re-reads the cart.
-7. `grossy weekly removal-observe <run-id> <cart-observation.json>`
+1. Read the entire current cart, emit fresh `grossy.cart.observation.v1`.
+2. `grossy weekly removal-preflight <run-id> --product <product-id> --cart-observation <cart.json> [--quantity N] [--include-preexisting]`.
+   Default quantity is remaining verified current-run attribution. Baseline/external
+   quantities require `--include-preexisting`. Require accepted versioned manifest.
+3. Present exact identity, quantity, current-run/pre-existing split and before cart;
+   obtain explicit owner confirmation. Denial/revocation stops, no intent or action.
+4. Immediately reread the entire cart and repeat preflight. Compare full identity,
+   quantity, price and split with confirmed evidence. Any drift stops; changed action
+   requires renewed confirmation, never silently transfer approval.
+5. `grossy weekly removal-intent <run-id> <manifest.json>` prompts interactively on
+   stderr for the exact removal and pre-existing split. No unattended confirmation
+   bypass. Require exit zero and persisted authorization before any browser write.
+6. Perform exactly ONE bounded decrement through rendered stable ID/URL controls.
+   Never compensate, retry automatically, restore removed products or touch checkout.
+7. Read the entire cart after the attempted action. Attach `mutation_result` with
+   exact manifest checksum and `readback|failed|incomplete` outcome; if read fails,
+   submit last known safe cart marked incomplete. `grossy weekly removal-observe
+   <run-id> <cart.json>`. Failure/mismatch retains evidence and stops all mutation.
+   Outstanding intent is never reauthorized or replayed by addition resume. Fresh
+   exact unchanged whole-cart `readback` may record `not-applied` reconciliation
+   without attribution debit or suppression; failed/incomplete evidence cannot clear
+   intent. A new removal requires new preflight and confirmation, never a retry.
+   Partial/unexpected differences remain blocked; abandonment preserves evidence.
+
+### Local closure and recovery
+
+- `grossy weekly finish <run-id>` records cart review only from awaiting-user-verification.
+- `grossy weekly finish <run-id> --no-recipes` deliberately selects no recipes from
+  awaiting-recipe-selection; never discards an existing selection.
+- `grossy weekly abandon <run-id>` closes without removing anything, retaining evidence.
+- `grossy weekly report-regenerate <run-id>` mechanically writes SQLite report truth
+  after I/O failure; never replays browser mutations or changes lifecycle.
+- Disable browser activity by stopping skill invocation; preserve database, offline
+  history, recipes and run artifacts. No purge/reset/recreation or automatic rollback.
 
 ### `weekly resume <run-id>`
 
@@ -269,8 +296,7 @@ Resume an interrupted run.
    → stop before any browser action.
 4. For a persisted recipe selection, `resume-prepare` returns a recipe-stage
    manifest and decisions; follow Stage2 steps 4–8, never recurring restoration.
-   On any failure stop additions with no compensation/removal. Removal/closure
-   recovery remains unavailable. Existing legacy recipe snapshots
+   On any failure stop additions with no compensation/removal. Outstanding removals require explicit readback reconciliation, never addition replay. Existing legacy recipe snapshots
    can regenerate exact reports but never grant retrospective recurring adds.
 
 ### `recipes add <url> --dry-run | --apply`

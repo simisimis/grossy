@@ -299,11 +299,23 @@ def build_markdown_report(data: dict[str, Any]) -> str:
         for evidence in data["recurring_mutation_evidence"]:
             lines.append(f"- {json.dumps(evidence, sort_keys=True)}")
         lines.append("")
+    if data.get("removal_closure_evidence"):
+        lines.append("## Explicit removals and cart-review closure")
+        lines.extend(json.dumps(e, sort_keys=True) for e in data["removal_closure_evidence"])
+        lines.append("Cart review is not checkout or a completed order. Abandon removes nothing.")
+        lines.append("")
     lines.append("---")
     lines.append(
         (
             "_Cart intent/readback evidence is recorded above. "
-            if data.get("recurring_mutation_evidence") or data.get("recipe_mutation_evidence")
+            if any(
+                data.get(key)
+                for key in (
+                    "recurring_mutation_evidence",
+                    "recipe_mutation_evidence",
+                    "removal_closure_evidence",
+                )
+            )
             else "_This is a read-only preview. No cart mutation has occurred. "
         )
         + "Baseline availability and prices come from the cart observation; recipe-match "

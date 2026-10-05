@@ -118,6 +118,7 @@ EXPECTED_COMMANDS = frozenset(
         "weekly removal-intent",
         "weekly removal-observe",
         "weekly resume-prepare",
+        "weekly report-regenerate",
         "db backup",
         "db export",
         "db restore",
@@ -162,16 +163,17 @@ def test_help_exits_zero() -> None:
         ["weekly", "finish", "run-1"],
         ["weekly", "finish", "run-1", "--no-recipes"],
         ["weekly", "abandon", "run-1"],
-        ["weekly", "removal-preflight", "run-1", "--product", "1234567"],
+        ["weekly", "report-regenerate", "run-1"],
     ],
 )
-def test_placeholder_fails_closed_with_versioned_json(args: list[str]) -> None:
+def test_closure_fails_closed_without_database(args: list[str], isolated_home: GrossyPaths) -> None:
     result = RUNNER.invoke(app, args)
     assert result.exit_code == 1
     stdout: dict[str, Any] = json.loads(result.output)
     assert stdout["schema_name"] == STATUS_SCHEMA_NAME
     assert stdout["schema_version"] == STATUS_SCHEMA_VERSION
-    assert stdout["status"] == "not_implemented"
+    assert stdout["status"] == "error"
+    assert not isolated_home.database_file.exists()
     assert isinstance(stdout["command"], str) and stdout["command"].startswith(args[0])
     # Diagnostics go to stderr, not stdout: stdout is exactly one JSON line.
     assert result.output.count("\n") <= 1
@@ -266,7 +268,7 @@ def test_nonnumeric_weeks_rejected_by_parser(isolated_home: GrossyPaths) -> None
         pytest.param(
             ["weekly", "removal-preflight", "run-1", "--product", "1", "--quantity", "-2"],
             "--quantity must be a positive integer",
-            "grossy.cli.emit_not_implemented",
+            "grossy.cli._removal_phase",
             id="negative-removal-quantity",
         ),
     ],
@@ -276,6 +278,10 @@ def test_nonpositive_arguments_rejected_before_handler(
 ) -> None:
     """Range validation (require_positive) rejects non-positive values before
     the maintenance handler or placeholder is reached."""
+    if args[:2] == ["weekly", "removal-preflight"]:
+        proposal = isolated_home.config_dir.parent.parent / "cart.json"
+        proposal.write_text("{}")
+        args = [*args, "--cart-observation", str(proposal)]
     with patch(spy_target) as spy:
         result = RUNNER.invoke(app, args)
     spy.assert_not_called()
@@ -419,3 +425,45 @@ def test_maintenance_command_respects_writer_lock(initialized_home: GrossyPaths)
         assert row[0] == 3
     finally:
         conn.close()
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "finish",
+        "abandon",
+        "report-regenerate",
+        "removal-preflight",
+        "removal-intent",
+        "removal-observe",
+    ],
+)
+def test_module_entry_weekly_phases_fail_closed(
+    isolated_home: GrossyPaths, command: str, tmp_path: Path
+) -> None:
+    import subprocess
+    import sys
+
+    help_result = subprocess.run(
+        [sys.executable, "-m", "grossy.cli", "weekly", command, "--help"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert help_result.returncode == 0, help_result.stderr
+    args = [sys.executable, "-m", "grossy.cli", "weekly", command, "missing-run"]
+    if command.startswith("removal-"):
+        proposal = tmp_path / "proposal.json"
+        proposal.write_text("{}")
+        args.extend(
+            ["--cart-observation", str(proposal)]
+            if command == "removal-preflight"
+            else [str(proposal)]
+        )
+        if command == "removal-preflight":
+            args.extend(["--product", "111"])
+    result = subprocess.run(args, capture_output=True, text=True, check=False)
+    assert result.returncode != 0
+    assert json.loads(result.stdout)["status"] == "error"
+    assert "NameError" not in result.stderr
+    assert not isolated_home.database_file.exists()
