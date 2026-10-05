@@ -720,15 +720,15 @@ def test_cli_read_only_phase_routing(
     run_id = prepare(home)
     file = tmp_path / "proposal.json"
     file.write_text(json.dumps(proposal(run_id)))
-    runner = CliRunner(mix_stderr=False)
+    runner = CliRunner()
     applied = runner.invoke(app, ["weekly", "recipes-apply", run_id, str(file)])
-    assert applied.exit_code == 0, applied.output
-    assert json.loads(applied.output)["status"] == "success"
+    assert applied.exit_code == 0, applied.stdout
+    assert json.loads(applied.stdout)["status"] == "success"
     rerolled = runner.invoke(app, ["weekly", "reroll-apply", run_id, "recipe1", "--from", "all"])
     assert rerolled.exit_code == 0
-    assert json.loads(rerolled.output)["reroll_history"][-1]["result"] == "no_candidate"
+    assert json.loads(rerolled.stdout)["reroll_history"][-1]["result"] == "no_candidate"
     invalid = runner.invoke(app, ["weekly", "reroll-apply", run_id, "recipe5", "--from", "all"])
-    assert invalid.exit_code == 1 and json.loads(invalid.output)["status"] == "error"
+    assert invalid.exit_code == 1 and json.loads(invalid.stdout)["status"] == "error"
 
 
 def test_proposal_closed_nested_fields() -> None:

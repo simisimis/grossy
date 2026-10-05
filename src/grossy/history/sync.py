@@ -50,6 +50,7 @@ from grossy.history.proposal import (
     validate_order_scan,
 )
 from grossy.paths import GrossyPaths
+from grossy.security import sanitize_human_text
 
 SYNC_REPORT_SCHEMA_NAME = "grossy.history.sync-report"
 SYNC_REPORT_SCHEMA_VERSION = 1
@@ -1044,31 +1045,9 @@ def _change_reason(old: _ProductRow, product: ScannedProduct, order_date: str) -
 # --- sanitized reports (FR-28, FR-29) ---------------------------------------
 
 
-def _redact_source_order_ids(text: str, order_ids: set[str]) -> str:
-    """Redact known source order IDs from report text (FR-29).
-
-    Uses digit-boundary matching so an ID is only replaced when it is not part
-    of a longer numeric run, avoiding corrupting unrelated counts or the hex
-    proposal checksum. Longer IDs are matched first so an ID that is a prefix
-    of another is not partially redacted.
-    """
-    ids = sorted((oid for oid in order_ids if oid), key=len, reverse=True)
-    if not ids:
-        return text
-    pattern = re.compile(r"(?<!\d)(" + "|".join(re.escape(oid) for oid in ids) + r")(?!\d)")
-    return pattern.sub("[redacted]", text)
-
-
 def _sanitize_untrusted_text(value: str, order_ids: set[str]) -> str:
-    """Sanitize an untrusted report field (product title/category) (FR-29).
-
-    Collapses all whitespace (including newlines and tabs) to single spaces so
-    a multiline or control-laden title cannot inject report/markdown structure,
-    then redacts known source order IDs so they never reach the report even if
-    embedded in untrusted text.
-    """
-    collapsed = _WHITESPACE_RE.sub(" ", value).strip()
-    return _redact_source_order_ids(collapsed, order_ids)
+    """Minimize private data and source identities in human reports."""
+    return sanitize_human_text(value, order_ids)
 
 
 def _build_apply_report_texts(

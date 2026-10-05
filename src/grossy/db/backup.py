@@ -31,8 +31,8 @@ from typing import Any
 
 from grossy.db.connection import open_connection
 from grossy.db.migrations import discover_migrations, get_schema_version
-from grossy.db.snapshot import SnapshotError, verify_sqlite_snapshot
-from grossy.fsutil import atomic_write
+from grossy.db.snapshot import SnapshotError, private_sqlite_backup, verify_sqlite_snapshot
+from grossy.fsutil import atomic_write, atomic_write_text, ensure_private_dir
 
 BACKUP_MANIFEST_SCHEMA = "grossy.db.backup-manifest"
 BACKUP_MANIFEST_VERSION = 1
@@ -74,6 +74,9 @@ _EXPORT_TABLES = (
     "run_mutation_observations",
     "run_removals",
     "run_events",
+    "history_sync_reports",
+    "review_items",
+    "weekly_reports",
 )
 
 
@@ -126,13 +129,11 @@ def _create_verified_backup(source: Path, dest_dir: Path, prefix: str) -> Path:
     before the caller proceeds (PRD 12.2.4, 14.3.5). The backup is mode 0600.
     """
     dest = dest_dir / f"{prefix}-{_now_utc().replace(':', '-').replace('.', '-')}.sqlite3"
-    dest_dir.mkdir(parents=True, exist_ok=True)
+    ensure_private_dir(dest_dir)
     src_conn = open_connection(source)
-    dst_conn = sqlite3.connect(str(dest))
     try:
-        src_conn.backup(dst_conn)
+        private_sqlite_backup(src_conn, dest)
     finally:
-        dst_conn.close()
         src_conn.close()
     dest.chmod(0o600)
     # Verify the snapshot before the caller uses it to proceed.
@@ -153,14 +154,16 @@ def db_backup(db_path: Path, dest_path: Path) -> Path:
     """
     if not db_path.exists():
         raise RestoreError(f"database not found: {db_path}; run init first")
-    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    if dest_path.resolve() == db_path.resolve() or (
+        dest_path.exists() and dest_path.samefile(db_path)
+    ):
+        raise ExportError("destination must not alias the active database")
+    ensure_private_dir(dest_path.parent)
 
     src_conn = open_connection(db_path)
-    dst_conn = sqlite3.connect(str(dest_path))
     try:
-        src_conn.backup(dst_conn)
+        private_sqlite_backup(src_conn, dest_path)
     finally:
-        dst_conn.close()
         src_conn.close()
     dest_path.chmod(0o600)
 
@@ -176,8 +179,7 @@ def db_backup(db_path: Path, dest_path: Path) -> Path:
         "source_database": str(db_path),
     }
     manifest_path = _manifest_path_for(dest_path)
-    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
-    manifest_path.chmod(0o600)
+    atomic_write_text(manifest_path, json.dumps(manifest, indent=2, sort_keys=True) + "\n")
 
     return dest_path
 
@@ -196,16 +198,20 @@ def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
 def _required_export_tables(schema_version: int) -> frozenset[str]:
     """Return the set of export tables that must exist at the given schema version.
 
-    Recipe planning snapshots and the seen ledger were introduced by migration
-    009; the remaining inventory dates to migration 001. Missing tables are
-    corruption only when the declared schema requires them (PRD 14.2, 18).
+    Report recovery, review items and recipe planning state were introduced
+    incrementally. Missing tables are corruption only when the declared schema
+    requires them (PRD 14.2, 18).
     """
     if schema_version < 1:
         return frozenset()
-    recipe_planning_tables = {"run_recipe_plans", "run_recipe_seen"}
-    if schema_version < 9:
-        return frozenset(_EXPORT_TABLES) - recipe_planning_tables
-    return frozenset(_EXPORT_TABLES)
+    introduced = {
+        "history_sync_reports": 4,
+        "review_items": 5,
+        "weekly_reports": 8,
+        "run_recipe_plans": 9,
+        "run_recipe_seen": 9,
+    }
+    return frozenset(t for t in _EXPORT_TABLES if introduced.get(t, 1) <= schema_version)
 
 
 def _table_rows(conn: sqlite3.Connection, name: str) -> list[dict[str, Any]]:
@@ -235,7 +241,11 @@ def db_export(db_path: Path, dest_path: Path) -> Path:
     """
     if not db_path.exists():
         raise ExportError(f"database not found: {db_path}; run init first")
-    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    if dest_path.resolve() == db_path.resolve() or (
+        dest_path.exists() and dest_path.samefile(db_path)
+    ):
+        raise ExportError("destination must not alias the active database")
+    ensure_private_dir(dest_path.parent)
 
     conn = open_connection(db_path)
     try:
@@ -440,10 +450,20 @@ def db_restore(
         # 8/9. Activate atomically with a final pre-activation verification.
         _verify_snapshot(backup_path)
         tmp_path = db_path.with_suffix(".restore-tmp")
-        tmp_path.write_bytes(backup_path.read_bytes())
-        tmp_path.chmod(0o600)
-        _verify_snapshot(tmp_path)
-        tmp_path.replace(db_path)
+        try:
+            atomic_write(tmp_path, backup_path.read_bytes())
+            copied_checksum, _ = _verify_snapshot(tmp_path)
+            if copied_checksum != manifest_checksum:
+                raise RestoreError("backup changed during restore; activation refused")
+            # A portable snapshot uses DELETE journaling; active state uses WAL.
+            restored = open_connection(tmp_path)
+            restored.close()
+            _verify_snapshot(tmp_path)
+            tmp_path.replace(db_path)
+        finally:
+            tmp_path.unlink(missing_ok=True)
+            for suffix in ("-wal", "-shm"):
+                tmp_path.with_name(tmp_path.name + suffix).unlink(missing_ok=True)
         # Remove stale WAL/SHM side files from the previous database.
         for suffix in ("-wal", "-shm"):
             side = db_path.with_name(db_path.name + suffix)

@@ -11,7 +11,7 @@ from typer.testing import CliRunner
 from grossy.cli import app
 from grossy.recipes import DiscoveryError, run_recipes_discover
 
-RUNNER = CliRunner(mix_stderr=False)
+RUNNER = CliRunner()
 
 
 @pytest.fixture()
@@ -111,7 +111,7 @@ def test_cli_discover_is_state_free(
     result = RUNNER.invoke(app, ["recipes", "discover", "--from", classes])
     assert result.exit_code == exit_code
     if expected is not None:
-        data = json.loads(result.output)
+        data = json.loads(result.stdout)
         assert data["status"] == "policy"
         assert data["target_classes"] == expected
     assert not list(isolated_home.iterdir())

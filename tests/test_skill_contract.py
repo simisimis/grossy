@@ -118,7 +118,11 @@ def test_safety_boundaries_document_required_instructions(skill_content: str) ->
             "unexpected cart change, or unsafe exposure.",
             "Never execute arbitrary SQL.",
             "Never enter credentials or 2FA codes.",
-            "Never open or progress checkout.",
+            "Never progress checkout.",
+            "Only with explicit coordinator/user approval,",
+            "opening `https://www.ab.gr/checkout` to read its cart-item list is permitted:",
+            "do not read account/address/payment/fulfilment sections,",
+            "click checkout-stage controls or perform cart writes under read-only approval.",
             "Never select fulfilment slots.",
             "Never pay or submit an order.",
             "Stop the workflow before any browser action whenever a deterministic CLI "

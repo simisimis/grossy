@@ -29,7 +29,7 @@ from grossy.recipes import (
 from grossy.recipes.proposal import proposal_checksum
 from grossy.recipes.seeds import seed_fixture_path
 
-RUNNER = CliRunner(mix_stderr=False)
+RUNNER = CliRunner()
 
 
 # --- seed spec definitions (FR-86) --------------------------------------------------
@@ -481,7 +481,7 @@ def test_cli_seed_with_bundled_fixture(cli_env: tuple[Path, GrossyPaths]) -> Non
     _, paths = cli_env
     result = RUNNER.invoke(app, ["recipes", "seed", "--fixture-dir", str(BUNDLED_SEED_FIXTURE_DIR)])
     assert result.exit_code == 0
-    data = json.loads(result.output)
+    data = json.loads(result.stdout)
     assert data["status"] == "complete"
     assert data["imported_count"] == 1
     assert data["existing_count"] == 0
@@ -495,7 +495,7 @@ def test_cli_seed_empty_fixture_dir(cli_env: tuple[Path, GrossyPaths]) -> None:
     empty_dir.mkdir()
     result = RUNNER.invoke(app, ["recipes", "seed", "--fixture-dir", str(empty_dir)])
     assert result.exit_code == 0
-    data = json.loads(result.output)
+    data = json.loads(result.stdout)
     assert data["status"] == "complete"
     assert data["imported_count"] == 0
     assert data["missing_count"] == 4

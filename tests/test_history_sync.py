@@ -39,7 +39,7 @@ from grossy.history import (
 from grossy.init import do_init
 from grossy.paths import GrossyPaths
 
-RUNNER = CliRunner(mix_stderr=False)
+RUNNER = CliRunner()
 
 GENERATED_AT = "2026-09-26T12:00:00+00:00"
 
@@ -192,6 +192,97 @@ def _product_row(db: Path, product_id: str) -> tuple[Any, ...] | None:
 
 
 # --- proposal schema tests --------------------------------------------------
+
+
+def _validate_query_order(family: str, url: str) -> Any:
+    source_id = "000123456"  # Synthetic identity; leading zeros must survive.
+    if family == "listed":
+        payload = _window_listed()
+        payload["orders"][0] = _listed_order(source_id, "2026-09-20")
+        payload["orders"][0]["navigation_url"] = url
+        return validate_listed_orders(payload).orders[0]
+    order = _scanned_order(source_id, "2026-09-20", ["11"])
+    order["navigation_url"] = url
+    return validate_order_scan(_scan_payload([order])).orders[0]
+
+
+class TestQueryBackedOrderIdentity:
+    def test_cli_query_selection_import_and_idempotent_dry_run(
+        self, cli_env: GrossyPaths, tmp_path: Path
+    ) -> None:
+        payload = _window_listed()
+        scanned = []
+        for listed in payload["orders"]:
+            listed["source_order_id"] = "000" + listed["source_order_id"]
+            listed["navigation_url"] = (
+                "https://www.ab.gr/customerhub/quick-shop/orders?id=" + listed["source_order_id"]
+            )
+            order = _scanned_order(listed["source_order_id"], listed["order_date"], ["11"])
+            order["navigation_url"] = listed["navigation_url"]
+            scanned.append(order)
+        listed_path = _write(tmp_path, "listed-query.json", payload)
+        scan_path = _write(tmp_path, "scan-query.json", _scan_payload(scanned))
+        dry_args = ["history", "sync-dry-run", "--listed-orders", str(listed_path)]
+        dry = RUNNER.invoke(app, dry_args)
+        assert dry.exit_code == 0
+        assert json.loads(dry.stdout)["unknown_order_count"] == 6
+        assert _imported_ids(cli_env.database_file) == set()
+        applied = RUNNER.invoke(
+            app, ["history", "sync-apply", "--listed-orders", str(listed_path), str(scan_path)]
+        )
+        assert applied.exit_code == 0
+        assert json.loads(applied.stdout)["imported_orders"] == 6
+        assert _imported_ids(cli_env.database_file) == {
+            order["source_order_id"] for order in payload["orders"]
+        }
+        repeat = RUNNER.invoke(app, dry_args)
+        assert repeat.exit_code == 0
+        assert json.loads(repeat.stdout)["unknown_order_count"] == 0
+
+    @pytest.mark.parametrize("family", ["listed", "scan"])
+    def test_accepts_bound_query_without_normalizing_id(self, family: str) -> None:
+        url = "https://www.ab.gr/customerhub/quick-shop/orders?id=000123456"
+        order = _validate_query_order(family, url)
+        assert order.source_order_id == "000123456"
+        assert order.navigation_url == url
+
+    @pytest.mark.parametrize("family", ["listed", "scan"])
+    def test_preserves_legacy_queryless_route(self, family: str) -> None:
+        url = _nav_url("000123456")
+        assert _validate_query_order(family, url).navigation_url == url
+
+    @pytest.mark.parametrize("family", ["listed", "scan"])
+    def test_rejects_query_id_mismatch(self, family: str) -> None:
+        with pytest.raises(HistoryProposalError, match="id must match source_order_id"):
+            _validate_query_order(
+                family, "https://www.ab.gr/customerhub/quick-shop/orders?id=123456"
+            )
+
+    @pytest.mark.parametrize("family", ["listed", "scan"])
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://www.ab.gr/customerhub/quick-shop/orders",
+            "https://www.ab.gr/customerhub/quick-shop/orders?",
+            "https://www.ab.gr/customerhub/quick-shop/orders?id=LAST_ORDERS_PRODUCTS",
+            "https://www.ab.gr/customerhub/quick-shop/orders?id=",
+            "https://www.ab.gr/customerhub/quick-shop/orders?id=000123456&id=000123456",
+            "https://www.ab.gr/customerhub/quick-shop/orders?id=000123456&extra=1",
+            "https://www.ab.gr/customerhub/quick-shop/orders?ID=000123456",
+            "https://www.ab.gr/customerhub/quick-shop/orders?id=%3000123456",
+            "https://www.ab.gr/customerhub/quick-shop/orders?%69d=000123456",
+            "https://www.ab.gr/customerhub/quick-shop/orders?id=000123456#",
+            "https://www.ab.gr/customerhub/quick-shop/orders?id=000123456#section",
+            "https://www.ab.gr/customerhub/quick-shop/orders/?id=000123456",
+            "https://www.ab.gr/customerhub/quick-shop/../orders?id=000123456",
+            "https://www.ab.gr/customerhub/quick-shop/%6frders?id=000123456",
+            "https://www.ab.gr/other?id=000123456",
+            "https://evil.example/customerhub/quick-shop/orders?id=000123456",
+        ],
+    )
+    def test_rejects_aggregate_or_ambiguous_selection(self, family: str, url: str) -> None:
+        with pytest.raises(HistoryProposalError):
+            _validate_query_order(family, url)
 
 
 class TestListedOrdersSchema:

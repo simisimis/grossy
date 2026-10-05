@@ -35,7 +35,7 @@ from grossy.recipes import (
 from grossy.recipes.proposal import proposal_checksum
 from grossy.recipes.refresh import REFRESH_SCHEMA_NAME, REFRESH_SCHEMA_VERSION
 
-RUNNER = CliRunner(mix_stderr=False)
+RUNNER = CliRunner()
 GENERATED_AT = "2026-09-26T12:00:00+00:00"
 
 
@@ -714,7 +714,7 @@ def test_cli_refresh_diff(cli_home: tuple[Path, GrossyPaths]) -> None:
     refresh_path = _write_json(tmp_path, _refresh_proposal(_refresh_payload()), "refresh.json")
     result = RUNNER.invoke(app, ["recipes", "refresh-diff", str(refresh_path)])
     assert result.exit_code == 0
-    data = json.loads(result.output)
+    data = json.loads(result.stdout)
     assert data["status"] == "preview"
 
 
@@ -731,7 +731,7 @@ def test_cli_refresh_apply(cli_home: tuple[Path, GrossyPaths]) -> None:
     # Step 1: diff preview via CLI.
     diff_result = RUNNER.invoke(app, ["recipes", "refresh-diff", str(refresh_path)])
     assert diff_result.exit_code == 0
-    diff_data = json.loads(diff_result.output)
+    diff_data = json.loads(diff_result.stdout)
     assert diff_data["status"] == "preview"
     checksum = diff_data["proposal_checksum"]
 
@@ -740,7 +740,7 @@ def test_cli_refresh_apply(cli_home: tuple[Path, GrossyPaths]) -> None:
         app, ["recipes", "refresh-apply", str(refresh_path), "--checksum", checksum]
     )
     assert apply_result.exit_code == 0
-    apply_data = json.loads(apply_result.output)
+    apply_data = json.loads(apply_result.stdout)
     # assert versioned JSON schema fields.
     assert apply_data["schema_name"] == "grossy.recipe.refresh-apply"
     assert apply_data["schema_version"] == 1
@@ -788,7 +788,7 @@ def test_cli_refresh_apply_wrong_checksum_rejected(cli_home: tuple[Path, GrossyP
     before = _recipe_rows(paths.database_file)
     result = RUNNER.invoke(app, ["recipes", "refresh-apply", str(proposal), "--checksum", "0" * 64])
     assert result.exit_code == 1
-    assert json.loads(result.output)["status"] == "error"
+    assert json.loads(result.stdout)["status"] == "error"
     assert _recipe_rows(paths.database_file) == before
 
 
@@ -995,7 +995,7 @@ def test_refresh_diff_checksum_failure_never_reports_a_backup(
     if via_cli:
         result = RUNNER.invoke(app, ["recipes", "refresh-diff", str(proposal)])
         assert result.exit_code == 1
-        data = json.loads(result.output)
+        data = json.loads(result.stdout)
         assert data["schema_name"] == "grossy.cli.status"
         assert data["status"] == "error"
         detail = data["detail"]
@@ -1042,7 +1042,7 @@ def test_refresh_diff_migration_sql_failure_reports_verified_backup(
     if via_cli:
         result = RUNNER.invoke(app, ["recipes", "refresh-diff", str(proposal)])
         assert result.exit_code == 1
-        data = json.loads(result.output)
+        data = json.loads(result.stdout)
         assert data["schema_name"] == "grossy.cli.status"
         assert data["status"] == "error"
         detail = data["detail"]
@@ -1091,7 +1091,7 @@ def test_cli_refresh_diff_failed_backup_verification_reports_no_verified_backup(
     proposal = _write_json(tmp_path, _refresh_proposal(_refresh_payload()), "refresh.json")
     result = RUNNER.invoke(app, ["recipes", "refresh-diff", str(proposal)])
     assert result.exit_code == 1
-    data = json.loads(result.output)
+    data = json.loads(result.stdout)
     assert data["schema_name"] == "grossy.cli.status"
     assert data["status"] == "error"
     assert "migration failure" in data["detail"]

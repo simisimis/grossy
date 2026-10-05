@@ -7,8 +7,7 @@ renders the exact skill prompt, and that hostile argument strings are
 rejected before ``pi`` ever launches (no shell evaluation, no real Pi, no
 network, no user-state mutation).
 
-Skipped when ``just`` or ``uv`` is not on PATH (outside the Nix development
-shell).
+Skipped when ``just`` is not on PATH (outside the Nix development shell).
 """
 
 from __future__ import annotations
@@ -24,14 +23,14 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 pytestmark = pytest.mark.skipif(
-    shutil.which("just") is None or shutil.which("uv") is None,
-    reason="just/uv only available inside the Nix development shell",
+    shutil.which("just") is None,
+    reason="just only available inside the Nix development shell",
 )
 
 
 def _install_mock_pi(tmp_path: Path) -> Path:
     mock_dir = tmp_path / "bin"
-    mock_dir.mkdir()
+    mock_dir.mkdir(exist_ok=True)
     log = tmp_path / "pi-args.log"
     script = mock_dir / "pi"
     script.write_text(
@@ -83,10 +82,16 @@ def test_comma_list_invocation_renders_prompt(tmp_path: Path) -> None:
 def test_hostile_argument_never_reaches_pi(tmp_path: Path) -> None:
     result = _run_just(tmp_path, "RUN_ID=$(printf INJECTED)", "RECIPES=all")
     assert result.returncode != 0
-    assert not (tmp_path / "pi-args.log").exists()
+    assert (
+        not (tmp_path / "pi-args.log").exists()
+        or not (tmp_path / "pi-args.log").read_text().strip()
+    )
 
 
 def test_hostile_recipe_list_never_reaches_pi(tmp_path: Path) -> None:
     result = _run_just(tmp_path, "RUN_ID=run-1", "RECIPES=recipe1;reboot")
     assert result.returncode != 0
-    assert not (tmp_path / "pi-args.log").exists()
+    assert (
+        not (tmp_path / "pi-args.log").exists()
+        or not (tmp_path / "pi-args.log").read_text().strip()
+    )

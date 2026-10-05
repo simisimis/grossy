@@ -612,3 +612,116 @@ def test_export_prior_schema_does_not_require_recipe_planning_tables(
     assert data["data"]["run_recipe_plans"] == []
     assert data["data"]["run_recipe_seen"] == []
     assert "run_recipe_slots" in data["data"]
+
+
+def test_backup_private_at_sqlite_open_and_on_failure(
+    populated_db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A permissive umask cannot expose snapshots before the final chmod."""
+    import os
+
+    import grossy.db.snapshot as snapshot_mod
+
+    dest = tmp_path / "private" / "snapshot.sqlite3"
+    real_connect = sqlite3.connect
+    opened: list[Path] = []
+
+    def connect(database: str, *args: object, **kwargs: object) -> sqlite3.Connection:
+        path = Path(database)
+        if path.parent == dest.parent and not database.startswith("file:"):
+            assert stat.S_IMODE(path.stat().st_mode) == 0o600
+            opened.append(path)
+        return real_connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(snapshot_mod.sqlite3, "connect", connect)
+    old_umask = os.umask(0)
+    try:
+        db_backup(populated_db, dest)
+    finally:
+        os.umask(old_umask)
+    assert opened and stat.S_IMODE(dest.parent.stat().st_mode) == 0o700
+    before = dest.read_bytes()
+
+    def fail(path: Path) -> tuple[str, int]:
+        raise SnapshotError("synthetic snapshot verification failure")
+
+    monkeypatch.setattr(snapshot_mod, "verify_sqlite_snapshot", fail)
+    with pytest.raises(SnapshotError):
+        db_backup(populated_db, dest)
+    assert dest.read_bytes() == before
+    assert not list(dest.parent.glob(".snapshot.sqlite3.*"))
+
+
+@pytest.mark.parametrize("operation", [db_backup, db_export], ids=["backup", "export"])
+def test_private_output_cannot_overwrite_active_database(
+    populated_db: Path, tmp_path: Path, operation: object
+) -> None:
+    alias = tmp_path / "alias"
+    alias.symlink_to(populated_db)
+    with pytest.raises(ExportError, match="alias"):
+        operation(populated_db, alias)
+    assert _product_name(populated_db) == "Greek Yogurt"
+
+
+def test_restore_rechecks_copied_checksum_before_activation(
+    populated_db: Path, tmp_path: Path, grossy_home: GrossyPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source.sqlite3"
+    db_backup(populated_db, source)
+    real_verify = backup_mod._verify_snapshot
+    source_checks = 0
+
+    def changed_after_check(path: Path) -> tuple[str, int]:
+        nonlocal source_checks
+        result = real_verify(path)
+        if path == source:
+            source_checks += 1
+            if source_checks == 2:
+                conn = sqlite3.connect(str(source))
+                conn.execute("UPDATE products SET name='Tampered fixture' WHERE id=1")
+                conn.commit()
+                conn.close()
+        return result
+
+    monkeypatch.setattr(backup_mod, "_verify_snapshot", changed_after_check)
+    with pytest.raises(RestoreError, match="changed during restore"):
+        db_restore(populated_db, source, grossy_home.state_dir, confirm=True)
+    assert _product_name(populated_db) == "Greek Yogurt"
+    assert not populated_db.with_suffix(".restore-tmp").exists()
+
+
+def test_isolated_backup_export_restore_report_regeneration(tmp_path: Path) -> None:
+    """A fixture-completed run survives recovery with reports and private state."""
+    from test_weekly_mutation import home as fixture_home
+    from test_weekly_removal import added
+
+    from grossy.weekly.closure import run_close, run_report_regenerate
+
+    paths = fixture_home.__wrapped__(tmp_path / "isolated")
+    run_id = added(paths)  # synthetic additive adapter only
+    run_close(paths, run_id, no_recipes=True)
+    directory = paths.run_dir(run_id)
+    before = {name: (directory / name).read_bytes() for name in ("report.md", "report.json")}
+    backup = tmp_path / "private-recovery" / "snapshot.sqlite3"
+    export = backup.parent / "export.json"
+    db_backup(paths.database_file, backup)
+    db_export(paths.database_file, export)
+    data = json.loads(export.read_text())["data"]
+    assert data["planner_runs"][0]["lifecycle"] == "completed"
+    assert data["weekly_reports"] and data["run_mutation_manifests"]
+    assert "history_sync_reports" in data and "review_items" in data
+    assert "cookies" not in data and "browser_state" not in data
+    conn = open_connection(paths.database_file)
+    conn.execute("UPDATE weekly_reports SET report_md='damaged fixture'")
+    conn.commit()
+    conn.close()
+    db_restore(paths.database_file, backup, paths.state_dir, confirm=True)
+    for name in before:
+        (directory / name).unlink()
+    run_report_regenerate(paths, run_id)
+    for name, content in before.items():
+        assert (directory / name).read_bytes() == content
+        assert stat.S_IMODE((directory / name).stat().st_mode) == 0o600
+    for output in (backup, export, backup.with_suffix(".sqlite3.manifest.json")):
+        assert stat.S_IMODE(output.stat().st_mode) == 0o600
+    assert stat.S_IMODE(backup.parent.stat().st_mode) == 0o700

@@ -15,7 +15,6 @@ No cart mutation occurs. The run stays in ``planning`` state.
 from __future__ import annotations
 
 import json
-import re
 import secrets
 import sqlite3
 from dataclasses import dataclass, field
@@ -51,6 +50,7 @@ from grossy.history.proposal import (
     validate_listed_orders,
 )
 from grossy.paths import GrossyPaths
+from grossy.security import sanitize_human_text
 from grossy.weekly.report import (
     REPORT_SCHEMA_NAME,
     REPORT_SCHEMA_VERSION,
@@ -119,48 +119,10 @@ class BudgetComponents:
 # Sanitization (PRD 15, 17)
 # ---------------------------------------------------------------------------
 
-_WHITESPACE_RE = re.compile(r"\s+")
-# Sensitive patterns that must never appear in reports (PRD 15, 17.13-14).
-_SENSITIVE_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
-    # Minimize the complete whitespace-delimited value, not a token prefix.
-    (re.compile(r"Bearer\s+\S+", re.IGNORECASE), "[redacted-token]"),
-    (
-        re.compile(
-            r"(?:/(?:home|Users)/[^\s]+|[A-Za-z]:[\\/]+Users[\\/]+[^\s]+|~/[^\s]*ab-profile[^\s]*)",
-        ),
-        "[redacted-path]",
-    ),
-    (re.compile(r"(?i)\bAuthorization\s*:\s*.*"), "[redacted-credential]"),
-    (re.compile(r"(?i)\b(?:Set-Cookie|Cookie)\s*:\s*.*"), "[redacted-credential]"),
-    (re.compile(r"(?i)\bpassword\s*[:=]\s*\S+"), "[redacted-credential]"),
-    (re.compile(r"(?i)\btoken\s*[:=]\s*\S+"), "[redacted-credential]"),
-    (re.compile(r"(?i)\bsecret\s*[:=]\s*\S+"), "[redacted-credential]"),
-)
-
-
-def _redact_source_order_ids(text: str, order_ids: set[str]) -> str:
-    """Redact known source order IDs from report text (FR-29, PRD 15)."""
-    ids = sorted((oid for oid in order_ids if oid), key=len, reverse=True)
-    if not ids:
-        return text
-    pattern = re.compile(r"(?<!\d)(" + "|".join(re.escape(oid) for oid in ids) + r")(?!\d)")
-    return pattern.sub("[redacted]", text)
-
 
 def _sanitize_report_field(value: str, order_ids: set[str]) -> str:
-    """Sanitize an untrusted report field (product title/category/staple key).
-
-    Collapses all whitespace to single spaces so a multiline or control-laden
-    value cannot inject report/markdown structure, then redacts known source
-    order IDs and sensitive patterns (tokens, profile paths, credentials) so
-    they never reach the report (PRD 15, 17.13-14).
-    """
-    collapsed = _WHITESPACE_RE.sub(" ", value).strip()
-    # Remove non-printable characters (control chars except tab are stripped).
-    collapsed = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", collapsed)
-    for pattern, replacement in _SENSITIVE_PATTERNS:
-        collapsed = pattern.sub(replacement, collapsed)
-    return _redact_source_order_ids(collapsed, order_ids)
+    """Minimize untrusted human report text (PRD 15, 17)."""
+    return sanitize_human_text(value, order_ids)
 
 
 def _get_source_order_ids(conn: sqlite3.Connection) -> set[str]:

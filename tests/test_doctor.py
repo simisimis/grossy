@@ -825,6 +825,13 @@ class TestDoctorAgentBrowserVersion:
         ("stdout", "returncode", "expected_status", "remediation"),
         [
             pytest.param("0.27.4\n", 0, "pass", None, id="supported-0.27-patch"),
+            pytest.param("agent-browser 0.38.1\n", 0, "pass", None, id="installed-0.38.1"),
+            pytest.param("0.38.1\n", 0, "pass", None, id="bare-0.38.1"),
+            pytest.param("agent-browser 0.39.0\n", 0, "fail", "0.38", id="future-minor"),
+            pytest.param("agent-browser 1.38.1\n", 0, "fail", None, id="future-major"),
+            pytest.param("other-tool 0.38.1\n", 0, "fail", None, id="wrong-prefix"),
+            pytest.param("agent-browser 0.38.1junk\n", 0, "fail", None, id="prefixed-junk"),
+            pytest.param("agent-browser 0.38.1\n", 1, "fail", None, id="prefixed-command-failed"),
             pytest.param("0.26.0\n", 0, "fail", "0.27", id="unsupported-minor"),
             pytest.param("0.28.0\n", 0, "fail", None, id="unsupported-next-minor"),
             pytest.param("0.27.not-a-version\n", 0, "fail", None, id="malformed-version"),

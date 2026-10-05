@@ -21,7 +21,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from grossy.db.connection import open_connection
-from grossy.db.snapshot import verify_sqlite_snapshot
+from grossy.db.snapshot import private_sqlite_backup, verify_sqlite_snapshot
+from grossy.fsutil import ensure_private_dir
 
 MIGRATIONS_DIR = Path(__file__).parent.parent / "migrations"
 MIGRATION_FILE_RE = re.compile(r"^(\d{3})_.+\.sql$")
@@ -154,7 +155,7 @@ def run_migrations(
         backup_path = (
             backup_dir / f"pre-migration-{_now_utc().replace(':', '-').replace('.', '-')}.sqlite3"
         )
-        backup_path.parent.mkdir(parents=True, exist_ok=True)
+        ensure_private_dir(backup_path.parent)
         _backup_database(conn, backup_path)
         verify_sqlite_snapshot(backup_path)
         verified_backup = backup_path
@@ -255,13 +256,7 @@ def _apply_migration(conn: sqlite3.Connection, mig: MigrationFile) -> None:
 
 def _backup_database(conn: sqlite3.Connection, dest: Path) -> None:
     """Create a SQLite-safe backup using the built-in backup API."""
-    dest_conn = sqlite3.connect(str(dest))
-    try:
-        conn.backup(dest_conn)
-    finally:
-        dest_conn.close()
-    # Enforce 0600 permissions on the backup.
-    dest.chmod(0o600)
+    private_sqlite_backup(conn, dest)
 
 
 def get_schema_version(db_path: Path) -> int:

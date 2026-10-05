@@ -28,7 +28,7 @@ from grossy.recipes import (
     run_add_file,
 )
 
-RUNNER = CliRunner(mix_stderr=False)
+RUNNER = CliRunner()
 
 BASE_YAML = """\
 schema_name: grossy.recipe.yaml.v1
@@ -337,7 +337,7 @@ def test_cli_add_file_success(cli_home: tuple[Path, GrossyPaths]) -> None:
     path = _write(tmp_path, BASE_YAML.format(recipe_id="mama-sunday-roast"))
     result = RUNNER.invoke(app, ["recipes", "add-file", str(path)])
     assert result.exit_code == 0
-    stdout = json.loads(result.output)
+    stdout = json.loads(result.stdout)
     assert stdout["schema_name"] == "grossy.recipe.add-file"
     assert stdout["status"] == "applied"
     assert stdout["recipe_id"] == "mama-sunday-roast"
@@ -358,7 +358,7 @@ def test_cli_add_file_invalid_fails_closed(cli_home: tuple[Path, GrossyPaths]) -
     )
     result = RUNNER.invoke(app, ["recipes", "add-file", str(path)])
     assert result.exit_code == 1
-    stdout = json.loads(result.output)
+    stdout = json.loads(result.stdout)
     assert stdout["status"] == "error"
     assert "protein_class" in stdout["detail"]
     conn = _db(paths)

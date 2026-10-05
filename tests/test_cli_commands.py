@@ -22,7 +22,7 @@ from grossy.db.connection import open_connection
 from grossy.init import do_init
 from grossy.paths import GrossyPaths
 
-RUNNER = CliRunner(mix_stderr=False)
+RUNNER = CliRunner()
 
 
 # --- isolated temporary HOME/XDG fixtures ------------------------------------
@@ -71,6 +71,7 @@ EXPECTED_COMMANDS = frozenset(
         "init",
         "doctor",
         "history set-primary",
+        "history product-register",
         "history set-recurrence",
         "history set-quantity",
         "history disable",
@@ -154,7 +155,7 @@ def test_help_exits_zero() -> None:
     result = RUNNER.invoke(app, ["--help"])
     assert result.exit_code == 0
     for group in ("history", "recipes", "weekly", "db"):
-        assert group in result.output
+        assert group in result.stdout
 
 
 @pytest.mark.parametrize(
@@ -169,14 +170,14 @@ def test_help_exits_zero() -> None:
 def test_closure_fails_closed_without_database(args: list[str], isolated_home: GrossyPaths) -> None:
     result = RUNNER.invoke(app, args)
     assert result.exit_code == 1
-    stdout: dict[str, Any] = json.loads(result.output)
+    stdout: dict[str, Any] = json.loads(result.stdout)
     assert stdout["schema_name"] == STATUS_SCHEMA_NAME
     assert stdout["schema_version"] == STATUS_SCHEMA_VERSION
     assert stdout["status"] == "error"
     assert not isolated_home.database_file.exists()
     assert isinstance(stdout["command"], str) and stdout["command"].startswith(args[0])
     # Diagnostics go to stderr, not stdout: stdout is exactly one JSON line.
-    assert result.output.count("\n") <= 1
+    assert result.stdout.count("\n") <= 1
 
 
 @pytest.mark.parametrize(
@@ -214,7 +215,7 @@ def test_maintenance_commands_fail_closed_without_database(
     """
     result = RUNNER.invoke(app, args)
     assert result.exit_code == 1
-    stdout: dict[str, Any] = json.loads(result.output)
+    stdout: dict[str, Any] = json.loads(result.stdout)
     assert stdout["schema_name"] == STATUS_SCHEMA_NAME
     assert stdout["schema_version"] == STATUS_SCHEMA_VERSION
     assert stdout["status"] == "error"
@@ -335,7 +336,7 @@ def test_cli_set_category_success(initialized_home: GrossyPaths) -> None:
     _seed_product(initialized_home, "7000001")
     result = RUNNER.invoke(app, ["history", "set-category", "7000001", "Dairy Products"])
     assert result.exit_code == 0
-    stdout: dict[str, Any] = json.loads(result.output)
+    stdout: dict[str, Any] = json.loads(result.stdout)
     # A successful maintenance command emits its own versioned result schema.
     assert stdout["schema_name"] == "grossy.history.maintenance"
     assert stdout["schema_version"] == 1
@@ -349,7 +350,7 @@ def test_cli_set_category_misc_rejected(initialized_home: GrossyPaths) -> None:
     _seed_product(initialized_home, "7000002")
     result = RUNNER.invoke(app, ["history", "set-category", "7000002", "misc"])
     assert result.exit_code == 1
-    stdout: dict[str, Any] = json.loads(result.output)
+    stdout: dict[str, Any] = json.loads(result.stdout)
     assert stdout["status"] == "error"
     assert "misc" in stdout["detail"]
     # The product keeps its existing category (unassigned) and no misc row is created.
@@ -365,13 +366,13 @@ def test_cli_set_category_misc_rejected(initialized_home: GrossyPaths) -> None:
 def test_cli_unknown_target_reports_error(initialized_home: GrossyPaths) -> None:
     result = RUNNER.invoke(app, ["history", "blacklist", "product", "9999999"])
     assert result.exit_code == 1
-    stdout: dict[str, Any] = json.loads(result.output)
+    stdout: dict[str, Any] = json.loads(result.stdout)
     assert stdout["schema_name"] == STATUS_SCHEMA_NAME
     assert stdout["schema_version"] == STATUS_SCHEMA_VERSION
     assert stdout["status"] == "error"
     assert "unknown product" in stdout["detail"]
     # Diagnostics go to stderr, not stdout: stdout is exactly one JSON line.
-    assert result.output.count("\n") <= 1
+    assert result.stdout.count("\n") <= 1
 
 
 # --- writer-lock regression (R4) ---------------------------------------------
@@ -391,7 +392,7 @@ def test_maintenance_command_respects_writer_lock(initialized_home: GrossyPaths)
     with WriterLock(initialized_home.state_dir):
         result = RUNNER.invoke(app, ["history", "set-quantity", "7000003", "3"])
         assert result.exit_code == 1
-        stdout: dict[str, Any] = json.loads(result.output)
+        stdout: dict[str, Any] = json.loads(result.stdout)
         assert stdout["schema_name"] == STATUS_SCHEMA_NAME
         assert stdout["schema_version"] == STATUS_SCHEMA_VERSION
         assert stdout["status"] == "error"
@@ -414,7 +415,7 @@ def test_maintenance_command_respects_writer_lock(initialized_home: GrossyPaths)
     # After releasing the lock, the same command succeeds.
     result = RUNNER.invoke(app, ["history", "set-quantity", "7000003", "3"])
     assert result.exit_code == 0
-    stdout = json.loads(result.output)
+    stdout = json.loads(result.stdout)
     assert stdout["status"] == "success"
     conn = open_connection(initialized_home.database_file)
     try:
@@ -467,3 +468,18 @@ def test_module_entry_weekly_phases_fail_closed(
     assert json.loads(result.stdout)["status"] == "error"
     assert "NameError" not in result.stderr
     assert not isolated_home.database_file.exists()
+
+
+def test_product_register_cli_is_versioned_idempotent_and_fail_closed(initialized_home):
+    good = "https://www.ab.gr/en/eshop/fixture/p/444"
+    for changed in (True, False):
+        result = RUNNER.invoke(app, ["history", "product-register", good])
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout)
+        assert payload["schema_name"] == "grossy.history.maintenance"
+        assert payload["schema_version"] == 1
+        assert payload["product_id"] == "444" and payload["changed"] is changed
+    bad = RUNNER.invoke(app, ["history", "product-register", good + "?token=private"])
+    assert bad.exit_code != 0
+    assert "private" not in bad.output
+    assert json.loads(bad.stdout)["status"] == "error"

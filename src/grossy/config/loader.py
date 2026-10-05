@@ -40,7 +40,7 @@ class _StrictYamlLoader(yaml.SafeLoader):
     ) -> dict[Any, Any]:
         mapping: dict[Any, Any] = {}
         for key_node, value_node in node.value:
-            key = self.construct_object(key_node, deep=deep)
+            key = self.construct_object(key_node, deep=deep)  # type: ignore[no-untyped-call]
             if not isinstance(key, str):
                 # Non-string keys (for example unhashable lists from
                 # ``? [a, b]``) would otherwise escape configuration error
@@ -55,7 +55,7 @@ class _StrictYamlLoader(yaml.SafeLoader):
                 raise DuplicateYamlKeyError(f"duplicate YAML key {path!r}")
             self._grossy_key_stack.append(_format_key(key))
             try:
-                mapping[key] = self.construct_object(value_node, deep=deep)
+                mapping[key] = self.construct_object(value_node, deep=deep)  # type: ignore[no-untyped-call]
             finally:
                 self._grossy_key_stack.pop()
         return mapping
@@ -90,8 +90,9 @@ def load_config_text(text: str) -> GrossyConfigModel:
     except DuplicateYamlKeyError as exc:
         raise GrossyConfigError(str(exc)) from exc
     except yaml.YAMLError as exc:
-        reason = str(exc).replace("\n", " ")
-        raise GrossyConfigError(f"invalid YAML: {reason}") from exc
+        mark = getattr(exc, "problem_mark", None)
+        location = f" at line {mark.line + 1}, column {mark.column + 1}" if mark else ""
+        raise GrossyConfigError(f"invalid YAML{location}; check syntax") from exc
     if data is None:
         raise GrossyConfigError("configuration is empty")
     if not isinstance(data, dict):

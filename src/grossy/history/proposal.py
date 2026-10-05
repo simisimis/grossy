@@ -116,7 +116,10 @@ def _validate_navigation_url(url: str) -> None:
 
     Order pages are a distinct route from product pages, so this checks the
     canonical https authority and a well-formed, non-traversing path rather
-    than the product ``/p/<id>`` marker. Every path segment is also
+    than the product ``/p/<id>`` marker. The history overview additionally
+    requires exactly one raw numeric ``id`` query; legacy queryless paths
+    remain supported. Model validators bind this query to the source ID.
+    Every path segment is also
     percent-decoded (once) and held to the same narrow safety language as the
     product-URL segments: literal or encoded (including nested) traversal
     (``.``, ``..``, ``%2e%2e``), encoded separators (``%2f``), and encoded
@@ -126,28 +129,34 @@ def _validate_navigation_url(url: str) -> None:
     try:
         parsed = urlsplit(url)
     except ValueError:
-        raise HistoryProposalError(f"navigation_url {url!r} is malformed") from None
+        raise HistoryProposalError("navigation_url is malformed") from None
     if parsed.scheme != "https" or parsed.netloc != PRODUCT_URL_HOST:
         raise HistoryProposalError(
-            f"navigation_url {url!r} must be an https URL on the canonical {PRODUCT_URL_HOST} host"
+            f"navigation_url must be an https URL on the canonical {PRODUCT_URL_HOST} host"
         )
-    if parsed.query or parsed.fragment:
-        raise HistoryProposalError(f"navigation_url {url!r} must not contain a query or fragment")
+    if "#" in url:
+        raise HistoryProposalError("navigation_url must not contain a fragment")
+    overview_path = "/customerhub/quick-shop/orders"
+    if "?" in url:
+        if parsed.path != overview_path or not re.fullmatch(r"id=[0-9]+", parsed.query):
+            raise HistoryProposalError(
+                "navigation_url query must be exactly one numeric id on the history overview"
+            )
+    elif parsed.path == overview_path:
+        raise HistoryProposalError("navigation_url must identify a dated order, not All orders")
     if "\\" in url or any(not _is_safe_url_char(char) for char in url):
-        raise HistoryProposalError(f"navigation_url {url!r} contains unsafe characters")
+        raise HistoryProposalError("navigation_url contains unsafe characters")
     segments = parsed.path.split("/")
     if len(segments) < 2 or segments[1] == "":
-        raise HistoryProposalError(f"navigation_url {url!r} must carry a non-empty path")
+        raise HistoryProposalError("navigation_url must carry a non-empty path")
     for segment in segments[1:]:
         if segment in ("", ".", ".."):
-            raise HistoryProposalError(
-                f"navigation_url {url!r} contains an empty or traversal path segment"
-            )
+            raise HistoryProposalError("navigation_url contains an empty or traversal path segment")
         # Reject percent-encoded traversal/separator/control forms (including
         # nested encodings) so the URL stays the rendered order route.
         if _decode_path_segment(segment) is None:
             raise HistoryProposalError(
-                f"navigation_url {url!r} contains a percent-encoded traversal, "
+                "navigation_url contains a percent-encoded traversal, "
                 "separator, or control that would change the rendered order route"
             )
 
@@ -160,6 +169,13 @@ def _format_validation_error(exc: ValidationError) -> str:
         message = str(first.get("msg", "invalid"))
         return f"{location}: {message}" if location else message
     return str(exc)
+
+
+def _check_navigation_order_identity(url: str, source_order_id: str) -> None:
+    """Bind the already validated numeric selection to its exact source ID."""
+    query = urlsplit(url).query
+    if query and query.removeprefix("id=") != source_order_id:
+        raise HistoryProposalError("navigation_url id must match source_order_id")
 
 
 # --- listed-orders proposal (grossy.history.listed-orders.v1) ---------------
@@ -195,9 +211,10 @@ class ListedOrder(BaseModel):
 
     @model_validator(mode="after")
     def _check_consistency(self) -> ListedOrder:
+        _check_navigation_order_identity(self.navigation_url, self.source_order_id)
         if _parse_displayed_label(self.displayed_label) != _parse_iso_date(self.order_date):
             raise HistoryProposalError(
-                f"source order {self.source_order_id}: displayed_label "
+                "source order: displayed_label "
                 f"{self.displayed_label!r} disagrees with order_date {self.order_date!r}"
             )
         return self
@@ -247,7 +264,7 @@ class ListedOrdersProposal(BaseModel):
         seen: set[str] = set()
         for order in self.orders:
             if order.source_order_id in seen:
-                raise HistoryProposalError(f"duplicate source order ID {order.source_order_id!r}")
+                raise HistoryProposalError("duplicate source order ID")
             seen.add(order.source_order_id)
         return self
 
@@ -374,22 +391,21 @@ class ScannedOrder(BaseModel):
 
     @model_validator(mode="after")
     def _check_order(self) -> ScannedOrder:
+        _check_navigation_order_identity(self.navigation_url, self.source_order_id)
         if _parse_displayed_label(self.displayed_label) != _parse_iso_date(self.order_date):
             raise HistoryProposalError(
-                f"source order {self.source_order_id}: displayed_label "
+                "source order: displayed_label "
                 f"{self.displayed_label!r} disagrees with order_date {self.order_date!r}"
             )
         if not self.products:
             raise HistoryProposalError(
-                f"source order {self.source_order_id} has no product cards; an "
-                "order scan must contain at least one product"
+                "source order has no product cards; an order scan must contain at least one product"
             )
         seen: set[str] = set()
         for product in self.products:
             if product.product_id in seen:
                 raise HistoryProposalError(
-                    f"source order {self.source_order_id}: duplicate product ID "
-                    f"{product.product_id!r}"
+                    f"source order: duplicate product ID {product.product_id!r}"
                 )
             seen.add(product.product_id)
         return self
@@ -436,7 +452,7 @@ class OrderScanProposal(BaseModel):
         seen: set[str] = set()
         for order in self.orders:
             if order.source_order_id in seen:
-                raise HistoryProposalError(f"duplicate source order ID {order.source_order_id!r}")
+                raise HistoryProposalError("duplicate source order ID")
             seen.add(order.source_order_id)
         return self
 

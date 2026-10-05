@@ -34,7 +34,7 @@ from grossy.recipes import (
 )
 from grossy.recipes.proposal import proposal_checksum
 
-RUNNER = CliRunner(mix_stderr=False)
+RUNNER = CliRunner()
 GENERATED_AT = "2026-09-26T12:00:00+00:00"
 
 

@@ -9,12 +9,15 @@ or live cart access.
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from grossy.browser.observation import (
     CART_OBSERVATION_SCHEMA_NAME,
     CartObservation,
     CartObservationError,
     CartObservationLine,
+    RecipeProductFact,
+    RecurringProductFact,
     validate_cart_observation,
 )
 
@@ -208,6 +211,29 @@ class TestPriceValidation:
         data["lines"][0]["displayed_price_eur"] = "NaN"
         with pytest.raises(CartObservationError, match="finite"):
             validate_cart_observation(data)
+
+
+@pytest.mark.parametrize("fact_field", ["recurring_product_facts", "recipe_product_facts"])
+@pytest.mark.parametrize("price", ["not-a-price", "NaN", "sNaN", "Infinity", "0.00", "-1.00"])
+def test_current_fact_prices_fail_controlled_validation_without_echo(
+    fact_field: str, price: str
+) -> None:
+    fact = {
+        "product_id": "1234567",
+        "canonical_url": VALID_URL,
+        "displayed_price_eur": price,
+        "availability": "available",
+    }
+    if fact_field == "recipe_product_facts":
+        fact.update(package_amount="1", package_unit="piece", package_count=1, sale_kind="packaged")
+    model = RecipeProductFact if fact_field == "recipe_product_facts" else RecurringProductFact
+    with pytest.raises(ValidationError) as model_error:
+        model.model_validate(fact)
+    assert model_error.value.errors(include_input=False)[0]["loc"] == ("displayed_price_eur",)
+    with pytest.raises(CartObservationError) as error:
+        validate_cart_observation(_valid_data(**{fact_field: [fact]}))
+    assert f"{fact_field}.0.displayed_price_eur" in str(error.value)
+    assert price not in str(error.value)
 
 
 class TestStrictIntegerTypes:

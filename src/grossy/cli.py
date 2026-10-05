@@ -40,6 +40,7 @@ from grossy.history.maintenance import (
     run_family_link,
     run_family_merge,
     run_family_unlink,
+    run_product_register,
     run_set_category,
     run_set_primary,
     run_set_quantity,
@@ -68,6 +69,7 @@ from grossy.recipes import (
     run_refresh_apply,
     run_seed_import,
 )
+from grossy.security import sanitize_human_text
 
 STATUS_SCHEMA_NAME = "grossy.cli.status"
 STATUS_SCHEMA_VERSION = 1
@@ -79,7 +81,7 @@ def emit_not_implemented(command: str) -> NoReturn:
         "schema_name": STATUS_SCHEMA_NAME,
         "schema_version": STATUS_SCHEMA_VERSION,
         "status": "not_implemented",
-        "command": command,
+        "command": sanitize_human_text(command),
         "detail": "this command is declared but its behavior is implemented by a later task; "
         "no state or browser mutation was attempted",
     }
@@ -96,13 +98,13 @@ def emit_history_error(command: str, exc: Exception) -> NoReturn:
                 "schema_name": STATUS_SCHEMA_NAME,
                 "schema_version": STATUS_SCHEMA_VERSION,
                 "status": "error",
-                "command": command,
-                "detail": str(exc),
+                "command": sanitize_human_text(command),
+                "detail": sanitize_human_text(str(exc)),
             },
             sort_keys=True,
         )
     )
-    typer.echo(f"grossy: {exc}", err=True)
+    typer.echo(f"grossy: {sanitize_human_text(str(exc))}", err=True)
     raise typer.Exit(code=1)
 
 
@@ -120,13 +122,13 @@ def emit_maintenance_error(command: str, exc: Exception) -> NoReturn:
                 "schema_name": STATUS_SCHEMA_NAME,
                 "schema_version": STATUS_SCHEMA_VERSION,
                 "status": "error",
-                "command": command,
-                "detail": str(exc),
+                "command": sanitize_human_text(command),
+                "detail": sanitize_human_text(str(exc)),
             },
             sort_keys=True,
         )
     )
-    typer.echo(f"grossy: {exc}", err=True)
+    typer.echo(f"grossy: {sanitize_human_text(str(exc))}", err=True)
     raise typer.Exit(code=1)
 
 
@@ -147,13 +149,13 @@ def emit_recipe_error(command: str, exc: Exception) -> NoReturn:
                 "schema_name": STATUS_SCHEMA_NAME,
                 "schema_version": STATUS_SCHEMA_VERSION,
                 "status": "error",
-                "command": command,
-                "detail": str(exc),
+                "command": sanitize_human_text(command),
+                "detail": sanitize_human_text(str(exc)),
             },
             sort_keys=True,
         )
     )
-    typer.echo(f"grossy: {exc}", err=True)
+    typer.echo(f"grossy: {sanitize_human_text(str(exc))}", err=True)
     raise typer.Exit(code=1)
 
 
@@ -165,13 +167,13 @@ def emit_weekly_error(command: str, exc: Exception) -> NoReturn:
                 "schema_name": STATUS_SCHEMA_NAME,
                 "schema_version": STATUS_SCHEMA_VERSION,
                 "status": "error",
-                "command": command,
-                "detail": str(exc),
+                "command": sanitize_human_text(command),
+                "detail": sanitize_human_text(str(exc)),
             },
             sort_keys=True,
         )
     )
-    typer.echo(f"grossy: {exc}", err=True)
+    typer.echo(f"grossy: {sanitize_human_text(str(exc))}", err=True)
     raise typer.Exit(code=1)
 
 
@@ -215,7 +217,7 @@ def init() -> None:
                     "schema_version": STATUS_SCHEMA_VERSION,
                     "status": "error",
                     "command": "init",
-                    "detail": str(exc),
+                    "detail": sanitize_human_text(str(exc)),
                 },
                 sort_keys=True,
             )
@@ -237,6 +239,16 @@ def doctor() -> None:
         raise typer.Exit(code=1)
     if result.has_warnings:
         raise typer.Exit(code=2)
+
+
+@history_app.command("product-register")
+def history_product_register(canonical_product_url: str) -> None:
+    """Register one approved canonical product identity without a purchase or fetching."""
+    try:
+        result = run_product_register(resolve_paths(), canonical_product_url)
+    except (MaintenanceError, LockHeldError) as exc:
+        emit_maintenance_error("history product-register", exc)
+    typer.echo(json.dumps(result, sort_keys=True))
 
 
 @history_app.command("set-primary")
@@ -572,7 +584,7 @@ def db_backup(path: Path) -> None:
                     "schema_version": STATUS_SCHEMA_VERSION,
                     "status": "error",
                     "command": "db backup",
-                    "detail": str(exc),
+                    "detail": sanitize_human_text(str(exc)),
                 },
                 sort_keys=True,
             )
@@ -622,7 +634,7 @@ def db_export(path: Path) -> None:
                     "schema_version": STATUS_SCHEMA_VERSION,
                     "status": "error",
                     "command": "db export",
-                    "detail": str(exc),
+                    "detail": sanitize_human_text(str(exc)),
                 },
                 sort_keys=True,
             )
@@ -673,7 +685,7 @@ def db_restore(
                     "schema_version": STATUS_SCHEMA_VERSION,
                     "status": "error",
                     "command": "db restore",
-                    "detail": str(exc),
+                    "detail": sanitize_human_text(str(exc)),
                 },
                 sort_keys=True,
             )

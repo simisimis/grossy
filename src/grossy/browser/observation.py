@@ -14,26 +14,21 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictInt,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from grossy.config.models import NUMERIC_ID_PATTERN, product_id_from_url
+from grossy.security import ProhibitedContentError, scan_prohibited_content
 
 CART_OBSERVATION_SCHEMA_NAME = "grossy.cart.observation.v1"
 CART_OBSERVATION_SCHEMA_VERSION = 1
-
-# Defense-in-depth: scan string values for obviously dangerous content.
-# The primary safety property is the closed schema (extra="forbid"); these
-# patterns catch content that could be embedded in legitimate-looking fields.
-_PROHIBITED_CONTENT_RE = re.compile(
-    r"(<\s*script\b"  # HTML script tag
-    r"|javascript\s*:"  # JavaScript URI
-    r"|data\s*:\s*image/"  # Base64 image data
-    r"|\bSET-COOKIE\s*:"  # HTTP cookie header
-    r"|\bSELECT\s+\S+\s+FROM\b"  # SQL SELECT
-    r"|\bDROP\s+TABLE\b"  # SQL DROP
-    r")",
-    re.IGNORECASE,
-)
 
 
 class CartObservationError(ValueError):
@@ -68,11 +63,11 @@ class CartObservationLine(BaseModel):
         try:
             d = Decimal(v)
         except InvalidOperation:
-            raise ValueError(f"displayed_price_eur must be a decimal string, got {v!r}") from None
+            raise ValueError("displayed_price_eur must be a decimal string") from None
         if not d.is_finite():
-            raise ValueError(f"displayed_price_eur must be finite, got {v!r}")
+            raise ValueError("displayed_price_eur must be finite")
         if d <= 0:
-            raise ValueError(f"displayed_price_eur must be positive, got {v!r}")
+            raise ValueError("displayed_price_eur must be positive")
         return v
 
 
@@ -84,6 +79,12 @@ class RecurringProductFact(BaseModel):
     canonical_url: str
     displayed_price_eur: str
     availability: Literal["available", "unavailable", "unknown"]
+
+    @field_validator("displayed_price_eur")
+    @classmethod
+    def _check_price(cls, value: str) -> str:
+        # Validate before the observation's cross-fact Decimal comparisons.
+        return CartObservationLine._check_price(value)
 
 
 class RecipeProductFact(RecurringProductFact):
@@ -226,15 +227,10 @@ class CartObservation(BaseModel):
 
 def _scan_prohibited(obj: Any) -> None:
     """Recursively scan all string values for prohibited content patterns."""
-    if isinstance(obj, str):
-        if _PROHIBITED_CONTENT_RE.search(obj):
-            raise CartObservationError(f"prohibited content in observation: {obj[:80]!r}")
-    elif isinstance(obj, dict):
-        for val in obj.values():
-            _scan_prohibited(val)
-    elif isinstance(obj, list):
-        for item in obj:
-            _scan_prohibited(item)
+    try:
+        scan_prohibited_content(obj)
+    except ProhibitedContentError as exc:
+        raise CartObservationError("prohibited content in observation") from exc
 
 
 def validate_cart_observation(data: dict[str, Any]) -> CartObservation:
@@ -256,5 +252,9 @@ def validate_cart_observation(data: dict[str, Any]) -> CartObservation:
         return CartObservation.model_validate(data)
     except CartObservationError:
         raise
-    except Exception as exc:
-        raise CartObservationError(f"cart observation validation failed: {exc}") from exc
+    except ValidationError as exc:
+        first = exc.errors(include_input=False)[0]
+        location = ".".join(str(part) for part in first["loc"])
+        raise CartObservationError(
+            f"cart observation validation failed at {location}: {first['msg']}"
+        ) from exc

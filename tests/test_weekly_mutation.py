@@ -17,7 +17,7 @@ from grossy.browser.observation import CartObservation, validate_cart_observatio
 from grossy.cli import app
 from grossy.db.connection import open_connection
 from grossy.db.lock import LockHeldError, WriterLock
-from grossy.history.maintenance import run_set_primary
+from grossy.history.maintenance import run_family_link, run_product_register, run_set_primary
 from grossy.init import do_init
 from grossy.paths import GrossyPaths, resolve_paths
 from grossy.recipes.proposal import proposal_checksum
@@ -29,6 +29,7 @@ from grossy.weekly.mutation import (
 )
 from grossy.weekly.plan import WeeklyPlanError, run_baseline_apply, run_plan_prepare
 from grossy.weekly.recipes import run_recipes_apply
+from grossy.weekly.selection import run_recipe_intent, run_recipe_observe, run_recipe_preflight
 
 
 def now() -> str:
@@ -171,9 +172,9 @@ def test_supported_primary_correction_rejects_stale_learned_intent_without_write
         "ON p.id=m.product_id WHERE m.role='primary'",
     ) == [("333",)]
     if accepted is not None:
-        with pytest.raises(WeeklyPlanError, match="policy changed since preflight"):
+        with pytest.raises(WeeklyPlanError, match="stale family policy"):
             run_recurring_intent(home, run_id, accepted["manifest"])
-    with pytest.raises(WeeklyPlanError, match="stale recurring learned target"):
+    with pytest.raises(WeeklyPlanError, match="stale family policy"):
         run_recurring_preflight(home, run_id, observation({"999": 8}))
     fake = FakeAdditiveCart(home, {"999": 8})
     confirmations: list[dict[str, Any]] = []
@@ -182,7 +183,7 @@ def test_supported_primary_correction_rejects_stale_learned_intent_without_write
         confirmations.append(manifest)
         return True
 
-    with pytest.raises(WeeklyPlanError, match="stale recurring learned target"):
+    with pytest.raises(WeeklyPlanError, match="stale family policy"):
         apply_recurring(home, run_id, fake, confirm)
     assert not confirmations and not fake.writes
     assert not rows(home, "SELECT id FROM run_mutation_manifests")
@@ -202,12 +203,20 @@ def test_current_learned_preference_preserves_approved_live_fallback(home: Gross
 
 
 def test_yaml_preference_wins_over_supported_learned_primary_correction(home: GrossyPaths) -> None:
-    run_id = prepare_due_family(home, yaml_preferred=True)
+    old_run = prepare_due_family(home, yaml_preferred=True)
     run_set_primary(home, "yaml-family", "333")
-    fake = FakeAdditiveCart(home, {"999": 8})
-    assert apply_recurring(home, run_id, fake, lambda manifest: True)["status"] == "success"
-    assert fake.writes == [("111", 1)]
-    assert fake.quantities == {"999": 8, "111": 1}
+    with pytest.raises(WeeklyPlanError, match="stale family policy"):
+        run_recurring_preflight(home, old_run, observation({"999": 8}))
+    # Explicit synthetic lifecycle decision, never an automatic maintenance effect.
+    from grossy.weekly.closure import run_close
+
+    run_close(home, old_run, abandon=True)
+    run_id = prepare(home, {"999": 8})
+    accepted = run_recurring_preflight(home, run_id, observation({"999": 8}))
+    assert accepted["manifest"]["additions"] == [
+        {"product_id": "111", "canonical_url": url("111"), "quantity": 1, "price_eur": "2.00"}
+    ]
+    assert run_recurring_intent(home, run_id, accepted["manifest"])["status"] == "persisted"
 
 
 def test_changed_yaml_preferred_family_member_requires_replanning(home: GrossyPaths) -> None:
@@ -497,11 +506,11 @@ def test_cli_phases_and_observation_checksum_stop(
     file.write_text(json.dumps(observation({"111": 1, "999": 8})))
     runner = CliRunner()
     preflight = runner.invoke(app, ["weekly", "recurring-preflight", run_id, str(file)])
-    assert preflight.exit_code == 0, preflight.output
+    assert preflight.exit_code == 0, preflight.stdout
     manifest = json.loads(preflight.stdout)["manifest"]
     file.write_text(json.dumps(manifest))
     intent = runner.invoke(app, ["weekly", "recurring-intent", run_id, str(file)])
-    assert intent.exit_code == 0, intent.output
+    assert intent.exit_code == 0, intent.stdout
     data = observation({"111": 3, "999": 8})
     data["mutation_result"] = {"manifest_checksum": "0" * 64, "outcome": "readback"}
     file.write_text(json.dumps(data))
@@ -797,3 +806,199 @@ def test_recipe_preview_credits_verified_recurring_additions_and_preserves_basel
         "JOIN products p ON p.id=b.product_id",
     ) == [("999", 8)]
     assert run_recipes_apply(home, run_id, proposal)["recipe_slots"] == result["recipe_slots"]
+
+
+@pytest.mark.parametrize("phase", ["preflight", "intent", "resume", "resume-pending"])
+def test_changed_membership_stops_stale_run_without_rewriting_evidence(home, phase):
+    run_id = prepare_due_family(home)
+    before = rows(home, "SELECT * FROM run_recurring_items")
+    accepted = run_recurring_preflight(home, run_id, observation({"999": 8}))
+    if phase == "resume-pending":
+        run_recurring_intent(home, run_id, accepted["manifest"])
+    manifests = rows(home, "SELECT * FROM run_mutation_manifests")
+    report_bytes = {p: p.read_bytes() for p in home.run_dir(run_id).rglob("*") if p.is_file()}
+    run_product_register(home, url("444"))
+    run_family_link(home, "444", "yaml-family")
+    with pytest.raises(WeeklyPlanError, match="stale family policy"):
+        if phase == "preflight":
+            run_recurring_preflight(home, run_id, observation({"999": 8}))
+        elif phase == "intent":
+            run_recurring_intent(home, run_id, accepted["manifest"])
+        else:
+            run_resume_prepare(home, run_id, observation({"999": 8}))
+    assert rows(home, "SELECT * FROM run_recurring_items") == before
+    assert rows(home, "SELECT * FROM run_mutation_manifests") == manifests
+    assert all(p.read_bytes() == content for p, content in report_bytes.items())
+
+
+def test_registered_alternative_needs_fresh_rendered_availability(home: GrossyPaths) -> None:
+    seed_yaml_family(home)
+    run_set_primary(home, "yaml-family", "111")
+    run_product_register(home, url("444"))
+    run_family_link(home, "444", "yaml-family")
+    change(
+        home,
+        "UPDATE product_families SET recurrence_weeks=1, recurrence_source='observed', "
+        "recurrence_confidence='high', last_purchase_date='2020-01-01'",
+    )
+    config = yaml.safe_load(home.config_file.read_text())
+    config["staples"]["breakfast"] = []
+    home.config_file.write_text(yaml.safe_dump(config))
+    run_id = prepare(home, {"999": 8})
+    data = observation({"999": 8})
+    for fact in data["recurring_product_facts"]:
+        fact["availability"] = "unavailable"
+    assert run_recurring_preflight(home, run_id, data)["manifest"]["additions"] == []
+    data["recurring_product_facts"].append(
+        {
+            "product_id": "444",
+            "canonical_url": url("444"),
+            "availability": "available",
+            "displayed_price_eur": "2.00",
+        }
+    )
+    accepted = run_recurring_preflight(home, run_id, data)
+    assert accepted["manifest"]["additions"][0]["product_id"] == "444"
+    assert rows(
+        home,
+        "SELECT p.retailer_product_id FROM product_families f JOIN products p "
+        "ON p.id=f.primary_product_id",
+    ) == [("111",)]
+
+
+def stale_pending_readback(
+    paths: GrossyPaths, stage: str
+) -> tuple[str, dict[str, Any], dict[str, Any]]:
+    if stage == "recurring":
+        run_id = prepare_due_family(paths)
+        cart = observation({"999": 8})
+        preflight, intent = run_recurring_preflight, run_recurring_intent
+    else:
+        from test_weekly_selection import observation as recipe_observation
+        from test_weekly_selection import plan
+
+        config = yaml.safe_load(paths.config_file.read_text())
+        config["staples"]["breakfast"] = []
+        paths.config_file.write_text(yaml.safe_dump(config))
+        run_id = plan(paths, second=False)
+        cart = recipe_observation()
+        change(
+            paths,
+            "INSERT INTO product_families(family_id,name,created_at,updated_at) "
+            "VALUES ('yaml-family','Fixture family','2026-10-01','2026-10-01')",
+        )
+        preflight, intent = run_recipe_preflight, run_recipe_intent
+    manifest = preflight(paths, run_id, cart)["manifest"]
+    assert len(manifest["additions"]) == 1
+    assert intent(paths, run_id, manifest)["status"] == "persisted"
+    run_product_register(paths, url("444"))
+    run_family_link(paths, "444", "yaml-family")
+    addition = manifest["additions"][0]
+    cart["lines"].append(
+        {
+            "product_id": addition["product_id"],
+            "canonical_url": addition["canonical_url"],
+            "quantity": addition["quantity"],
+            "displayed_price_eur": addition["price_eur"],
+        }
+    )
+    cart["mutation_result"] = {"manifest_checksum": manifest["checksum"], "outcome": "readback"}
+    return run_id, manifest, cart
+
+
+@pytest.mark.parametrize("stage", ["recurring", "recipe"])
+@pytest.mark.parametrize("outcome", ["readback", "failed", "incomplete", "quantity-mismatch"])
+def test_stale_policy_pending_observe_preserves_evidence_and_execution_denial(
+    home: GrossyPaths, stage: str, outcome: str
+) -> None:
+    run_id, manifest, cart = stale_pending_readback(home, stage)
+    observe = run_recurring_observe if stage == "recurring" else run_recipe_observe
+    preflight = run_recurring_preflight if stage == "recurring" else run_recipe_preflight
+    intent = run_recurring_intent if stage == "recurring" else run_recipe_intent
+    snapshots = {
+        table: rows(home, f"SELECT * FROM {table}")
+        for table in (
+            "run_mutation_manifests",
+            "run_recurring_items",
+            "run_cart_baselines",
+            "run_recipe_plans",
+            "run_recipe_selections",
+            "source_orders",
+            "source_order_products",
+        )
+    }
+    marker = rows(home, "SELECT * FROM run_events WHERE event_type='maintenance-policy-changed'")
+    assert len(marker) == 1
+    prior_observations = rows(home, "SELECT * FROM run_mutation_observations ORDER BY id")
+    prior_preflights = rows(home, "SELECT * FROM run_events WHERE event_type LIKE '%-preflight'")
+    if outcome == "quantity-mismatch":
+        cart["lines"][-1]["quantity"] += 1
+    else:
+        cart["mutation_result"]["outcome"] = outcome
+    result = observe(home, run_id, cart)
+    success = outcome == "readback"
+    assert result["status"] == ("success" if success else "error")
+    assert result["lifecycle"] == (
+        ("recurring-apply" if stage == "recurring" else "awaiting-user-verification")
+        if success
+        else "partial-failure"
+    )
+    observations = rows(home, "SELECT * FROM run_mutation_observations ORDER BY id")
+    assert observations[:-1] == prior_observations
+    assert len(observations) == len(prior_observations) + 1
+    assert rows(
+        home, "SELECT observed_json,failure_class FROM run_mutation_observations ORDER BY id"
+    )[-1] == (json.dumps(cart), "none" if success else "partial")
+    assert {table: rows(home, f"SELECT * FROM {table}") for table in snapshots} == snapshots
+    for operation in (
+        lambda: preflight(home, run_id, cart),
+        lambda: intent(home, run_id, manifest),
+        lambda: run_resume_prepare(home, run_id, observation({}, facts=False), stage=stage),
+    ):
+        with pytest.raises(WeeklyPlanError, match="stale family policy"):
+            operation()
+    assert (
+        rows(home, "SELECT * FROM run_events WHERE event_type='maintenance-policy-changed'")
+        == marker
+    )
+    assert (
+        rows(home, "SELECT * FROM run_events WHERE event_type LIKE '%-preflight'")
+        == prior_preflights
+    )
+    assert rows(home, "SELECT * FROM run_mutation_manifests") == snapshots["run_mutation_manifests"]
+    if success:
+        with pytest.raises(WeeklyPlanError, match="pending manifest"):
+            observe(home, run_id, cart)
+        assert rows(home, "SELECT * FROM run_mutation_observations ORDER BY id") == observations
+
+
+@pytest.mark.parametrize("stage", ["recurring", "recipe"])
+@pytest.mark.parametrize("invalid", ["checksum", "missing-result", "extra-field", "identity"])
+def test_stale_policy_invalid_pending_observe_rejects_atomically(
+    home: GrossyPaths, stage: str, invalid: str
+) -> None:
+    run_id, _, cart = stale_pending_readback(home, stage)
+    observe = run_recurring_observe if stage == "recurring" else run_recipe_observe
+    before = {
+        table: rows(home, f"SELECT * FROM {table}")
+        for table in (
+            "run_mutation_observations",
+            "run_mutation_manifests",
+            "run_events",
+            "planner_runs",
+            "weekly_reports",
+        )
+    }
+    reports = {p: p.read_bytes() for p in home.run_dir(run_id).rglob("*") if p.is_file()}
+    if invalid == "checksum":
+        cart["mutation_result"]["manifest_checksum"] = "0" * 64
+    elif invalid == "missing-result":
+        del cart["mutation_result"]
+    elif invalid == "extra-field":
+        cart["unexpected"] = True
+    else:
+        cart["lines"][-1]["canonical_url"] = url("888")
+    with pytest.raises((ValueError, WeeklyPlanError)):
+        observe(home, run_id, cart)
+    assert {table: rows(home, f"SELECT * FROM {table}") for table in before} == before
+    assert all(p.read_bytes() == content for p, content in reports.items())

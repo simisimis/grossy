@@ -8,6 +8,10 @@ hostile argument strings can never be shell-evaluated or reach the skill
 prompt. The bare positional form (``just weekly-add <id> <recipe-list|all>``)
 is also accepted.
 
+Execution: the Justfile invokes this module via
+``PYTHONPATH="$PWD/src" python3 -m grossy.skill <RUN_ID> <RECIPES>``
+inside the Nix development shell. No virtualenv, pip, or uv is used.
+
 PRD 9.2: ``<recipe-list>`` is a comma-separated list of unique persisted
 non-empty recipe slots; ``all`` means all persisted non-empty slots in stable
 slot order. Slot persistence is a runtime concern of a later task; this

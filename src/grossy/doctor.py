@@ -23,12 +23,14 @@ from grossy.db.lock import LOCK_FILE_NAME
 from grossy.db.migrations import discover_migrations
 from grossy.fsutil import DIR_MODE, FILE_MODE
 from grossy.paths import GrossyPaths
+from grossy.security import sanitize_human_text
 
 DOCTOR_SCHEMA_NAME = "grossy.doctor.result"
 DOCTOR_SCHEMA_VERSION = 1
 
 AGENT_BROWSER_SUPPORTED_MAJOR = 0
-AGENT_BROWSER_SUPPORTED_MINOR = 27
+AGENT_BROWSER_SUPPORTED_MINORS = frozenset({27, 38})
+AGENT_BROWSER_SUPPORTED_VERSIONS = "0.27.x or 0.38.x"
 
 
 @dataclass(frozen=True)
@@ -62,10 +64,10 @@ class DoctorResult:
             entry: dict[str, object] = {
                 "name": c.name,
                 "status": c.status,
-                "detail": c.detail,
+                "detail": sanitize_human_text(c.detail),
             }
             if c.remediation is not None:
-                entry["remediation"] = c.remediation
+                entry["remediation"] = sanitize_human_text(c.remediation)
             checks_out.append(entry)
         return {
             "schema_name": DOCTOR_SCHEMA_NAME,
@@ -445,7 +447,7 @@ def _check_agent_browser() -> DoctorCheckResult:
             "agent_browser",
             "fail",
             "agent-browser not found on PATH",
-            "install agent-browser 0.27.x",
+            f"install agent-browser {AGENT_BROWSER_SUPPORTED_VERSIONS}",
         )
     try:
         result = subprocess.run(
@@ -459,39 +461,41 @@ def _check_agent_browser() -> DoctorCheckResult:
                 "agent_browser",
                 "fail",
                 f"agent-browser --version exited with code {result.returncode}",
-                "install agent-browser 0.27.x",
+                f"install agent-browser {AGENT_BROWSER_SUPPORTED_VERSIONS}",
             )
         version_str = result.stdout.strip()
-        # Full-match the supported version format X.Y.Z so trailing junk such
-        # as "0.27.1junk" is rejected rather than silently accepted.
-        match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", version_str)
+        # 0.38 emits "agent-browser X.Y.Z"; retain the legacy bare format.
+        # Full-match both formats, rejecting other prefixes and trailing junk.
+        match = re.fullmatch(r"(?:agent-browser )?([0-9]+)\.([0-9]+)\.([0-9]+)", version_str)
         if not match:
             return DoctorCheckResult(
                 "agent_browser",
                 "fail",
                 f"cannot parse agent-browser version: {version_str!r}",
-                "install agent-browser 0.27.x",
+                f"install agent-browser {AGENT_BROWSER_SUPPORTED_VERSIONS}",
             )
         major = int(match.group(1))
         minor = int(match.group(2))
-        if major == AGENT_BROWSER_SUPPORTED_MAJOR and minor == AGENT_BROWSER_SUPPORTED_MINOR:
+        if major == AGENT_BROWSER_SUPPORTED_MAJOR and minor in AGENT_BROWSER_SUPPORTED_MINORS:
             return DoctorCheckResult(
                 "agent_browser",
                 "pass",
-                f"agent-browser version {version_str} (supported 0.27.x)",
+                f"agent-browser version {version_str} "
+                f"(supported {AGENT_BROWSER_SUPPORTED_VERSIONS})",
             )
         return DoctorCheckResult(
             "agent_browser",
             "fail",
-            f"agent-browser version {version_str} is not supported; expected 0.27.x",
-            "install agent-browser 0.27.x",
+            f"agent-browser version {version_str} is not supported; "
+            f"expected {AGENT_BROWSER_SUPPORTED_VERSIONS}",
+            f"install agent-browser {AGENT_BROWSER_SUPPORTED_VERSIONS}",
         )
     except Exception as exc:
         return DoctorCheckResult(
             "agent_browser",
             "fail",
             f"cannot check agent-browser version: {exc}",
-            "install agent-browser 0.27.x",
+            f"install agent-browser {AGENT_BROWSER_SUPPORTED_VERSIONS}",
         )
 
 
@@ -501,7 +505,7 @@ def _check_browser_profile(paths: GrossyPaths) -> DoctorCheckResult:
         return DoctorCheckResult(
             "browser_profile",
             "fail",
-            f"browser profile directory not found: {profile}",
+            "browser profile directory not found",
             "run 'grossy init' to create the profile directory",
         )
     mode = stat.S_IMODE(profile.stat().st_mode)
@@ -510,7 +514,7 @@ def _check_browser_profile(paths: GrossyPaths) -> DoctorCheckResult:
             "browser_profile",
             "fail",
             f"browser profile has mode {oct(mode)}, expected {oct(DIR_MODE)}",
-            f"chmod {oct(DIR_MODE)} {profile}",
+            "set the configured browser profile directory to mode 0700",
         )
     return DoctorCheckResult(
         "browser_profile",

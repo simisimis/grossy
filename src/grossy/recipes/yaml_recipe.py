@@ -260,8 +260,9 @@ def load_recipe_yaml(text: str) -> UserRecipe:
         # loader errors; re-report them as recipe-file errors.
         raise RecipeYamlError(str(exc)) from exc
     except yaml.YAMLError as exc:
-        reason = str(exc).replace("\n", " ")
-        raise RecipeYamlError(f"invalid YAML: {reason}") from exc
+        mark = getattr(exc, "problem_mark", None)
+        location = f" at line {mark.line + 1}, column {mark.column + 1}" if mark else ""
+        raise RecipeYamlError(f"invalid YAML{location}; check syntax") from exc
     if data is None:
         raise RecipeYamlError("recipe file is empty")
     if not isinstance(data, dict):

@@ -29,6 +29,7 @@ from zoneinfo import ZoneInfo
 from grossy.history.maintenance import (
     family_has_recurrence_override,
     product_has_explicit_unlink_override,
+    retire_empty_family,
 )
 from grossy.history.policy import product_gate
 from grossy.history.proposal import (
@@ -411,7 +412,9 @@ def run_inference(conn: sqlite3.Connection, now: str) -> InferenceSummary:
     families_created = 0
     newly_created: set[str] = set()
     for product_row_id, retailer_id, name, _category_id in product_rows:
-        if product_has_explicit_unlink_override(conn, cast(str, retailer_id)):
+        if product_row_id not in occurrences or product_has_explicit_unlink_override(
+            conn, cast(str, retailer_id)
+        ):
             continue
         _family_row_id, created = _ensure_family(
             conn, cast(int, product_row_id), f"fam-{retailer_id}", cast(str, name), now
@@ -744,7 +747,7 @@ def _infer_family_links(
             }
         )
 
-    _retire_vacated_families(conn, source_families)
+    _retire_vacated_families(conn, source_families, now)
 
     review_items = _family_link_review_items(conn, product_rows, facts)
     review_items.extend(blocked_high_confidence)
@@ -809,7 +812,7 @@ def _current_family_id(conn: sqlite3.Connection, retailer_product_id: str) -> st
     return cast(str, row[0]) if row is not None else None
 
 
-def _retire_vacated_families(conn: sqlite3.Connection, family_ids: Sequence[str]) -> None:
+def _retire_vacated_families(conn: sqlite3.Connection, family_ids: Sequence[str], now: str) -> None:
     """Retire source families that lost their last member to this pass's links.
 
     Such a family is an inference artifact with no remaining members; leaving
@@ -826,7 +829,11 @@ def _retire_vacated_families(conn: sqlite3.Connection, family_ids: Sequence[str]
         ).fetchone()
         if remaining is not None:
             continue
-        conn.execute("DELETE FROM product_families WHERE family_id = ?", (family_id,))
+        row = conn.execute(
+            "SELECT id FROM product_families WHERE family_id=?", (family_id,)
+        ).fetchone()
+        if row is not None:
+            retire_empty_family(conn, int(row[0]), now)
         # A vacated family's pending recurrence review item is stale: the
         # merged family re-infers its own recurrence this pass.
         _clear_review_items_for(conn, "recurrence", "family", [family_id])

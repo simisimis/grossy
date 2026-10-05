@@ -1,15 +1,16 @@
-# Justfile for the Grossy project (PRD section 16.2).
+# All targets run inside the Nix development shell (`nix develop`). The shell
+# provides grossy (store-built), python3.12 with dependencies, ruff, mypy,
+# pytest, and just. No target creates a virtualenv, downloads packages, or
+# touches the network.
 #
-# `just setup` is the prerequisite for every target: it creates the
-# uv-managed virtualenv from the pinned uv.lock. Setup is the only target
-# allowed to touch the network (initial dependency download) and it runs
-# `uv sync --locked` so a stale or drifting lock fails instead of updating.
+# `just setup` verifies shell provenance: it confirms that the required tools
+# match this project's declared Nix closure and no ambient Python environment (PYTHONHOME,
+# VIRTUAL_ENV, user-site) is active.
 #
-# Quality targets enforce offline and locked execution in the recipe itself
-# (`--offline --frozen` on every `uv` call, plus `uv lock --check --offline`
-# which proves the uv.lock is consistent with pyproject.toml; `--frozen`
-# alone would skip that freshness validation). They never rely on inherited
-# UV_* flags, never access live AB.gr, and never mutate user state.
+# Quality targets use Nix store tools directly
+# (ruff, mypy, pytest) without any network access. Source tests set PYTHONPATH
+# explicitly to the repository src/ directory so grossy modules resolve from
+# source while third-party dependencies resolve from the Nix store.
 #
 # Operational targets are manual. They invoke the project Pi skill
 # (.pi/skills/grossy/SKILL.md); the deterministic Python process never
@@ -17,35 +18,56 @@
 
 default: check
 
+# Shared dependency: compare PATH tools to this project's declared shell closure.
+# Source-test subprocesses may inherit only the explicitly bounded source path.
 setup:
-    uv sync --locked
+    @if [ "${GROSSY_SHELL_PROJECT:-}" != "grossy-python312-v1" ]; then echo "ERROR: enter the Grossy Nix development shell"; exit 1; fi
+    @if [ -n "${VIRTUAL_ENV:-}" ]; then echo "ERROR: VIRTUAL_ENV is set; deactivate it"; exit 1; fi
+    @if [ -n "${PYTHONHOME:-}" ]; then echo "ERROR: PYTHONHOME is set; unset it"; exit 1; fi
+    @if [ -n "${__PYVENV_LAUNCHER__:-}" ]; then echo "ERROR: __PYVENV_LAUNCHER__ is set; deactivate venv"; exit 1; fi
+    @if [ "${PYTHONNOUSERSITE:-}" != "1" ] && [ "${PYTHONNOUSERSITE:-}" != "true" ]; then echo "ERROR: user-site must be disabled"; exit 1; fi
+    @if [ -n "${PYTHONPATH:-}" ] && [ "$PYTHONPATH" != "$PWD/src" ]; then echo "ERROR: unexpected PYTHONPATH"; exit 1; fi
+    @if echo "${PATH}" | tr ':' '\n' | grep -q '\.venv/bin'; then echo "ERROR: .venv/bin found in PATH"; exit 1; fi
+    @for tool in grossy python3 ruff mypy pytest just; do \
+        case "$tool" in \
+            grossy) expected="${GROSSY_SHELL_GROSSY:-}" ;; \
+            python3|mypy|pytest) expected="${GROSSY_SHELL_PYTHON:-}/bin/$tool" ;; \
+            ruff) expected="${GROSSY_SHELL_RUFF:-}" ;; \
+            just) expected="${GROSSY_SHELL_JUST:-}" ;; \
+        esac; \
+        case "$expected" in /nix/store/*) ;; *) echo "ERROR: missing project shell declaration for $tool"; exit 1 ;; esac; \
+        path=$(command -v "$tool") || exit 1; \
+        if [ "$path" != "$expected" ]; then echo "ERROR: $tool resolves to '$path', not declared project shell tool '$expected' (not a Nix store path or wrong closure)"; exit 1; fi; \
+    done
+    @echo "Shell provenance OK: declared Grossy closure, no ambient Python environment."
 
-format:
-    uv run --offline --frozen ruff format src tests
-    uv run --offline --frozen ruff check --fix src tests
+format: setup
+    ruff format src tests
+    ruff check --fix src tests
 
-lint:
-    uv run --offline --frozen ruff check src tests
+lint: setup
+    ruff check src tests
 
-typecheck:
-    uv run --offline --frozen mypy
+typecheck: setup
+    mypy
 
-test:
-    uv run --offline --frozen pytest
+# Source-tree tests: PYTHONPATH points to the repository src/ so grossy
+# modules resolve from source while third-party deps come from the Nix store.
+test: setup
+    PYTHONPATH="$PWD/src" python3 -m pytest
 
-check:
-    uv lock --check --offline
-    uv run --offline --frozen ruff format --check src tests
-    uv run --offline --frozen ruff check src tests
-    uv run --offline --frozen mypy
-    uv run --offline --frozen pytest
+check: setup
+    ruff format --check src tests
+    ruff check src tests
+    mypy
+    PYTHONPATH="$PWD/src" python3 -m pytest
 
 # --- manual operational targets (PRD 16.2) ---
 
-history-sync:
+history-sync: setup
     pi -p "/skill:grossy history sync"
 
-weekly-plan:
+weekly-plan: setup
     pi -p "/skill:grossy weekly plan"
 
 # Implements the documented invocation
@@ -59,5 +81,5 @@ weekly-plan:
 # (grossy.skill) which must succeed for the `pi` invocation to run, and `pi`
 # receives the prompt as a single argument. The bare positional form
 # (`just weekly-add <id> <recipe-list|all>`) is also accepted.
-weekly-add RUN_ID RECIPES:
-    GROSSY_WEEKLY_ADD_PROMPT="$(uv run --offline --frozen python -m grossy.skill {{ quote(RUN_ID) }} {{ quote(RECIPES) }})" && pi -p "$GROSSY_WEEKLY_ADD_PROMPT"
+weekly-add RUN_ID RECIPES: setup
+    GROSSY_WEEKLY_ADD_PROMPT="$(PYTHONPATH="$PWD/src" python3 -m grossy.skill {{ quote(RUN_ID) }} {{ quote(RECIPES) }})" && pi -p "$GROSSY_WEEKLY_ADD_PROMPT"

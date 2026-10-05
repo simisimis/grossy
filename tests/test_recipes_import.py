@@ -33,7 +33,7 @@ from grossy.recipes import (
 )
 from grossy.recipes.proposal import proposal_checksum
 
-RUNNER = CliRunner(mix_stderr=False)
+RUNNER = CliRunner()
 GENERATED_AT = "2026-09-26T12:00:00+00:00"
 
 
@@ -690,7 +690,7 @@ def test_cli_import_validate_emits_preview(cli_home: tuple[Path, GrossyPaths]) -
     path = _write_json(tmp_path, _proposal(_recipe_payload()))
     result = RUNNER.invoke(app, ["recipes", "import-validate", str(path)])
     assert result.exit_code == 0
-    preview = json.loads(result.output)
+    preview = json.loads(result.stdout)
     assert preview["schema_name"] == "grossy.recipe.import-validate"
     assert preview["status"] == "preview"
     assert preview["recipe_id"] == "air-fryer-salmon"
@@ -703,7 +703,7 @@ def test_cli_import_apply_success(cli_home: tuple[Path, GrossyPaths]) -> None:
     checksum = _accepted_checksum(path)
     result = RUNNER.invoke(app, ["recipes", "import-apply", str(path), "--checksum", checksum])
     assert result.exit_code == 0
-    stdout = json.loads(result.output)
+    stdout = json.loads(result.stdout)
     assert stdout["schema_name"] == "grossy.recipe.import-apply"
     assert stdout["status"] == "applied"
     assert stdout["recipe_id"] == "air-fryer-salmon"
@@ -736,7 +736,7 @@ def test_cli_import_apply_wrong_preview_checksum_fails_closed(
     path = _write_json(tmp_path, _proposal(_recipe_payload()))
     result = RUNNER.invoke(app, ["recipes", "import-apply", str(path), "--checksum", "0" * 64])
     assert result.exit_code == 1
-    stdout = json.loads(result.output)
+    stdout = json.loads(result.stdout)
     assert stdout["status"] == "error"
     assert "accepted preview checksum" in stdout["detail"]
     conn = _db(paths)
@@ -754,7 +754,7 @@ def test_cli_import_apply_tampered_fails_closed(cli_home: tuple[Path, GrossyPath
     path.write_text(text.replace("salmon fillet", "tuna fillet"), encoding="utf-8")
     result = RUNNER.invoke(app, ["recipes", "import-apply", str(path), "--checksum", checksum])
     assert result.exit_code == 1
-    stdout = json.loads(result.output)
+    stdout = json.loads(result.stdout)
     assert stdout["status"] == "error"
     assert "checksum does not match" in stdout["detail"]
     conn = _db(paths)

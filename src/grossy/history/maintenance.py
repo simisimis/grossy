@@ -22,15 +22,19 @@ The mandatory precedence (PRD 7.1) is:
 
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
 from datetime import UTC, datetime
 from typing import Any, cast
+from urllib.parse import unquote
 
+from grossy.config.models import product_id_from_url
 from grossy.db.connection import open_connection
 from grossy.db.lock import WriterLock
 from grossy.db.migrations import run_migrations
 from grossy.paths import GrossyPaths
+from grossy.security import ProhibitedContentError, sanitize_human_text, scan_prohibited_content
 
 # Shared whitespace-collapsing normalizer (same as sync.py _WHITESPACE_RE).
 _WS_RE = re.compile(r"\s+")
@@ -210,6 +214,105 @@ def _family_primary_product_id(conn: sqlite3.Connection, family_row_id: int) -> 
     return cast(str, row[0])
 
 
+def _active_value(conn: sqlite3.Connection, kind: str, target: str, field: str) -> str | None:
+    row = conn.execute(
+        "SELECT field_value FROM manual_overrides WHERE target_type=? AND target_id=? "
+        "AND field_name=? AND superseded_at IS NULL ORDER BY id DESC LIMIT 1",
+        (kind, target, field),
+    ).fetchone()
+    return cast(str, row[0]) if row else None
+
+
+def _require_not_retired(conn: sqlite3.Connection, family_id: str) -> None:
+    if _active_value(conn, "family", family_id, "retired") is not None:
+        raise MaintenanceError("archival family cannot be re-enabled or receive members")
+
+
+def retire_empty_family(conn: sqlite3.Connection, row_id: int, now: str) -> None:
+    """Preserve referenced family identity; never change historical run rows."""
+    if conn.execute("SELECT 1 FROM family_members WHERE family_id=?", (row_id,)).fetchone():
+        return
+    stable_id = conn.execute(
+        "SELECT family_id FROM product_families WHERE id=?", (row_id,)
+    ).fetchone()[0]
+    referenced = conn.execute(
+        "SELECT 1 FROM run_recurring_items WHERE family_id=? LIMIT 1", (row_id,)
+    ).fetchone()
+    if referenced:
+        conn.execute(
+            "UPDATE product_families SET enabled=0, updated_at=? WHERE id=?", (now, row_id)
+        )
+    else:
+        conn.execute("DELETE FROM product_families WHERE id=?", (row_id,))
+    if _active_value(conn, "family", stable_id, "retired") is None:
+        _record_override(
+            conn,
+            "family",
+            stable_id,
+            "retired",
+            "1",
+            "empty family retired; historical references preserved",
+            now,
+        )
+
+
+def _family_policy(conn: sqlite3.Connection) -> tuple[list[Any], list[Any]]:
+    return (
+        conn.execute(
+            "SELECT id,primary_product_id,enabled,blacklist_state FROM product_families ORDER BY id"
+        ).fetchall(),
+        conn.execute(
+            "SELECT family_id,product_id,role,approval_state "
+            "FROM family_members ORDER BY product_id"
+        ).fetchall(),
+    )
+
+
+def run_product_register(paths: GrossyPaths, canonical_url: str) -> dict[str, object]:
+    """Register identity only: no fetched metadata, purchase or availability claim."""
+    try:
+        scan_prohibited_content(unquote(canonical_url))
+    except ProhibitedContentError as exc:
+        raise MaintenanceError("prohibited content in product URL") from exc
+    product_id = product_id_from_url(canonical_url)
+    if (
+        product_id is None
+        or len(canonical_url) > 4096
+        or "?" in canonical_url
+        or "#" in canonical_url
+    ):
+        raise MaintenanceError("a canonical AB.gr product URL is required")
+    if sanitize_human_text(unquote(canonical_url)) != unquote(canonical_url):
+        raise MaintenanceError("unsafe product URL content")
+
+    def _do(conn: sqlite3.Connection, now: str) -> dict[str, object]:
+        existing = conn.execute(
+            "SELECT canonical_url FROM products WHERE retailer='ab' AND retailer_product_id=?",
+            (product_id,),
+        ).fetchone()
+        if existing:
+            if product_id_from_url(existing[0]) != product_id:
+                raise MaintenanceError("existing canonical product identity conflicts")
+            return {"product_id": product_id, "changed": False}
+        conn.execute(
+            "INSERT INTO products (retailer_product_id,canonical_url,name,created_at,updated_at) "
+            "VALUES (?,?,'Unknown product',?,?)",
+            (product_id, canonical_url, now, now),
+        )
+        _record_override(
+            conn,
+            "product",
+            product_id,
+            "catalogue_registration",
+            canonical_url,
+            "explicit non-purchase catalogue registration",
+            now,
+        )
+        return {"product_id": product_id, "changed": True}
+
+    return _run_maintenance(paths, "product-register", _do)
+
+
 # --- transactional command runner -------------------------------------------
 
 
@@ -235,7 +338,27 @@ def _run_maintenance(
         conn = open_connection(paths.database_file)
         try:
             now = _now_utc()
+            before = _family_policy(conn)
             payload = fn(conn, now)
+            if before != _family_policy(conn):
+                # Conservative invalidation, not snapshot repair or lifecycle closure.
+                conn.execute(
+                    "INSERT INTO run_events (run_id,event_type,detail,created_at) "
+                    "SELECT id,'maintenance-policy-changed',?,? FROM planner_runs "
+                    "WHERE lifecycle NOT IN ('completed','abandoned') AND NOT EXISTS "
+                    "(SELECT 1 FROM run_events e WHERE e.run_id=planner_runs.id "
+                    "AND e.event_type='maintenance-policy-changed')",
+                    (
+                        json.dumps(
+                            {
+                                "reason": (
+                                    "family policy changed; coordinator review/reprepare required"
+                                )
+                            }
+                        ),
+                        now,
+                    ),
+                )
             conn.commit()
         except Exception:
             conn.rollback()
@@ -277,9 +400,23 @@ def run_set_primary(
             )
         current_role = cast(str, member[0])
         if current_role == "primary":
-            raise MaintenanceError(
-                f"product {product_id!r} is already the primary of family {family_id!r}"
-            )
+            recorded = _active_value(conn, "family", family_id, OVERRIDE_PRIMARY) == product_id
+            if not recorded:
+                _record_override(
+                    conn,
+                    "family",
+                    family_id,
+                    OVERRIDE_PRIMARY,
+                    product_id,
+                    effective_rationale,
+                    now,
+                )
+            return {
+                "family_id": family_id,
+                "new_primary_product_id": product_id,
+                "changed": False,
+                "preference_recorded": not recorded,
+            }
 
         # Demote the current primary to alternative, promote the target to primary.
         conn.execute(
@@ -295,7 +432,12 @@ def run_set_primary(
         _record_override(
             conn, "family", family_id, OVERRIDE_PRIMARY, product_id, effective_rationale, now
         )
-        return {"family_id": family_id, "new_primary_product_id": product_id}
+        return {
+            "family_id": family_id,
+            "new_primary_product_id": product_id,
+            "changed": True,
+            "preference_recorded": True,
+        }
 
     return _run_maintenance(paths, f"set-primary {family_id} {product_id}", _do)
 
@@ -392,6 +534,7 @@ def run_enable(
 
     def _do(conn: sqlite3.Connection, now: str) -> dict[str, object]:
         family_row_id = _get_family_row_id(conn, family_id)
+        _require_not_retired(conn, family_id)
         conn.execute(
             "UPDATE product_families SET enabled = 1, updated_at = ? WHERE id = ?",
             (now, family_row_id),
@@ -499,9 +642,11 @@ def run_family_link(
         product_row_id = _get_product_row_id(conn, product_id)
         family_row_id = _get_family_row_id(conn, family_id)
 
-        # Reject if already a member of the target family.
+        _require_not_retired(conn, family_id)
+        # An approved alternative repeated by the operator is a no-op.
         existing = conn.execute(
-            "SELECT role FROM family_members WHERE family_id = ? AND product_id = ?",
+            "SELECT role, approval_state FROM family_members "
+            "WHERE family_id = ? AND product_id = ?",
             (family_row_id, product_row_id),
         ).fetchone()
         if existing is not None:
@@ -510,9 +655,9 @@ def run_family_link(
                 raise MaintenanceError(
                     f"product {product_id!r} is already the primary of family {family_id!r}"
                 )
-            raise MaintenanceError(
-                f"product {product_id!r} is already a member of family {family_id!r}"
-            )
+            if existing[1] == "approved":
+                return {"product_id": product_id, "family_id": family_id, "changed": False}
+            raise MaintenanceError("existing member is not an approved alternative")
 
         # Check if the product is in a blacklisted family (prevents silently
         # bypassing a family blacklist by moving the product out).
@@ -547,7 +692,7 @@ def run_family_link(
                 (old_family_id,),
             ).fetchone()
             if remaining is not None and cast(int, remaining[0]) == 0:
-                conn.execute("DELETE FROM product_families WHERE id = ?", (old_family_id,))
+                retire_empty_family(conn, old_family_id, now)
 
         conn.execute(
             "INSERT INTO family_members (family_id, product_id, role, approval_state, "
@@ -558,7 +703,7 @@ def run_family_link(
         _record_override(
             conn, "product", product_id, "family_id", family_id, effective_rationale, now
         )
-        return {"product_id": product_id, "family_id": family_id}
+        return {"product_id": product_id, "family_id": family_id, "changed": True}
 
     return _run_maintenance(paths, f"family link {product_id} {family_id}", _do)
 
@@ -568,8 +713,8 @@ def run_family_unlink(
 ) -> dict[str, object]:
     """Remove a product from its family (FR-69).
 
-    If the product is the sole member, the family is deleted (it becomes an
-    empty shell with no primary). If it is the primary but other members exist,
+    A sole-member family retires: referenced shells remain disabled, otherwise
+    they are deleted. If it is the primary but other members exist,
     the primary field falls back to NULL (the user must set a new primary).
     """
     effective_rationale = rationale or f"manual correction: unlink {product_id} from family"
@@ -581,6 +726,8 @@ def run_family_unlink(
             (product_row_id,),
         ).fetchone()
         if member is None:
+            if _active_value(conn, "product", product_id, "family_id") == "":
+                return {"product_id": product_id, "removed_from_family": True, "changed": False}
             raise MaintenanceError(f"product {product_id!r} is not a member of any family")
         family_row_id = cast(int, member[0])
 
@@ -614,7 +761,7 @@ def run_family_unlink(
                 "SELECT family_id FROM product_families WHERE id = ?", (family_row_id,)
             ).fetchone()
             if family_id is not None:
-                conn.execute("DELETE FROM product_families WHERE id = ?", (family_row_id,))
+                retire_empty_family(conn, family_row_id, now)
 
         _record_override(conn, "product", product_id, "family_id", "", effective_rationale, now)
         return {"product_id": product_id, "removed_from_family": True}
@@ -632,7 +779,7 @@ def run_family_merge(
 
     All members of the source family are moved into the target family. The
     source primary becomes an alternative in the target (the target's
-    established primary is preserved, FR-44). The source family is deleted.
+    established primary is preserved, FR-44). The empty source family retires.
 
     Rejects the merge when either the source or target family is blacklisted
     (to prevent silently bypassing a family blacklist, FR-66).
@@ -644,8 +791,16 @@ def run_family_merge(
     def _do(conn: sqlite3.Connection, now: str) -> dict[str, object]:
         if source_family_id == target_family_id:
             raise MaintenanceError("source and target family must differ")
-        source_row_id = _get_family_row_id(conn, source_family_id)
         target_row_id = _get_family_row_id(conn, target_family_id)
+        _require_not_retired(conn, target_family_id)
+        if _active_value(conn, "family", source_family_id, "merged_into") == target_family_id:
+            return {
+                "source_family_id": source_family_id,
+                "target_family_id": target_family_id,
+                "members_moved": 0,
+                "changed": False,
+            }
+        source_row_id = _get_family_row_id(conn, source_family_id)
 
         # Reject if either family is blacklisted (prevents silently bypassing
         # a family blacklist, FR-66).
@@ -713,7 +868,7 @@ def run_family_merge(
             "SELECT COUNT(*) FROM family_members WHERE family_id = ?", (source_row_id,)
         ).fetchone()
         if remaining is not None and cast(int, remaining[0]) == 0:
-            conn.execute("DELETE FROM product_families WHERE id = ?", (source_row_id,))
+            retire_empty_family(conn, source_row_id, now)
 
         _record_override(
             conn,

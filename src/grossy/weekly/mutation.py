@@ -233,6 +233,16 @@ def _pending(
     )
 
 
+def _require_current_family_policy(conn: sqlite3.Connection, rid: int) -> None:
+    if conn.execute(
+        "SELECT 1 FROM run_events WHERE run_id=? AND event_type='maintenance-policy-changed'",
+        (rid,),
+    ).fetchone():
+        raise WeeklyPlanError(
+            "stale family policy; coordinator review and explicit reprepare decision required"
+        )
+
+
 def _policy(conn: sqlite3.Connection, config: GrossyConfigModel) -> str:
     # Bind both YAML and mutable blacklist/family/approval state to acceptance.
     return proposal_checksum(
@@ -574,6 +584,7 @@ def run_recurring_preflight(
     obs = validate_cart_observation(data)
     with _locked(paths) as (conn, config):
         rid = _run(conn, run_id, stage)
+        _require_current_family_policy(conn, rid)
         if _pending(conn, rid, stage):
             raise WeeklyPlanError("unreconciled intent requires resume-prepare")
         expected = _latest(conn, rid, f"{stage}-cart")
@@ -615,6 +626,7 @@ def run_recurring_intent(
         raise WeeklyPlanError("manifest checksum or run mismatch")
     with _locked(paths) as (conn, config):
         rid = _run(conn, run_id, stage)
+        _require_current_family_policy(conn, rid)
         if _pending(conn, rid, stage):
             raise WeeklyPlanError("intent already persisted; reread via resume-prepare")
         accepted = _latest(conn, rid, f"{stage}-preflight")
@@ -725,6 +737,8 @@ def run_recurring_observe(
     obs = validate_cart_observation(data)
     with _locked(paths) as (conn, config):
         rid = _run(conn, run_id, stage)
+        # Policy drift blocks execution, not readback of an already durable intent.
+        # The pending-manifest binding below remains required; no new intent is issued.
         pending = _pending(conn, rid, stage)
         if (
             not pending
@@ -819,6 +833,7 @@ def run_resume_prepare(
     _require_fresh_observation(obs)
     with _locked(paths) as (conn, config):
         rid = _run(conn, run_id, stage)
+        _require_current_family_policy(conn, rid)
         pending = _pending(conn, rid, stage)
         if pending:
             accepted = _latest(conn, rid, f"{stage}-preflight")

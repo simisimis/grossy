@@ -434,7 +434,7 @@ def test_selection_cli_uses_only_isolated_state(
 ) -> None:
     rid = plan(home, select=None)
     monkeypatch.setattr("grossy.cli.resolve_paths", lambda: home)
-    runner = CliRunner(mix_stderr=False)
+    runner = CliRunner()
     selected = runner.invoke(app, ["weekly", "selection-apply", rid, "recipe2,recipe1"])
     assert (
         selected.exit_code == 0 and json.loads(selected.stdout)["mapping"][0]["recipe"] == "recipe2"
@@ -751,7 +751,7 @@ def test_unrelated_cart_drift_before_first_recipe_intent(
         assert adapter.reads == 2 and adapter.actions == []
     else:
         monkeypatch.setattr("grossy.cli.resolve_paths", lambda: home)
-        runner = CliRunner(mix_stderr=False)
+        runner = CliRunner()
         path = home.state_dir / "cart.json"
         path.write_text(json.dumps(before))
         accepted = runner.invoke(app, ["weekly", "recipe-preflight", rid, str(path)])
@@ -781,7 +781,7 @@ def test_whole_cart_anchor_after_recipe_action(
 ) -> None:
     rid = plan(home, shared=False)
     monkeypatch.setattr("grossy.cli.resolve_paths", lambda: home)
-    runner = CliRunner(mix_stderr=False)
+    runner = CliRunner()
     path = home.state_dir / "recipe-phase.json"
 
     def cli(command: str, payload: dict[str, Any]) -> Any:

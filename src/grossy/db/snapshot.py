@@ -13,7 +13,9 @@ without a circular import.
 from __future__ import annotations
 
 import hashlib
+import os
 import sqlite3
+import tempfile
 from pathlib import Path
 
 
@@ -50,3 +52,24 @@ def verify_sqlite_snapshot(path: Path) -> tuple[str, int]:
         conn.close()
     schema_version = version_row[0] if version_row and version_row[0] is not None else 0
     return checksum, schema_version
+
+
+def private_sqlite_backup(conn: sqlite3.Connection, dest: Path) -> None:
+    """Publish a consistent snapshot without a world-readable creation window."""
+    fd, name = tempfile.mkstemp(prefix=f".{dest.name}.", dir=dest.parent)
+    os.close(fd)
+    temp = Path(name)
+    try:
+        target = sqlite3.connect(str(temp))
+        try:
+            conn.backup(target)
+            # Snapshots are standalone files; never publish WAL sidecars.
+            target.execute("PRAGMA journal_mode=DELETE")
+        finally:
+            target.close()
+        verify_sqlite_snapshot(temp)
+        temp.replace(dest)
+    finally:
+        temp.unlink(missing_ok=True)
+        for suffix in ("-wal", "-shm", "-journal"):
+            temp.with_name(temp.name + suffix).unlink(missing_ok=True)

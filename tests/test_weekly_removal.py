@@ -191,15 +191,15 @@ def test_cli_confirmation_denial_and_eof(
     proposal = tmp_path / "manifest.json"
     proposal.write_text(json.dumps(manifest))
     for answer in ("n\n", ""):
-        result = CliRunner(mix_stderr=False).invoke(
+        result = CliRunner().invoke(
             app, ["weekly", "removal-intent", run_id, str(proposal)], input=answer
         )
         assert result.exit_code != 0
         assert not rows(home, "SELECT id FROM run_removals")
-    result = CliRunner(mix_stderr=False).invoke(
+    result = CliRunner().invoke(
         app, ["weekly", "removal-intent", run_id, str(proposal)], input="y\n"
     )
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == 0, result.stdout
     assert json.loads(result.stdout)["status"] == "persisted"
     assert "1 pre-existing" in result.stderr
 

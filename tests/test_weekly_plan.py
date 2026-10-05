@@ -28,7 +28,7 @@ from grossy.init import do_init
 from grossy.paths import GrossyPaths, resolve_paths
 from grossy.weekly import WeeklyPlanError, run_baseline_apply, run_plan_prepare
 
-RUNNER = CliRunner(mix_stderr=False)
+RUNNER = CliRunner()
 ATHENS_TZ = ZoneInfo("Europe/Athens")
 
 
@@ -857,7 +857,7 @@ class TestCliIntegration:
             app, ["weekly", "plan-prepare", "--listed-orders", str(_write_listed_orders(paths))]
         )
         assert result.exit_code == 0
-        data = json.loads(result.output)
+        data = json.loads(result.stdout)
         assert data["status"] == "success"
         assert data["lifecycle"] == "planning"
 
@@ -876,7 +876,7 @@ class TestCliIntegration:
             app, ["weekly", "plan-prepare", "--listed-orders", str(_write_listed_orders(paths))]
         )
         assert result1.exit_code == 0
-        run_id = json.loads(result1.output)["run_id"]
+        run_id = json.loads(result1.stdout)["run_id"]
 
         # Write the observation to a file.
         obs = _cart_observation(["2222222"], [1])
@@ -885,7 +885,7 @@ class TestCliIntegration:
 
         result2 = RUNNER.invoke(app, ["weekly", "baseline-apply", run_id, str(obs_file)])
         assert result2.exit_code == 0
-        data = json.loads(result2.output)
+        data = json.loads(result2.stdout)
         assert data["status"] == "success"
         assert data["baseline_line_count"] == 1
 
@@ -1443,7 +1443,7 @@ class TestCliReportFailure:
             app, ["weekly", "plan-prepare", "--listed-orders", str(_write_listed_orders(paths))]
         )
         assert result1.exit_code == 0
-        run_id = json.loads(result1.output)["run_id"]
+        run_id = json.loads(result1.stdout)["run_id"]
 
         obs = _cart_observation(["2222222"], [1])
         obs_file = tmp_path / "obs.json"

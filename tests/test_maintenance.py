@@ -53,6 +53,7 @@ from grossy.history.maintenance import (
     run_family_link,
     run_family_merge,
     run_family_unlink,
+    run_product_register,
     run_set_category,
     run_set_primary,
     run_set_quantity,
@@ -186,10 +187,33 @@ class TestSetPrimary:
         finally:
             c.close()
 
-    def test_set_primary_already_primary_fails(self, tmp_env: tuple[Path, GrossyPaths]) -> None:
+    def test_set_primary_already_primary_records_preference_once(
+        self, tmp_env: tuple[Path, GrossyPaths]
+    ) -> None:
         _, paths = tmp_env
-        with pytest.raises(MaintenanceError, match="already the primary"):
-            run_set_primary(paths, "fam-100", "100")
+        first = run_set_primary(paths, "fam-100", "100")
+        assert first["changed"] is False and first["preference_recorded"] is True
+        repeated = run_set_primary(paths, "fam-100", "100")
+        assert repeated["changed"] is False and repeated["preference_recorded"] is False
+        _apply_sync_order(paths, "10003", "2026-09-15", ["100", "200"])
+        c = open_connection(paths.database_file)
+        try:
+            assert (
+                c.execute(
+                    "SELECT COUNT(*) FROM manual_overrides WHERE target_id='fam-100' "
+                    "AND field_name='primary_product_id'"
+                ).fetchone()[0]
+                == 1
+            )
+            assert (
+                c.execute(
+                    "SELECT p.retailer_product_id FROM product_families f JOIN products p "
+                    "ON p.id=f.primary_product_id WHERE f.family_id='fam-100'"
+                ).fetchone()[0]
+                == "100"
+            )
+        finally:
+            c.close()
 
     def test_set_primary_not_a_member_fails(self, tmp_env: tuple[Path, GrossyPaths]) -> None:
         _, paths = tmp_env
@@ -1759,3 +1783,190 @@ class TestYamlPolicyBoundary:
             assert result.disabled_references == ()
         finally:
             c.close()
+
+
+@pytest.mark.parametrize(
+    "bad_url",
+    [
+        "http://www.ab.gr/en/eshop/item/p/300",
+        "https://evil.test/en/eshop/item/p/300",
+        "https://www.ab.gr/en/eshop/../item/p/300",
+        "https://www.ab.gr/en/eshop/%2e%2e/item/p/300",
+        "https://www.ab.gr/en/eshop/item/p/300?token=secret",
+        "https://www.ab.gr/en/eshop/item/p/300#",
+        "https://www.ab.gr/en/eshop/<script>/p/300",
+        "https://www.ab.gr/en/eshop/%3Cscript%3E/p/300",
+        "https://www.ab.gr/en/eshop/item/p/300?",
+    ],
+)
+def test_product_register_rejects_unsafe_identity(tmp_env, bad_url):
+    _, paths = tmp_env
+    with pytest.raises(MaintenanceError):
+        run_product_register(paths, bad_url)
+    c = open_connection(paths.database_file)
+    try:
+        assert c.execute("SELECT COUNT(*) FROM products").fetchone()[0] == 2
+        assert c.execute("SELECT COUNT(*) FROM manual_overrides").fetchone()[0] == 0
+    finally:
+        c.close()
+
+
+def test_product_register_nonpurchase_identity_and_metadata_preservation(tmp_env):
+    _, paths = tmp_env
+    c = open_connection(paths.database_file)
+    try:
+        before = c.execute("SELECT * FROM products WHERE retailer_product_id='100'").fetchall()
+        history = c.execute("SELECT * FROM source_order_products").fetchall()
+    finally:
+        c.close()
+    assert run_product_register(paths, _product_url("100"))["changed"] is False
+    assert run_product_register(paths, _product_url("300"))["changed"] is True
+    assert run_product_register(paths, _product_url("300"))["changed"] is False
+    # The URL slug is never a metadata source. Locale/slug variants with the
+    # same exact numeric identity preserve the existing canonical URL and facts.
+    assert run_product_register(paths, "https://www.ab.gr/el/eshop/Other/p/300")["changed"] is False
+    c = open_connection(paths.database_file)
+    try:
+        assert (
+            c.execute("SELECT * FROM products WHERE retailer_product_id='100'").fetchall() == before
+        )
+        row = c.execute(
+            "SELECT name,brand,category_id,package_amount,first_observed_date,"
+            "last_observed_date,purchase_order_count,typical_quantity FROM products "
+            "WHERE retailer_product_id='300'"
+        ).fetchone()
+        assert row == ("Unknown product", None, None, None, None, None, 0, 1)
+        assert c.execute("SELECT * FROM source_order_products").fetchall() == history
+        assert c.execute("SELECT COUNT(*) FROM source_orders").fetchone()[0] == 2
+        assert (
+            c.execute(
+                "SELECT COUNT(*) FROM manual_overrides WHERE field_name='catalogue_registration'"
+            ).fetchone()[0]
+            == 1
+        )
+    finally:
+        c.close()
+    run_family_link(paths, "300", "fam-100")
+    assert run_family_link(paths, "300", "fam-100")["changed"] is False
+    _apply_sync_order(paths, "10003", "2026-09-15", ["100", "200"])
+    c = open_connection(paths.database_file)
+    try:
+        assert c.execute(
+            "SELECT p.retailer_product_id,m.role,m.approval_state FROM family_members m "
+            "JOIN products p ON p.id=m.product_id WHERE p.retailer_product_id='300'"
+        ).fetchone() == ("300", "alternative", "approved")
+        assert (
+            c.execute(
+                "SELECT purchase_order_count FROM products WHERE retailer_product_id='300'"
+            ).fetchone()[0]
+            == 0
+        )
+    finally:
+        c.close()
+
+
+@pytest.mark.parametrize("operation", ["link", "merge", "unlink"])
+def test_referenced_empty_family_retirement_preserves_snapshots(tmp_env, operation):
+    _, paths = tmp_env
+    c = open_connection(paths.database_file)
+    try:
+        c.execute(
+            "INSERT INTO planner_runs(run_id,seed,lifecycle,history_sync_status,"
+            "created_at,updated_at) "
+            "VALUES ('fixture-run','fixture','planning','success',?,?)",
+            (NOW, NOW),
+        )
+        c.execute(
+            "INSERT INTO run_recurring_items(run_id,product_id,family_id,category,source_type,"
+            "intended_quantity,rationale,created_at) SELECT r.id,p.id,f.id,'dairy','learned',1,"
+            "'fixture snapshot',? FROM planner_runs r,products p,product_families f "
+            "WHERE p.retailer_product_id='200' AND f.family_id='fam-200'",
+            (NOW,),
+        )
+        c.commit()
+        before = c.execute("SELECT * FROM run_recurring_items").fetchall()
+        history = c.execute("SELECT * FROM source_order_products").fetchall()
+        run = c.execute("SELECT * FROM planner_runs").fetchall()
+    finally:
+        c.close()
+    report = paths.state_dir / "fixture-report.json"
+    report.write_bytes(b'{"fixture":"immutable report"}')
+    if operation == "link":
+        run_family_link(paths, "200", "fam-100")
+        assert run_family_link(paths, "200", "fam-100")["changed"] is False
+    elif operation == "merge":
+        run_family_merge(paths, "fam-200", "fam-100")
+        assert run_family_merge(paths, "fam-200", "fam-100")["changed"] is False
+    else:
+        run_family_unlink(paths, "200")
+        assert run_family_unlink(paths, "200")["changed"] is False
+    with pytest.raises(MaintenanceError, match="archival"):
+        run_enable(paths, "fam-200")
+    with pytest.raises(MaintenanceError, match="archival"):
+        run_family_link(paths, "100", "fam-200")
+    _apply_sync_order(paths, "10003", "2026-09-15", ["100", "200"])
+    c = open_connection(paths.database_file)
+    try:
+        assert c.execute("SELECT * FROM run_recurring_items").fetchall() == before
+        assert c.execute("SELECT * FROM planner_runs").fetchall() == run
+        assert (
+            c.execute("SELECT * FROM source_order_products WHERE source_order_id <= 2").fetchall()
+            == history
+        )
+        assert c.execute(
+            "SELECT enabled,primary_product_id FROM product_families WHERE family_id='fam-200'"
+        ).fetchone() == (0, None)
+        assert not c.execute("PRAGMA foreign_key_check").fetchall()
+        assert (
+            c.execute(
+                "SELECT COUNT(*) FROM manual_overrides WHERE target_id='fam-200' "
+                "AND field_name='retired'"
+            ).fetchone()[0]
+            == 1
+        )
+        assert (
+            c.execute(
+                "SELECT COUNT(*) FROM run_events WHERE event_type='maintenance-policy-changed'"
+            ).fetchone()[0]
+            == 1
+        )
+    finally:
+        c.close()
+    assert report.read_bytes() == b'{"fixture":"immutable report"}'
+
+
+def test_product_register_conflicting_stored_identity_rolls_back(tmp_env):
+    _, paths = tmp_env
+    c = open_connection(paths.database_file)
+    try:
+        c.execute(
+            "UPDATE products SET canonical_url=? WHERE retailer_product_id='100'",
+            (_product_url("999"),),
+        )
+        c.commit()
+    finally:
+        c.close()
+    with pytest.raises(MaintenanceError, match="identity conflicts"):
+        run_product_register(paths, _product_url("100"))
+
+
+def test_product_register_writer_lock_and_atomic_audit(tmp_env, monkeypatch):
+    import grossy.history.maintenance as maintenance
+    from grossy.db.lock import LockHeldError, WriterLock
+
+    _, paths = tmp_env
+    with WriterLock(paths.state_dir), pytest.raises(LockHeldError):
+        run_product_register(paths, _product_url("300"))
+
+    def fail_audit(*args, **kwargs):
+        raise RuntimeError("synthetic audit failure")
+
+    monkeypatch.setattr(maintenance, "_record_override", fail_audit)
+    with pytest.raises(RuntimeError, match="synthetic audit failure"):
+        run_product_register(paths, _product_url("300"))
+    c = open_connection(paths.database_file)
+    try:
+        assert c.execute("SELECT COUNT(*) FROM products").fetchone()[0] == 2
+        assert c.execute("SELECT COUNT(*) FROM manual_overrides").fetchone()[0] == 0
+    finally:
+        c.close()
