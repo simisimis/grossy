@@ -132,6 +132,7 @@ def _run(conn: sqlite3.Connection, run_id: str, stage: str = "recurring") -> int
     if row is None or row[1] not in (
         "planning",
         "recurring-apply",
+        "awaiting-basket-review",
         "partial-failure",
         "needs-attention",
     ):
@@ -145,6 +146,28 @@ def _run(conn: sqlite3.Connection, run_id: str, stage: str = "recurring") -> int
     if conn.execute("SELECT 1 FROM run_recipe_plans WHERE run_id=?", (rid,)).fetchone():
         raise WeeklyPlanError("existing recipe snapshots cannot authorize recurring additions")
     return rid
+
+
+def _require_consent(conn: sqlite3.Connection, rid: int, stage: str) -> int:
+    """Check that stage consent is granted; return the consent row ID.
+
+    Task 16: absent or revoked consent fails closed before intent/action.
+    Readback (observe) of an already-pending intent does not require consent.
+    """
+    row = conn.execute(
+        "SELECT id, status FROM run_stage_consent WHERE run_id=? AND stage=?",
+        (rid, stage),
+    ).fetchone()
+    if row is None:
+        raise WeeklyPlanError(
+            f"stage consent for {stage!r} is absent; "
+            "consent must be granted before any new intent or action"
+        )
+    if cast(str, row[1]) != "granted":
+        raise WeeklyPlanError(
+            f"stage consent for {stage!r} has been revoked; no new intent or action is authorized"
+        )
+    return cast(int, row[0])
 
 
 def _event(conn: sqlite3.Connection, rid: int, kind: str, data: dict[str, Any]) -> None:
@@ -584,6 +607,7 @@ def run_recurring_preflight(
     obs = validate_cart_observation(data)
     with _locked(paths) as (conn, config):
         rid = _run(conn, run_id, stage)
+        _require_consent(conn, rid, stage)
         _require_current_family_policy(conn, rid)
         if _pending(conn, rid, stage):
             raise WeeklyPlanError("unreconciled intent requires resume-prepare")
@@ -626,6 +650,7 @@ def run_recurring_intent(
         raise WeeklyPlanError("manifest checksum or run mismatch")
     with _locked(paths) as (conn, config):
         rid = _run(conn, run_id, stage)
+        consent_row_id = _require_consent(conn, rid, stage)
         _require_current_family_policy(conn, rid)
         if _pending(conn, rid, stage):
             raise WeeklyPlanError("intent already persisted; reread via resume-prepare")
@@ -667,10 +692,12 @@ def run_recurring_intent(
                 raise WeeklyPlanError("current recipe matching changed since preflight")
         if data["additions"] != accepted["additions"][:1]:
             raise WeeklyPlanError("manifest must equal accepted positive delta")
+        # Task 16: persist the checked consent reference with the intent evidence.
+        stored_manifest = {**data, "consent_row_id": consent_row_id}
         cursor = conn.execute(
             "INSERT INTO run_mutation_manifests(run_id,stage,manifest_json,checksum,created_at) "
             "VALUES (?,?,?,?,?)",
-            (rid, stage, json.dumps(data), manifest.checksum, _now_utc()),
+            (rid, stage, json.dumps(stored_manifest), manifest.checksum, _now_utc()),
         )
         mid = cursor.lastrowid
         # Durable incomplete evidence exists even if process/browser dies before readback.
@@ -702,6 +729,10 @@ def run_recurring_intent(
             if stage == "recipe":
                 lifecycle = "awaiting-user-verification"
                 conn.execute("UPDATE planner_runs SET lifecycle=? WHERE id=?", (lifecycle, rid))
+            elif stage == "recurring":
+                # Task 16: recurring completion stops at the basket-review barrier.
+                lifecycle = "awaiting-basket-review"
+                conn.execute("UPDATE planner_runs SET lifecycle=? WHERE id=?", (lifecycle, rid))
             conn.execute(
                 "INSERT INTO run_mutation_observations(manifest_id,observed_json,"
                 "failure_class,created_at) VALUES (?,?,'none',?)",
@@ -728,6 +759,92 @@ def run_recurring_intent(
             "status": "persisted",
             "manifest_checksum": manifest.checksum,
             "addition": data["additions"][0] if manifest.additions else None,
+        }
+
+
+def run_action_check(paths: GrossyPaths, run_id: str, data: dict[str, Any]) -> dict[str, Any]:
+    """Single-use consent check immediately before the one browser write.
+
+    Task 16: binds the exact pending manifest, its run/stage and the consent row
+    referenced at intent. Revocation after intent blocks the action; readback of
+    that pending intent stays possible through observe/resume. The check never
+    reauthorizes an attempted, consumed or zero-addition intent.
+    """
+    try:
+        manifest = MutationManifest.model_validate(data)
+    except ValueError as exc:
+        raise WeeklyPlanError("invalid mutation manifest for action check") from exc
+    if (
+        manifest.run_id != run_id
+        or proposal_checksum({k: v for k, v in data.items() if k != "checksum"})
+        != manifest.checksum
+    ):
+        raise WeeklyPlanError("manifest checksum or run mismatch")
+    stage = manifest.stage
+    if not manifest.additions:
+        raise WeeklyPlanError("zero-addition intent authorizes no browser action")
+    with _locked(paths) as (conn, config):
+        rid = _run(conn, run_id, stage)
+        pending = _pending(conn, rid, stage)
+        if not pending or pending[2] != manifest.checksum:
+            raise WeeklyPlanError("action check requires the exact pending manifest")
+        stored = json.loads(pending[1])
+        consent_row_id = stored.pop("consent_row_id", None)
+        if stored != data:
+            raise WeeklyPlanError("action check requires the exact pending manifest")
+        lifecycle = conn.execute("SELECT lifecycle FROM planner_runs WHERE id=?", (rid,)).fetchone()
+        if lifecycle[0] != f"{stage}-apply":
+            raise WeeklyPlanError(f"action check requires lifecycle '{stage}-apply'")
+        observations = conn.execute(
+            "SELECT COUNT(*) FROM run_mutation_observations WHERE manifest_id=?", (pending[0],)
+        ).fetchone()[0]
+        if (
+            observations != 1
+            or conn.execute(
+                "SELECT 1 FROM run_events WHERE run_id=? AND event_type='action-consent-checked' "
+                "AND json_extract(detail,'$.manifest_checksum')=?",
+                (rid, manifest.checksum),
+            ).fetchone()
+        ):
+            raise WeeklyPlanError(
+                "pending intent already checked or attempted; read back via observe/resume, "
+                "never replay"
+            )
+        current_consent = _require_consent(conn, rid, stage)
+        if consent_row_id != current_consent:
+            raise WeeklyPlanError("pending intent does not reference the current stage consent")
+        _require_current_family_policy(conn, rid)
+        accepted = _latest(conn, rid, f"{stage}-preflight")
+        if not accepted or accepted["checksum"] != manifest.preflight_checksum:
+            raise WeeklyPlanError("pending intent no longer matches the accepted preflight")
+        accepted_age = (
+            datetime.now(UTC)
+            - datetime.fromisoformat(accepted["accepted_at"].replace("Z", "+00:00"))
+        ).total_seconds()
+        if accepted_age > 300:
+            raise WeeklyPlanError("accepted preflight expired; read back via resume-prepare")
+        # Source facts age independently of acceptance; both must be fresh at action time.
+        _require_fresh_observation(validate_cart_observation(accepted["cart"]))
+        if accepted["policy_checksum"] != _policy(conn, config):
+            raise WeeklyPlanError("policy changed since preflight")
+        _event(
+            conn,
+            rid,
+            "action-consent-checked",
+            {
+                "stage": stage,
+                "consent_row_id": current_consent,
+                "manifest_checksum": manifest.checksum,
+            },
+        )
+        return {
+            "schema_name": "grossy.weekly.action-check.v1",
+            "schema_version": 1,
+            "status": "authorized",
+            "stage": stage,
+            "manifest_checksum": manifest.checksum,
+            "consent_row_id": current_consent,
+            "addition": data["additions"][0],
         }
 
 
@@ -787,6 +904,8 @@ def run_recurring_observe(
         lifecycle = f"{stage}-apply" if success else "partial-failure"
         if success and stage == "recipe" and len(accepted["additions"]) <= 1:
             lifecycle = "awaiting-user-verification"
+        if success and stage == "recurring" and len(accepted["additions"]) <= 1:
+            lifecycle = "awaiting-basket-review"
         conn.execute("UPDATE planner_runs SET lifecycle=? WHERE id=?", (lifecycle, rid))
         if success:
             _event(conn, rid, f"{stage}-cart", {"quantities": _cart(obs), "cart": data})
@@ -833,6 +952,7 @@ def run_resume_prepare(
     _require_fresh_observation(obs)
     with _locked(paths) as (conn, config):
         rid = _run(conn, run_id, stage)
+        _require_consent(conn, rid, stage)
         _require_current_family_policy(conn, rid)
         pending = _pending(conn, rid, stage)
         if pending:
@@ -897,3 +1017,118 @@ def run_resume_prepare(
                 raise WeeklyPlanError("unexplained cart change on resume")
         _event(conn, rid, f"{stage}-resume", {"quantities": _cart(obs)})
         return _prepare(conn, config, paths, rid, run_id, obs, stage)
+
+
+def run_advance(paths: GrossyPaths, run_id: str, data: dict[str, Any]) -> dict[str, Any]:
+    """Advance from the basket-review barrier to recipe planning.
+
+    Task 16: explicit user advance accepts the freshly reread cart after
+    manual edits and permits dinner suggestions. Requires lifecycle
+    ``awaiting-basket-review`` and a fresh cart observation. Transitions
+    to ``recurring-apply`` so ``recipes-apply`` can proceed.
+    """
+    _check_database_exists(paths)
+    obs = validate_cart_observation(data)
+    # Manual review edits are accepted; failed/incomplete evidence is not a
+    # complete reread and must not become the dinner-planning basis.
+    if obs.mutation_result is not None and obs.mutation_result.outcome != "readback":
+        raise WeeklyPlanError(
+            "advance requires complete reread evidence, not failed/incomplete state"
+        )
+    _require_fresh_observation(obs)
+    with _locked(paths) as (conn, config):
+        row = conn.execute(
+            "SELECT id, lifecycle FROM planner_runs WHERE run_id=?", (run_id,)
+        ).fetchone()
+        if row is None:
+            raise WeeklyPlanError(f"unknown run ID: {run_id!r}")
+        rid = cast(int, row[0])
+        lifecycle = cast(str, row[1])
+        if lifecycle != "awaiting-basket-review":
+            raise WeeklyPlanError(
+                f"advance requires lifecycle 'awaiting-basket-review', got {lifecycle!r}"
+            )
+        # Verify recurring completion evidence exists.
+        if not conn.execute(
+            "SELECT 1 FROM run_events WHERE run_id=? AND event_type='recurring-complete'",
+            (rid,),
+        ).fetchone():
+            raise WeeklyPlanError("recurring completion evidence required before advance")
+        now = _now_utc()
+        conn.execute(
+            "INSERT INTO run_events (run_id, event_type, detail, created_at) "
+            "VALUES (?, 'basket-review-advance', ?, ?)",
+            (rid, json.dumps({"quantities": _cart(obs), "cart": data}, sort_keys=True), now),
+        )
+        conn.execute(
+            "UPDATE planner_runs SET lifecycle='recurring-apply', updated_at=? WHERE id=?",
+            (now, rid),
+        )
+        conn.commit()
+        # Task 16: pass the advance cart as "observation" so _reports recalculates
+        # the whole-cart budget basis (resulting_total_eur) from the accepted
+        # post-edit cart. This ensures recipe previews use the current cart total,
+        # not the stale pre-advance value.
+        _reports(
+            conn,
+            paths,
+            rid,
+            run_id,
+            "recurring-apply",
+            {"status": "advanced", "observation": data},
+            stage="recurring",
+        )
+        return {
+            "schema_name": "grossy.weekly.advance.v1",
+            "schema_version": 1,
+            "status": "success",
+            "run_id": run_id,
+            "lifecycle": "recurring-apply",
+            "detail": "basket review accepted; recipe planning now permitted",
+        }
+
+
+def run_consent_revoke(
+    paths: GrossyPaths, run_id: str, stage: str, rationale: str | None = None
+) -> dict[str, Any]:
+    """Revoke stage consent for a weekly run.
+
+    Task 16: consent is revocable. After revocation, preflight and intent
+    fail closed; readback (observe) of an already-pending intent remains
+    possible without renewed write authorization.
+    """
+    if stage not in ("recurring", "recipe"):
+        raise WeeklyPlanError(f"unknown stage: {stage!r}; must be 'recurring' or 'recipe'")
+    _check_database_exists(paths)
+    with _locked(paths) as (conn, config):
+        row = conn.execute("SELECT id FROM planner_runs WHERE run_id=?", (run_id,)).fetchone()
+        if row is None:
+            raise WeeklyPlanError(f"unknown run ID: {run_id!r}")
+        rid = cast(int, row[0])
+        consent = conn.execute(
+            "SELECT id, status FROM run_stage_consent WHERE run_id=? AND stage=?",
+            (rid, stage),
+        ).fetchone()
+        if consent is None:
+            raise WeeklyPlanError(f"no consent record for stage {stage!r}")
+        if cast(str, consent[1]) == "revoked":
+            raise WeeklyPlanError(f"consent for {stage!r} is already revoked")
+        now = _now_utc()
+        conn.execute(
+            "UPDATE run_stage_consent SET status='revoked', revoked_at=?, rationale=? WHERE id=?",
+            (now, rationale, consent[0]),
+        )
+        conn.execute(
+            "INSERT INTO run_events (run_id, event_type, detail, created_at) "
+            "VALUES (?, 'consent-revoked', ?, ?)",
+            (rid, json.dumps({"stage": stage, "rationale": rationale}, sort_keys=True), now),
+        )
+        conn.commit()
+        return {
+            "schema_name": "grossy.weekly.consent-revoke.v1",
+            "schema_version": 1,
+            "status": "success",
+            "run_id": run_id,
+            "stage": stage,
+            "detail": "consent revoked; no new intent or action is authorized",
+        }

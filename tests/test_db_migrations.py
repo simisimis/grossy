@@ -6,12 +6,14 @@ rollback on failure, upgrade paths, and no-deletion behavior.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
 import pytest
 
 import grossy.db.migrations as migrations_mod
+from grossy.db.backup import db_export
 from grossy.db.connection import open_connection
 from grossy.db.migrations import (
     MigrationChecksumError,
@@ -338,7 +340,7 @@ class TestRevisionBoundVariantUpgrade:
         self._seed_old_schema_variant_rows(db)
 
         result = run_migrations(db, tmp_path / "bk2")
-        assert result.applied_versions == [6, 7, 8, 9]
+        assert result.applied_versions == [6, 7, 8, 9, 10]
         assert get_schema_version(db) == current_schema_version
 
         conn = open_connection(db)
@@ -734,11 +736,11 @@ def test_populated_v7_upgrade_preserves_history_and_run_with_verified_backup(
         conn.close()
 
     result = run_migrations(db, tmp_path / "upgrade-backups")
-    assert result.applied_versions == [8, 9]
+    assert result.applied_versions == [8, 9, 10]
     assert result.backup_path is not None
     assert result.backup_path.stat().st_mode & 0o777 == 0o600
     assert verify_sqlite_snapshot(result.backup_path)[1] == 7
-    assert verify_sqlite_snapshot(db)[1] == 9
+    assert verify_sqlite_snapshot(db)[1] == 10
     for path in (db, result.backup_path):
         conn = open_connection(path)
         try:
@@ -765,12 +767,12 @@ def test_populated_v7_upgrade_preserves_history_and_run_with_verified_backup(
         conn.close()
 
 
-@pytest.mark.parametrize("prior_version", range(1, 9), ids=lambda v: f"v{v}-to-v9")
+@pytest.mark.parametrize("prior_version", range(1, 10), ids=lambda v: f"v{v}-to-v10")
 def test_recipe_planning_upgrade_preserves_supported_schema(
     tmp_path: Path,
     prior_version: int,
 ) -> None:
-    """Forward009 preserves existing runs/slots/rerolls across supported upgrades."""
+    """Forward migrations preserve existing runs/slots/rerolls across supported upgrades."""
     from grossy.db.snapshot import verify_sqlite_snapshot
 
     prior = tmp_path / "prior-migrations"
@@ -794,24 +796,46 @@ def test_recipe_planning_upgrade_preserves_supported_schema(
             "INSERT INTO run_rerolls (run_id,slot_name,reroll_number,candidate_scope,result,"
             "reason,created_at) VALUES (1,'recipe1',1,'meat','no_candidate','old reason','old')"
         )
+        tables = ["planner_runs", "run_recipe_slots", "run_rerolls"]
+        if prior_version >= 9:
+            # Populated v9 planning snapshots must survive the v10 planner_runs rebuild.
+            conn.execute(
+                "INSERT INTO recipes (id,recipe_id,title,protein_class,created_at,updated_at) "
+                "VALUES (1,'historical-recipe','Historical dinner','meat','old','old')"
+            )
+            conn.execute(
+                "INSERT INTO run_recipe_plans (run_id,seed,proposal_checksum,"
+                "proposal_generated_at,policy_json,candidates_json,exclusions_json,created_at) "
+                "VALUES (1,'historical-seed',?,'old','{\"p\":1}','[1]','[]','old')",
+                ("a" * 64,),
+            )
+            conn.execute(
+                "INSERT INTO run_recipe_seen (run_id,recipe_id,first_shown_at) VALUES (1,1,'old')"
+            )
+            tables += ["run_recipe_plans", "run_recipe_seen"]
         conn.commit()
-        expected = {
-            table: conn.execute(f"SELECT * FROM {table}").fetchall()
-            for table in ("planner_runs", "run_recipe_slots", "run_rerolls")
-        }
+        expected = {table: conn.execute(f"SELECT * FROM {table}").fetchall() for table in tables}
     finally:
         conn.close()
     result = run_migrations(db, tmp_path / "after")
-    assert result.applied_versions == list(range(prior_version + 1, 10))
+    assert result.applied_versions == list(range(prior_version + 1, 11))
     assert result.backup_path is not None
     assert verify_sqlite_snapshot(result.backup_path)[1] == prior_version
-    assert verify_sqlite_snapshot(db)[1] == 9
+    assert verify_sqlite_snapshot(db)[1] == 10
     conn = open_connection(db)
     try:
         for table, rows in expected.items():
             assert conn.execute(f"SELECT * FROM {table}").fetchall() == rows
-        assert conn.execute("SELECT * FROM run_recipe_plans").fetchall() == []
-        assert conn.execute("SELECT * FROM run_recipe_seen").fetchall() == []
+        if prior_version < 9:
+            assert conn.execute("SELECT * FROM run_recipe_plans").fetchall() == []
+            assert conn.execute("SELECT * FROM run_recipe_seen").fetchall() == []
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
     finally:
         conn.close()
+    if prior_version >= 9:
+        dest = tmp_path / "export.json"
+        db_export(db, dest)
+        exported = json.loads(dest.read_text())["data"]
+        assert [r["seed"] for r in exported["run_recipe_plans"]] == ["historical-seed"]
+        assert [(r["run_id"], r["recipe_id"]) for r in exported["run_recipe_seen"]] == [(1, 1)]
+        assert [r["lifecycle"] for r in exported["planner_runs"]] == ["completed"]

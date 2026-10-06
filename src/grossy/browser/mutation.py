@@ -13,6 +13,7 @@ from typing import Any
 from grossy.browser.observation import CartObservation
 from grossy.paths import GrossyPaths
 from grossy.weekly.mutation import (
+    run_action_check,
     run_recurring_intent,
     run_recurring_observe,
     run_recurring_preflight,
@@ -35,7 +36,7 @@ def apply_recurring(
     paths: GrossyPaths,
     run_id: str,
     adapter: AdditiveCartAdapter,
-    confirm: Callable[[dict[str, Any]], bool],
+    confirm: Callable[[dict[str, Any]], bool] | None = None,
     *,
     resume: bool = False,
     _stage: str = "recurring",
@@ -44,6 +45,11 @@ def apply_recurring(
 
     Each accepted manifest has at most one action. After any failure this
     invocation stops; another invocation must explicitly use resume and reread.
+
+    Task 16: ``confirm`` is optional. When omitted (autonomous mode), stage
+    consent is the sole authorization and no per-action user prompt is issued.
+    The same CLI action check the skill runs immediately before each browser
+    write prevents revocation between intent and action.
     """
     if _stage == "recipe":
         from grossy.weekly.selection import (
@@ -63,7 +69,7 @@ def apply_recurring(
     prepared = (run_resume_prepare if resume else preflight)(paths, run_id, before)
     while True:
         manifest = prepared["manifest"]
-        if manifest["additions"] and not confirm(manifest):
+        if manifest["additions"] and confirm is not None and not confirm(manifest):
             return {"status": "cancelled"}
         # Confirmation does not waive the immediately-before-mutation reread.
         current = adapter.read_cart().model_dump(mode="json")
@@ -82,6 +88,9 @@ def apply_recurring(
         addition = authorization["addition"]
         if addition is None:
             return {"status": "success"}
+        # Task 16: revocation between persisted intent and action prevents the write.
+        if run_action_check(paths, run_id, manifest)["addition"] != addition:
+            raise WeeklyPlanError("action check does not match the persisted intent")
         error: BaseException | None = None
         try:
             adapter.add_positive(
@@ -113,7 +122,7 @@ def apply_recipes(
     paths: GrossyPaths,
     run_id: str,
     adapter: AdditiveCartAdapter,
-    confirm: Callable[[dict[str, Any]], bool],
+    confirm: Callable[[dict[str, Any]], bool] | None = None,
     *,
     resume: bool = False,
 ) -> dict[str, Any]:

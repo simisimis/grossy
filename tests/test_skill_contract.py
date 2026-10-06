@@ -62,7 +62,13 @@ def test_invocation_documents_unknown_input_stop(skill_content: str) -> None:
         ),
         (
             "weekly plan [--skip-history-sync]",
-            ["grossy weekly plan-prepare", "grossy weekly baseline-apply"],
+            [
+                "grossy weekly plan-prepare",
+                "grossy weekly baseline-apply",
+                "grossy weekly recurring-intent",
+                "grossy weekly action-check <run-id> <mutation-manifest.json>",
+                "grossy weekly recurring-observe",
+            ],
         ),
         (
             "weekly reroll <run-id> <recipeN> --from <class-list|all>",
@@ -70,7 +76,13 @@ def test_invocation_documents_unknown_input_stop(skill_content: str) -> None:
         ),
         (
             "weekly add <run-id> <recipe-list|all>",
-            ["grossy weekly selection-apply", "grossy weekly recipe-preflight"],
+            [
+                "grossy weekly selection-apply",
+                "grossy weekly recipe-preflight",
+                "grossy weekly recipe-intent",
+                "grossy weekly action-check <run-id> <mutation-manifest.json>",
+                "grossy weekly recipe-observe",
+            ],
         ),
         (
             "weekly remove <run-id> --product <product-id> [--quantity N] [--include-preexisting]",
@@ -177,9 +189,10 @@ def test_resume_section_documents_confirmation_and_stop_conditions(skill_content
     _require_text(
         section,
         [
-            "Agent presents the exact resumed deltas from the persisted manifest "
-            "(product IDs and positive quantities still missing) to the user for confirmation.",
-            "If the user does not approve, abort; no browser mutation is performed.",
+            "Stage consent (granted at plan-prepare) is the "
+            "authorization; no per-action user prompt is issued in the autonomous workflow.",
+            "`grossy weekly action-check <run-id> <mutation-manifest.json>` "
+            "immediately before each browser write blocks revoked consent.",
             "`resume-prepare` exits non-zero or returns no accepted manifest "
             "→ stop before any browser action.",
         ],

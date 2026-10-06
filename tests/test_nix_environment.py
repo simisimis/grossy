@@ -223,13 +223,13 @@ class TestPackageResources:
             f"Migrations directory not found in installed package: {migrations_dir}"
         )
 
-    def test_all_nine_migrations_present(self) -> None:
-        """All 9 SQL migrations must be present in the installed package."""
+    def test_all_migrations_present(self) -> None:
+        """All SQL migrations must be present in the installed package."""
         installed_grossy_dir = _get_installed_grossy_dir()
         migrations_dir = installed_grossy_dir / "migrations"
         sql_files = sorted(migrations_dir.glob("*.sql"))
-        assert len(sql_files) == 9, (
-            f"Expected 9 migrations, found {len(sql_files)}: {[f.name for f in sql_files]}"
+        assert len(sql_files) == 10, (
+            f"Expected 10 migrations, found {len(sql_files)}: {[f.name for f in sql_files]}"
         )
         # Verify naming convention
         for i, f in enumerate(sql_files, 1):
@@ -303,8 +303,8 @@ class TestPackageResources:
             )
             data = _json.loads(result.stdout)
             assert data["status"] == "success"
-            assert data["database_schema_version"] == 9
-            assert data["migrations_applied"] == [1, 2, 3, 4, 5, 6, 7, 8, 9]
+            assert data["database_schema_version"] == 10
+            assert data["migrations_applied"] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
             assert data["recipe_seeds"]["imported_count"] == 1
             # Database file must exist at the XDG data path
             db_path = Path(data["database_path"])

@@ -1,11 +1,15 @@
 # Bounded supervised smoke runbook — awaiting user verification
 
 **Not executed by workers/reviewers.** Only the user/coordinator may perform these
-live checks after offline review, with explicit authorization of each step and
-separate confirmation before every mutation. Do not run unrestricted `just
-weekly-plan`, `weekly-add all`, or the skill's repeat-until-complete loops here.
-Use the phase commands in [operations.md](operations.md) and the skill contract,
-pausing at the boundaries below. No automatic expansion of this smoke allowance.
+live checks after offline review, with explicit authorization of each step. Until
+the owner accepts Task 16, this runbook keeps explicit exact-action approval for
+every live addition (steps 5 and 7) and separate confirmation for removals. Task 16
+stage consent (no per-action prompts) is pending normal-workflow behavior, not a
+smoke allowance; its consent records and `weekly action-check` still apply. Do not
+run unrestricted `just weekly-plan`, `weekly-add all`, or the skill's
+repeat-until-complete loops here. Use the phase commands in [operations.md]
+(operations.md) and the skill contract, pausing at the boundaries below. No
+automatic expansion of this smoke allowance.
 
 ## Preconditions and universal stop rule
 
@@ -50,7 +54,7 @@ persisted successfully before write; whole-cart readback follows each attempt.
 Private schema-bound proposals may include only authorized state; human evidence
 uses the sanitized template below.
 
-## Nine ordered user-verification steps
+## Ordered user-verification steps
 
 ### 1. Authenticated read-only doctor
 
@@ -124,17 +128,20 @@ positive recurring preview, no cart changes. Baseline/excess must be preserved.
 **Confirmation:** explicitly approve local run/baseline persistence; **no cart-write
 approval** yet. Preview must fit the one-recurring-action smoke bound.
 
-### 5. ONE recurring addition and readback
+### 5. ONE recurring addition and readback (exact-action approval)
 
 **Operation:** fresh complete cart and rendered recurring facts, waiting for the
 full product purchase panel or the rendered-unavailable state as described in the
 skill (title alone is not readiness); recurring-preflight.
-Present its exact single-action manifest and obtain **separate addition approval**.
+Present the manifest details (product, URL, positive delta, price) and obtain
+**explicit exact-action user approval** for this one addition before proceeding.
 Immediately reread/re-preflight and compare; recurring-intent must return persisted
-authorization for that exact checksum. Add only its positive delta through rendered
-stable product controls. Read the whole cart, submit recurring-observe with
-`mutation_result: {manifest_checksum, outcome: readback}` (or failed/incomplete,
-never pretend verification).
+authorization for that exact checksum. Run `weekly action-check <run-id>
+<manifest.json>` with that manifest immediately before the browser write; require
+`status: authorized` (failure: no write, no intent retry). Add only its positive delta
+through rendered stable product controls. Read the whole cart, submit
+recurring-observe with `mutation_result: {manifest_checksum, outcome: readback}`
+(or failed/incomplete, never pretend verification).
 
 **Effect/evidence:** before/intended/observed quantity, unchanged baseline, price,
 manifest checksum, verified reconciliation and user visual confirmation. Readback
@@ -142,15 +149,33 @@ identity comes from the product page's in-cart quantity stepper on the canonical
 `/p/<id>` route, cross-checked against checkout line count, header badge, brand,
 quantity and price; AB.gr checkout lines carry no product ID (see the skill's
 Observation Protocol). The manifest checksum changes on every preflight because
-it covers `generated_at`; the approval binds the action content (product, URL,
+it covers `generated_at`; the user approves the exact action content (product, URL,
 quantity, price), and intent uses the freshly accepted manifest.
 **Stop:** any discrepancy/failure; do not compensate. After this **one** action,
 stop additions. Fresh preflight must show zero remaining additions to persist a
-zero-addition recurring-intent (local-state approval, no browser write) and proceed
-to step 6. If nonempty, stop before further additions absent new authorization
-outside this smoke; do not claim Stage1 complete.
-**Confirmation:** exact product/delta/budget confirmation, then successful fresh
-preflight/intent. A zero-addition intent does not authorize another live action.
+zero-addition recurring-intent (local-state only, no browser write). After
+completion the run enters `awaiting-basket-review` (step 5.5). If nonempty, stop
+before further additions outside this smoke; do not claim Stage1 complete.
+**Confirmation:** explicit exact-action user approval for this one specific
+addition (product, delta, price). The bounded smoke retains per-action approval
+until owner acceptance of the autonomous stage-consent workflow; stage consent
+is the pending normal-workflow mechanism, not a current smoke allowance.
+
+### 5.5 Basket-review barrier and advance
+
+**Operation:** After recurring completion, the run is in `awaiting-basket-review`.
+The user may manually edit the cart (add/remove/adjust items). When ready, the
+user provides a fresh whole-cart observation and runs
+`grossy weekly advance <run-id> <cart-observation.json>`.
+
+**Effect/evidence:** advance persists the post-edit cart as the dinner-planning
+basis and transitions to `recurring-apply`. Without advance, recipes-apply fails
+closed. The advance observation must be fresh (within five minutes). Manual review
+edits are expected differences from the last verified observation; explicit advance
+accepts them rather than treating them as drift.
+**Stop:** stale, incomplete/failed or ambiguous cart evidence (any non-`readback`
+`mutation_result` is rejected), or an unexpected/invalid lifecycle.
+**Confirmation:** User explicitly invokes advance; no automatic transition.
 
 ### 6. Recipe preview (no ingredient addition)
 
@@ -165,26 +190,33 @@ recurring evidence retained; no recipe cart change.
 product action in the chosen recipe. Do not invent availability or package facts.
 **Confirmation:** preview/persistence only, not selection/addition authorization.
 
-### 7. ONE selected-recipe action and readback
+### 7. ONE selected-recipe action and readback (exact-action approval)
 
 **Operation:** explicitly approve exactly one persisted nonempty slot (not all);
-selection-apply persists that selection and dinner1 mapping. Fresh whole cart and
-rendered recipe/package facts; recipe-preflight must classify this recipe passing
-and show only one missing product action. Present identity/delta, conversion,
-substitution and budget warning. Obtain **separate cart addition confirmation**;
-immediately reread/re-preflight and compare the full cart/facts/decisions. Persist
-recipe-intent, perform that one positive action, read back whole cart and submit
-recipe-observe with the exact checksum/outcome.
+selection-apply persists that selection and dinner1 mapping AND grants durable
+run-scoped recipe stage consent. Fresh whole cart and rendered recipe/package
+facts; recipe-preflight must classify this recipe passing and show only one
+missing product action. Present identity/delta, conversion, substitution and
+budget warning, then obtain **explicit exact-action user approval** for this one
+addition. Immediately reread/re-preflight and compare the full cart/facts/
+decisions. Persist recipe-intent, run `weekly action-check` with that manifest
+immediately before the browser write (failure: no write), perform
+that one positive action, read back whole cart and submit recipe-observe with
+the exact checksum/outcome.
 
 **Effect/evidence:** recipeN→dinner1, revision, target versus retail quantity,
 before/intended/observed delta, reconciliation and visual confirmation. Whole-cart
 baseline preserved; unrelated removed recurring items are not restored.
 **Stop:** blocked recipe, changed facts, mismatch/failure. After **one** recipe action,
-stop additions. If further missing deltas remain, stop for new approval outside
-this smoke; never silently loop. Zero-addition completion may persist locally,
-with no further browser write, entering awaiting-user-verification.
-**Confirmation:** local selection approval is distinct from the one-action cart
-approval. No additional ingredients inherit approval.
+stop additions. If further missing deltas remain, stop for new authorization
+outside this smoke; never silently loop. Zero-addition completion may persist
+locally, with no further browser write, entering awaiting-user-verification.
+**Confirmation:** explicit exact-action user approval for this one specific
+recipe ingredient addition. The bounded smoke retains per-action approval until
+owner acceptance of the autonomous stage-consent workflow; stage consent is the
+pending normal-workflow mechanism, not a current smoke allowance. Consent
+revocation stops all further writes; readback of a pending intent remains
+possible. No additional ingredients inherit approval beyond this action.
 
 ### 8. Optional ONE bounded removal
 

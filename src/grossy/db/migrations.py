@@ -236,7 +236,14 @@ def _apply_migration(conn: sqlite3.Connection, mig: MigrationFile) -> None:
 
     Each SQL statement in the migration is executed individually within
     a single transaction. On failure, the transaction is rolled back.
+
+    Migrations whose SQL begins with the ``-- FK_OFF`` marker are applied
+    with ``PRAGMA foreign_keys=OFF`` so that table-rebuild migrations can
+    safely drop and recreate referenced tables (PRD 12.2).
     """
+    fk_off = mig.sql.lstrip().startswith("-- FK_OFF")
+    if fk_off:
+        conn.execute("PRAGMA foreign_keys=OFF")
     conn.execute("BEGIN")
     try:
         statements = _split_sql_statements(mig.sql)
@@ -252,6 +259,9 @@ def _apply_migration(conn: sqlite3.Connection, mig: MigrationFile) -> None:
     except Exception:
         conn.execute("ROLLBACK")
         raise
+    finally:
+        if fk_off:
+            conn.execute("PRAGMA foreign_keys=ON")
 
 
 def _backup_database(conn: sqlite3.Connection, dest: Path) -> None:

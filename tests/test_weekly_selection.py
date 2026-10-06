@@ -336,6 +336,84 @@ def test_intent_readback_repeat_and_resume(home: GrossyPaths, failure: str | Non
     assert all(p.stat().st_mode & 0o777 == 0o600 for p in home.run_dir(rid).glob("report.*"))
 
 
+def test_autonomous_multi_recipe_prefill_credits_edited_cart_and_repeats(
+    home: GrossyPaths,
+) -> None:
+    """No callback: selection consent alone drives every recipe action; repeat is idempotent."""
+    from grossy.weekly.mutation import (
+        run_advance,
+        run_recurring_intent,
+        run_recurring_preflight,
+    )
+    from grossy.weekly.plan import run_baseline_apply, run_plan_prepare
+
+    add_product(home, "111", "rice")
+    add_product(home, "222", "beans")
+    one = add_recipe(home, "one", "meat", names=["rice"])
+    two = add_recipe(home, "two", "fish", names=["beans"])
+    rid = str(run_plan_prepare(home, skip_history_sync=True)["run_id"])
+    run_baseline_apply(home, rid, observation({"999": 1}, []))
+    accepted = run_recurring_preflight(home, rid, observation({"999": 1}, []))
+    assert run_recurring_intent(home, rid, accepted["manifest"])["addition"] is None
+    # Review edit: the user removed 999 and added one rice pack before advancing.
+    edited = {"111": 1, "333": 1}
+    run_advance(home, rid, observation(edited, []))
+    run_recipes_apply(
+        home, rid, proposal(rid, [match("one", one, "111"), match("two", two, "222", "beans")])
+    )
+    run_selection_apply(home, rid, "all")
+    adapter = FakeCart(home)
+    adapter.cart = dict(edited)
+    assert apply_recipes(home, rid, adapter)["status"] == "success"
+    assert sorted(adapter.actions) == [("111", 1), ("222", 2)]
+    assert adapter.cart == {"111": 2, "222": 2, "333": 1}
+    assert stored(home, "SELECT lifecycle FROM planner_runs")[0][0] == "awaiting-user-verification"
+    checks = [
+        json.loads(r[0])
+        for r in stored(
+            home, "SELECT detail FROM run_events WHERE event_type='action-consent-checked'"
+        )
+    ]
+    consent = stored(home, "SELECT id FROM run_stage_consent WHERE stage='recipe'")[0][0]
+    recipe_manifests = stored(
+        home,
+        "SELECT checksum FROM run_mutation_manifests WHERE stage='recipe' "
+        "AND json_array_length(manifest_json,'$.additions')=1 ORDER BY id",
+    )
+    assert [(c["stage"], c["consent_row_id"]) for c in checks] == [("recipe", consent)] * 2
+    assert [c["manifest_checksum"] for c in checks] == [r[0] for r in recipe_manifests]
+    assert apply_recipes(home, rid, adapter)["status"] == "success"
+    assert sorted(adapter.actions) == [("111", 1), ("222", 2)]
+    assert "999" not in adapter.cart
+
+
+def test_recipe_dispatch_revocation_after_intent_blocks_action(
+    home: GrossyPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import grossy.weekly.selection as selection
+    from grossy.weekly.mutation import run_consent_revoke
+
+    rid = plan(home, shared=False)
+    real_intent = selection.run_recipe_intent
+
+    def intent_then_revoke(paths: GrossyPaths, run_id: str, data: dict[str, Any]) -> Any:
+        result = real_intent(paths, run_id, data)
+        run_consent_revoke(paths, run_id, "recipe")
+        return result
+
+    monkeypatch.setattr(selection, "run_recipe_intent", intent_then_revoke)
+    adapter = FakeCart(home)
+    with pytest.raises(WeeklyPlanError, match="revoked"):
+        apply_recipes(home, rid, adapter)
+    assert adapter.actions == []
+    assert stored(home, "SELECT lifecycle FROM planner_runs")[0][0] == "recipe-apply"
+    assert stored(home, "SELECT 1 FROM run_events WHERE event_type='action-consent-checked'") == []
+    pending = stored(home, "SELECT checksum FROM run_mutation_manifests WHERE stage='recipe'")
+    readback = observation()
+    readback["mutation_result"] = {"manifest_checksum": pending[-1][0], "outcome": "readback"}
+    assert selection.run_recipe_observe(home, rid, readback)["status"] == "error"
+
+
 def test_passing_only_consolidation_and_removed_recurring_never_restored(home: GrossyPaths) -> None:
     add_product(home, "111", "rice")
     first = add_recipe(home, "one", "meat", names=["rice"])

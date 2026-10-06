@@ -556,6 +556,78 @@ def weekly_abandon(run_id: str) -> None:
     _closure_phase("abandon", run_id)
 
 
+@weekly_app.command("advance")
+def weekly_advance(
+    run_id: str,
+    cart_observation: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
+) -> None:
+    """Advance from the basket-review barrier to recipe planning."""
+    from grossy.db.migrations import MigrationChecksumError
+    from grossy.weekly.mutation import run_advance
+    from grossy.weekly.plan import WeeklyPlanError
+
+    try:
+        data = json.loads(cart_observation.read_text(encoding="utf-8"))
+        result = run_advance(resolve_paths(), run_id, data)
+    except (
+        ValueError,
+        WeeklyPlanError,
+        LockHeldError,
+        MigrationChecksumError,
+        OSError,
+        sqlite3.Error,
+    ) as exc:
+        emit_weekly_error(f"weekly advance {run_id}", exc)
+    typer.echo(json.dumps(result, sort_keys=True))
+    if result.get("status") == "error":
+        raise typer.Exit(code=1)
+
+
+@weekly_app.command("consent-revoke")
+def weekly_consent_revoke(
+    run_id: str,
+    stage: str,
+    rationale: Annotated[str | None, typer.Option("--rationale")] = None,
+) -> None:
+    """Revoke stage consent for a weekly run."""
+    from grossy.db.migrations import MigrationChecksumError
+    from grossy.weekly.mutation import run_consent_revoke
+    from grossy.weekly.plan import WeeklyPlanError
+
+    try:
+        result = run_consent_revoke(resolve_paths(), run_id, stage, rationale)
+    except (WeeklyPlanError, LockHeldError, MigrationChecksumError, OSError, sqlite3.Error) as exc:
+        emit_weekly_error(f"weekly consent-revoke {run_id} {stage}", exc)
+    typer.echo(json.dumps(result, sort_keys=True))
+    if result.get("status") == "error":
+        raise typer.Exit(code=1)
+
+
+@weekly_app.command("action-check")
+def weekly_action_check(
+    run_id: str,
+    mutation_manifest: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
+) -> None:
+    """Recheck stage consent for the pending intent immediately before its one write."""
+    from grossy.db.migrations import MigrationChecksumError
+    from grossy.weekly.mutation import run_action_check
+    from grossy.weekly.plan import WeeklyPlanError
+
+    try:
+        data = json.loads(mutation_manifest.read_text(encoding="utf-8"))
+        result = run_action_check(resolve_paths(), run_id, data)
+    except (
+        ValueError,
+        WeeklyPlanError,
+        LockHeldError,
+        MigrationChecksumError,
+        OSError,
+        sqlite3.Error,
+    ) as exc:
+        emit_weekly_error(f"weekly action-check {run_id}", exc)
+    typer.echo(json.dumps(result, sort_keys=True))
+
+
 @db_app.command("backup")
 def db_backup(path: Path) -> None:
     """Create a SQLite-safe backup with a schema-version manifest and checksum."""

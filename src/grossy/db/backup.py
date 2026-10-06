@@ -74,6 +74,7 @@ _EXPORT_TABLES = (
     "run_mutation_observations",
     "run_removals",
     "run_events",
+    "run_stage_consent",
     "history_sync_reports",
     "review_items",
     "weekly_reports",
@@ -210,6 +211,7 @@ def _required_export_tables(schema_version: int) -> frozenset[str]:
         "weekly_reports": 8,
         "run_recipe_plans": 9,
         "run_recipe_seen": 9,
+        "run_stage_consent": 10,
     }
     return frozenset(t for t in _EXPORT_TABLES if introduced.get(t, 1) <= schema_version)
 

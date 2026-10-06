@@ -14,6 +14,7 @@ in the ``planning`` lifecycle state throughout.
 
 from __future__ import annotations
 
+from grossy.weekly.mutation import run_action_check, run_advance, run_consent_revoke
 from grossy.weekly.plan import (
     WeeklyPlanError,
     run_baseline_apply,
@@ -22,6 +23,9 @@ from grossy.weekly.plan import (
 
 __all__ = [
     "WeeklyPlanError",
+    "run_action_check",
+    "run_advance",
     "run_baseline_apply",
+    "run_consent_revoke",
     "run_plan_prepare",
 ]

@@ -147,10 +147,20 @@ Start Stage1: history sync, whole-cart baseline, owner-confirmed recurring addit
 3. Agent reads the current cart using `agent-browser`.
 4. Agent emits a `grossy.cart.observation.v1` JSON.
 5. `grossy weekly baseline-apply <run-id> <cart-observation.json>`
-6. Execute **Recurring additions** below. Recipe planning MUST wait for a
-   recorded recurring completion, including an accepted zero-addition intent.
-   Planning-only predecessor runs are not permission to bypass FR129.
-7. Emit a closed `grossy.weekly.recipe-options.v1` proposal for offline
+6. Execute **Recurring additions** below. Stage consent authorizes the entire
+   recurring prefill; no per-action user prompt. After completion (zero-delta
+   intent), the run enters `awaiting-basket-review`. Recipe planning MUST wait
+   for explicit user advance from the basket-review barrier.
+7. **Basket-review barrier (stage consent, Task 16):** After recurring
+   completion, the run is in `awaiting-basket-review`. The user may manually
+   edit the cart (add/remove/adjust items). When ready, the user advances:
+   read a fresh whole-cart observation and run
+   `grossy weekly advance <run-id> <cart-observation.json>`.
+   This accepts the post-edit cart as the dinner-planning basis and transitions
+   to `recurring-apply`. Manual edits are expected, not drift; the observation
+   must be a fresh complete reread (failed/incomplete `mutation_result` is
+   rejected). Without advance, recipes-apply fails closed.
+8. Emit a closed `grossy.weekly.recipe-options.v1` proposal for offline
    ingredient observations only. Required fields: `schema_name`,
    `schema_version: 1`, timezone-aware `generated_at`, `run_id`, `matches`,
    and `checksum` (SHA-256 of sorted compact UTF-8 JSON excluding checksum).
@@ -165,13 +175,14 @@ Start Stage1: history sync, whole-cart baseline, owner-confirmed recurring addit
    ingredient/product-or-family identity. Leave unsupported matches unresolved;
    never guess ambiguous matches or invent availability/price. Proposal facts
    remain explicitly unverified offline projections.
-8. `grossy weekly recipes-apply <run-id> <recipe-proposal.json>`
+9. `grossy weekly recipes-apply <run-id> <recipe-proposal.json>`
    CLI owns full eligibility, linked variant preferences, candidates, weights,
    deterministic slots and revision/policy/match snapshots, not the agent.
-9. Reports retain baseline and recurring mutation evidence; run enters
-   `awaiting-recipe-selection` without adding recipe ingredients.
-   Identical recipes-apply retries regenerate stored reports, never replan.
-   Stop on non-zero exit; SQLite retains report recovery truth after I/O failure.
+   Requires `recurring-apply` lifecycle (i.e., advance must have occurred).
+10. Reports retain baseline and recurring mutation evidence; run enters
+    `awaiting-recipe-selection` without adding recipe ingredients.
+    Identical recipes-apply retries regenerate stored reports, never replan.
+    Stop on non-zero exit; SQLite retains report recovery truth after I/O failure.
 
 #### Recurring additions (deterministic, fail-closed)
 
@@ -202,15 +213,20 @@ Start Stage1: history sync, whole-cart baseline, owner-confirmed recurring addit
    unavailable-primary fallback, blacklists and hard product/line limits.
    Baseline and excess stay untouched. It never authorizes removals or price
    substitutions based on incomparable/unknown units.
-3. Present the exact manifest product ID, canonical URL, positive quantity,
-   current price, substitution/blocked decisions and whole-cart budget warning
-   to the owner. Require explicit cart confirmation for EACH nonempty action.
-   Denial/revocation stops without browser writes.
+3. **Stage consent (Task 16):** The weekly plan invocation grants durable
+   run-scoped recurring stage consent. No per-action user prompt is issued.
+   Each addition is authorized by the consent record. The agent presents the
+   manifest details (product ID, URL, quantity, price, decisions, budget
+   warning) for transparency but does NOT wait for confirmation. Consent
+   revocation (`grossy weekly consent-revoke <run-id> recurring`) stops all
+   further writes immediately; readback of a pending intent remains possible.
+   Until owner acceptance of Task 16, the bounded smoke runbook still requires
+   its exact-action approval for each live addition.
 4. Immediately re-read cart/facts and rerun recurring-preflight. If the proposed
-   delta or facts changed since confirmation, stop for renewed review. Use only
-   the newly accepted exact manifest (one addition maximum), including its
-   `schema_name: grossy.cart.mutation-manifest.v1`, strict version `1`,
-   timezone-aware `generated_at`, `run_id`, `stage: recurring`,
+   delta or facts changed, stop for review (the consent does not authorize a
+   changed manifest). Use only the newly accepted exact manifest (one addition
+   maximum), including its `schema_name: grossy.cart.mutation-manifest.v1`,
+   strict version `1`, timezone-aware `generated_at`, `run_id`, `stage: recurring`,
    `preflight_checksum`, `additions`, and `checksum`. Each addition has only
    `product_id`, `canonical_url`, positive integer `quantity`, and `price_eur`.
    Checksum is SHA-256 of sorted compact UTF-8 JSON excluding `checksum`.
@@ -221,7 +237,14 @@ Start Stage1: history sync, whole-cart baseline, owner-confirmed recurring addit
    BEFORE ANY browser write. Source cart/facts must still be within five minutes
    at intent, not merely recently accepted. Never reuse/retry an outstanding authorization.
    A zero-addition intent records completion with no browser action.
-6. For the authorized nonempty action ONLY, add its positive quantity through
+6. Immediately before the browser write run
+   `grossy weekly action-check <run-id> <mutation-manifest.json>` with the same
+   persisted manifest. Require exit zero and versioned `status: authorized` with
+   the same checksum and addition. It binds the exact pending manifest, run,
+   stage and the consent referenced at intent, and is single-use. Revoked/absent
+   consent, a consumed/attempted intent, expired preflight or policy change
+   fail: perform NO write, never re-run intent; read back via recurring-observe
+   or resume-prepare. For the checked nonempty action ONLY, add its positive quantity through
    rendered stable identity controls. Never set an absolute cart quantity,
    decrement, replace, remove, compensate, enter checkout, or continue on
    authentication loss, ambiguity, unsafe exposure or anti-bot challenge.
@@ -233,11 +256,14 @@ Start Stage1: history sync, whole-cart baseline, owner-confirmed recurring addit
    Require successful reconciliation; mismatch/failure stops ALL further
    additions without compensation. Intent's incomplete evidence survives an
    interruption even if readback cannot be submitted.
-8. Read fresh cart/facts and repeat preflight, owner confirmation, intent and
-   one-add/readback until an accepted zero-addition intent completes the phase.
-   Only then run recipes-apply. All phases fail closed on nonzero exit/malformed
-   output. The separate additive adapter is offline-testable orchestration;
-   neither CLI nor doctor launches a browser or gains implicit mutation power.
+8. Read fresh cart/facts and repeat preflight, intent and one-add/readback
+   until an accepted zero-addition intent completes the phase. Stage consent
+   authorizes each action; the action-check before each browser write stops the
+   loop after revocation. After completion, the run enters
+   `awaiting-basket-review`; recipes-apply requires explicit user advance. All
+   phases fail closed on nonzero exit/malformed output. The separate additive
+   adapter is offline-testable orchestration; neither CLI nor doctor launches a
+   browser or gains implicit mutation power.
 
 **Stop conditions:**
 
@@ -286,30 +312,39 @@ Add ingredients for selected recipes (Stage 2).
    classifies every selected dinner before any additions, consolidates only passing
    recipes, credits compatible cart quantity once, and returns an accepted versioned
    exact manifest with at most ONE positive action. Blocked recipes never contribute.
-4. Present exact identity, delta, current price, conversion assumptions, blocked or
-   substituted decisions and whole-cart budget warning. Require owner confirmation
-   for EACH nonempty action. Denial/revocation stops without writes.
+4. **Stage consent (Task 16):** `selection-apply` grants durable run-scoped
+   recipe stage consent. No per-action user prompt. The agent presents manifest
+   details (identity, delta, price, conversion, decisions, budget warning) for
+   transparency. Consent revocation stops all further writes; readback of a
+   pending intent remains possible. Until owner acceptance of Task 16, the
+   bounded smoke runbook still requires exact-action approval for live additions.
 5. Immediately re-read the entire cart/facts and repeat recipe-preflight. Compare
    complete cart lines by stable identity, including quantities and prices, not only
    selected ingredient deltas. Unexplained cart drift stops for attention/reconciliation;
-   changed deltas, facts or decisions require renewed confirmation. Stage1 removals
-   before the initial Stage2 read are allowed, but do not waive this comparison.
-   Use only that exact accepted manifest
+   changed deltas, facts or decisions require a new preflight (the consent does not
+   authorize a changed manifest). Stage1 removals before the initial Stage2 read are
+   allowed, but do not waive this comparison. Use only that exact accepted manifest
    (`grossy.cart.mutation-manifest.v1`, strict version1, stage `recipe`, run ID,
    aware generated_at, preflight_checksum, additions, checksum).
 6. `grossy weekly recipe-intent <run-id> <mutation-manifest.json>`. Require exit zero
    and versioned `status: persisted` authorization for its checksum BEFORE action.
    This records incomplete readback evidence and enters `recipe-apply`. Never reuse
    an outstanding authorization. Zero-add intent completes without browser action.
-7. For the one authorized addition, use rendered stable identity controls to add a
+   Immediately before the browser write run
+   `grossy weekly action-check <run-id> <mutation-manifest.json>` with the same
+   manifest; require exit zero and `status: authorized` for that checksum and
+   addition. Failure means NO write and no intent retry; read back via
+   recipe-observe or resume-prepare.
+7. For the one checked addition, use rendered stable identity controls to add a
    positive number of adapter units. Never set absolute quantity, decrement, remove,
    compensate or enter checkout. Read the entire cart after EVERY attempted action.
    Attach `mutation_result: {manifest_checksum, outcome}` (`readback|failed|incomplete`).
    On read failure submit safe last known state explicitly marked incomplete.
    `grossy weekly recipe-observe <run-id> <cart-observation.json>` must reconcile;
    mismatch/failure stops ALL additions without removal, retaining partial evidence.
-8. Repeat fresh preflight, confirmation, intent and one-action/readback until zero
-   remaining additions. Successful Stage2 enters `awaiting-user-verification`.
+8. Repeat fresh preflight, intent and one-action/readback until zero remaining
+   additions. Stage consent authorizes each action; the action-check before each
+   browser write stops the loop after revocation. Successful Stage2 enters `awaiting-user-verification`.
    Reports retain mapping, selected steps, exact targets versus retail quantities,
    assumptions, passing/blocked decisions, budget and mutation evidence.
 
@@ -356,6 +391,14 @@ Explicit bounded removal.
 - `grossy weekly abandon <run-id>` closes without removing anything, retaining evidence.
 - `grossy weekly report-regenerate <run-id>` mechanically writes SQLite report truth
   after I/O failure; never replays browser mutations or changes lifecycle.
+- `grossy weekly advance <run-id> <cart-observation.json>` accepts the basket-review
+  barrier after manual edits; requires a fresh complete reread (never failed/incomplete
+  evidence) and transitions to recipe planning.
+- `grossy weekly consent-revoke <run-id> <stage> [--rationale TEXT]` revokes stage
+  consent; subsequent preflight/intent/action-check fail closed; readback of pending
+  intent remains.
+- `grossy weekly action-check <run-id> <mutation-manifest.json>` is the single-use
+  consent check for the exact pending manifest immediately before its one write.
 - Disable browser activity by stopping skill invocation; preserve database, offline
   history, recipes and run artifacts. No purge/reset/recreation or automatic rollback.
 
@@ -444,12 +487,12 @@ Resume an interrupted run.
    state as reconciliation; rejection leaves the outstanding intent untouched.
    Unrelated changes or baseline loss stop for attention.
 3. For a returned `stage: recurring` manifest ONLY, follow Recurring additions
-   steps 3–8: explicit owner confirmation, immediate
-   re-read/preflight, durable recurring-intent, one positive addition and
-   recurring-observe. Resume preparation is NOT browser-write authorization.
-   Agent presents the exact resumed deltas from the persisted manifest
-   (product IDs and positive quantities still missing) to the user for confirmation.
-   If the user does not approve, abort; no browser mutation is performed.
+   steps 3–8: immediate re-read/preflight, durable recurring-intent, one positive
+   addition and recurring-observe. Stage consent (granted at plan-prepare) is the
+   authorization; no per-action user prompt is issued in the autonomous workflow.
+   Resume preparation is NOT browser-write authorization; `grossy weekly
+   action-check <run-id> <mutation-manifest.json>` immediately before each
+   browser write blocks revoked consent.
    `resume-prepare` exits non-zero or returns no accepted manifest
    → stop before any browser action.
 4. For a persisted recipe selection, `resume-prepare` returns a recipe-stage
@@ -568,7 +611,8 @@ The agent MUST:
     AB.gr places the cart there. Inspect only product identity, quantity and price;
     do not read account/address/payment/fulfilment sections, click checkout-stage
     controls or perform cart writes under read-only approval. Stop on unexpected
-    navigation or exposure. All later cart mutations require their own confirmation.
+    navigation or exposure. Later cart additions are authorized by the recorded
+    stage consent; removals still require separate exact-action confirmation.
 15. Never select fulfilment slots.
 16. Never pay or submit an order.
 17. Stop the workflow before any browser action whenever a deterministic CLI

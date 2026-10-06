@@ -48,6 +48,9 @@ def added(paths: GrossyPaths) -> str:
         "matches": [],
     }
     body["checksum"] = proposal_checksum(body)
+    from grossy.weekly.mutation import run_advance
+
+    run_advance(paths, run_id, observation(fake.quantities))
     run_recipes_apply(paths, run_id, body)
     return run_id
 
@@ -344,6 +347,9 @@ def test_stage1_removal_allows_unrelated_stage2_additions(
 
     recurring = Recurring()
     assert apply_recurring(home, run_id, recurring, lambda _: True)["status"] == "success"
+    from grossy.weekly.mutation import run_advance
+
+    run_advance(home, run_id, recipe_obs(recurring.cart))
     run_recipes_apply(
         home,
         run_id,

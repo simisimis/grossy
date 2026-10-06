@@ -153,6 +153,10 @@ def complete_recurring(paths: GrossyPaths, run_id: str, pids: list[str] | None =
     accepted = run_recurring_preflight(paths, run_id, observation)
     assert not accepted["manifest"]["additions"]
     assert run_recurring_intent(paths, run_id, accepted["manifest"])["addition"] is None
+    # Task 16: advance from basket-review barrier to permit recipe planning.
+    from grossy.weekly.mutation import run_advance
+
+    run_advance(paths, run_id, observation)
 
 
 def stored(paths: GrossyPaths, sql: str, args: tuple[Any, ...] = ()) -> list[Any]:

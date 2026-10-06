@@ -13,7 +13,7 @@ import unicodedata
 from decimal import ROUND_CEILING, Decimal
 from typing import Any
 
-from grossy.browser.observation import validate_cart_observation
+from grossy.browser.observation import CartObservation, validate_cart_observation
 from grossy.config.models import GrossyConfigModel, product_id_from_url
 from grossy.history.policy import product_gate
 from grossy.weekly.plan import WeeklyPlanError
@@ -224,19 +224,35 @@ def build_recipe_preview(
             (snapshot["run_row_id"],),
         )
     }
-    verified = conn.execute(
-        "SELECT o.observed_json FROM run_mutation_observations o "
-        "JOIN run_mutation_manifests m ON m.id=o.manifest_id "
-        "WHERE m.run_id=? AND m.stage='recurring' AND o.failure_class='none' "
-        "ORDER BY o.id DESC LIMIT 1",
+    # Task 16: the basket-review-advance cart reflects user manual edits and
+    # takes precedence over the last recurring observation as the planning basis.
+    advance = conn.execute(
+        "SELECT detail FROM run_events WHERE run_id=? AND event_type='basket-review-advance' "
+        "ORDER BY id DESC LIMIT 1",
         (snapshot["run_row_id"],),
     ).fetchone()
-    if verified:
-        cart_observation = validate_cart_observation(json.loads(verified[0]))
+    cart_observation: CartObservation | None = None
+    if advance:
+        advance_data = json.loads(advance[0])
+        cart_observation = validate_cart_observation(advance_data["cart"])
         baseline = {
             line.product_id: (Decimal(line.quantity), Decimal(line.displayed_price_eur) * 100)
             for line in cart_observation.lines
         }
+    else:
+        verified = conn.execute(
+            "SELECT o.observed_json FROM run_mutation_observations o "
+            "JOIN run_mutation_manifests m ON m.id=o.manifest_id "
+            "WHERE m.run_id=? AND m.stage='recurring' AND o.failure_class='none' "
+            "ORDER BY o.id DESC LIMIT 1",
+            (snapshot["run_row_id"],),
+        ).fetchone()
+        if verified:
+            cart_observation = validate_cart_observation(json.loads(verified[0]))
+            baseline = {
+                line.product_id: (Decimal(line.quantity), Decimal(line.displayed_price_eur) * 100)
+                for line in cart_observation.lines
+            }
     remaining = {pid: qty for pid, (qty, _) in baseline.items()}
     ingredients = []
     total = Decimal(0)
@@ -275,7 +291,9 @@ def build_recipe_preview(
                 "indivisible target rounded upward"
                 if ingredient["indivisible"]
                 else "divisible culinary target retained exactly",
-                "cart credit uses latest verified/reconciled recurring cart observation"
+                "cart credit uses basket-review advance cart (post manual edits)"
+                if advance
+                else "cart credit uses latest verified/reconciled recurring cart observation"
                 if verified
                 else "cart credit uses immutable baseline; no verified recurring observation",
                 "offline observations are unverified; no live availability or price validation",

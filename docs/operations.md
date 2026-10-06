@@ -158,10 +158,19 @@ scan-prepare `--listed-orders`, scan-validate, and sync-apply `--listed-orders
 <listed.json> <scan.json>`. Retain the validated discovery proposal for
 `weekly plan-prepare --listed-orders <listed.json>`; only an explicit
 `--skip-history-sync` waives comparison. Then baseline-apply persists the whole
-cart. Stage1 recurring-preflight returns at most one positive action. Review,
-confirm, immediately reread/re-preflight, recurring-intent, perform that action,
-and recurring-observe with the manifest checksum/outcome. Repeat only with new
-approval; an accepted zero-addition intent completes recurring before recipes-apply.
+cart. Stage1 recurring-preflight returns at most one positive action. Stage
+consent (granted at plan-prepare) authorizes each addition without per-action
+user prompt; `grossy weekly action-check <run-id> <mutation-manifest.json>`
+immediately before each browser write blocks revoked consent. The flow is:
+preflight, reread/re-preflight, recurring-intent, action-check, perform that
+action, recurring-observe with the manifest checksum/outcome. Repeat until an accepted zero-addition intent completes
+recurring. After completion, the run enters `awaiting-basket-review`; the user
+may edit the cart manually and then advances with
+`grossy weekly advance <run-id> <cart-observation.json>` before recipes-apply.
+Advance accepts manual edits but rejects failed/incomplete readback evidence.
+`grossy weekly consent-revoke <run-id> <stage>` stops all further writes for
+that stage, including a persisted intent whose action-check has not run;
+readback of a pending intent remains possible.
 
 Recipe options use accepted local revisions and local product facts only;
 availability/price projections are unverified until fresh rendered preflight.
@@ -169,14 +178,17 @@ availability/price projections are unverified until fresh rendered preflight.
 snapshots. Reroll changes suggestions, never the cart. Empty classes remain empty;
 no live source fetching or guessed matches during weekly recipe planning.
 
-Stage2 selection-apply persists any unique nonempty subset in argument order,
-with recipeN→dinnerN mapping. recipe-preflight uses fresh whole-cart/product/package
-facts, classifies each dinner, consolidates only passing recipes and credits cart
-once. Each recipe-intent authorizes at most one positive action after confirmation
-and immediate reread; recipe-observe reconciles actual readback. Each additional
-action needs its own approval. Pantry assumptions are never added. Unavailable,
-blacklisted, ambiguous or hard-limit-exceeding matches block; budget excess warns.
-Stage2 does not restore unrelated recurring quantities removed by the user.
+Stage2 selection-apply persists one to three unique nonempty slots in argument
+order, with recipeN→dinnerN mapping, and grants durable run-scoped recipe stage
+consent. recipe-preflight uses fresh whole-cart/product/package facts, classifies
+each dinner, consolidates only passing recipes and credits cart once. Each
+recipe-intent authorizes at most one positive action after immediate reread;
+recipe-observe reconciles actual readback. Stage consent (granted by selection)
+authorizes subsequent recipe additions without per-action prompts; action-check
+immediately before each browser write blocks revoked consent.
+Pantry assumptions are never added. Unavailable, blacklisted, ambiguous or
+hard-limit-exceeding matches block; budget excess warns. Stage2 does not restore
+unrelated recurring quantities removed by the user.
 
 All mutation phases require exit zero and accepted versioned output, persisted
 exact intent before write, and whole-cart readback after **each** attempted action.
@@ -292,11 +304,13 @@ mutation failed simply because its report did not write.
 and `grossy weekly resume-prepare <run-id> <cart.json>`. This reconciles outstanding
 addition intent and only computes missing positive deltas; it is **not** write
 authorization. Never replay the old intent. Unexpected excess is preserved;
-baseline loss/unrelated changes stop for attention. New additions still need new
-confirmation, reread, preflight, intent and observation. Outstanding removals
-need exact removal readback reconciliation, not addition resume/replay. Record a
-not-applied removal only on fresh exact unchanged whole-cart readback; partial
-or ambiguous changes remain blocked. Abandon rather than guess.
+baseline loss/unrelated changes stop for attention. Resumed additions are
+authorized by the recorded stage consent (no per-action prompt); each still
+requires fresh reread, preflight, intent, action-check and observation.
+Outstanding removals need exact removal readback reconciliation, not addition
+resume/replay. Record a not-applied removal only on fresh exact unchanged
+whole-cart readback; partial or ambiguous changes remain blocked. Abandon
+rather than guess.
 
 `grossy weekly finish <run-id>` means reviewed cart, not an order.
 `grossy weekly finish <run-id> --no-recipes` deliberately selects none from

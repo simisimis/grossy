@@ -1251,6 +1251,18 @@ def run_plan_prepare(
                     now,
                 ),
             )
+            # Task 16: weekly invocation grants durable run-scoped recurring
+            # stage consent (PRD FR-114..FR-128 deltas).
+            conn.execute(
+                "INSERT INTO run_stage_consent (run_id, stage, status, granted_at) "
+                "VALUES (?, 'recurring', 'granted', ?)",
+                (run_row_id, now),
+            )
+            conn.execute(
+                "INSERT INTO run_events (run_id, event_type, detail, created_at) "
+                "VALUES (?, 'consent-granted', ?, ?)",
+                (run_row_id, "stage=recurring; granted by plan-prepare", now),
+            )
             conn.commit()
 
             # Create the run directory.

@@ -62,13 +62,20 @@ def run_selection_apply(paths: GrossyPaths, run_id: str, value: str) -> dict[str
                 (rid,),
             )
         )
-        names = (
-            [name for name, revision in slots.items() if revision]
-            if value == "all"
-            else value.split(",")
-        )
-        if not names or len(set(names)) != len(names) or any(not slots.get(n) for n in names):
-            raise WeeklyPlanError("select a unique nonempty subset of nonempty recipe slots")
+        nonempty_slots = [name for name, revision in slots.items() if revision]
+        names = nonempty_slots if value == "all" else value.split(",")
+        # Task 16: `all` resolves only when ≤ 3 nonempty slots.
+        if value == "all" and len(nonempty_slots) > 3:
+            raise WeeklyPlanError(
+                f"'all' resolves to {len(nonempty_slots)} slots; select at most three explicitly"
+            )
+        if (
+            not names
+            or len(names) > 3
+            or len(set(names)) != len(names)
+            or any(not slots.get(n) for n in names)
+        ):
+            raise WeeklyPlanError("select one to three unique nonempty recipe slots")
         previous = [
             r[0]
             for r in conn.execute(
@@ -97,6 +104,18 @@ def run_selection_apply(paths: GrossyPaths, run_id: str, value: str) -> dict[str
                     (recipe, run_id, name, _now_utc()),
                 )
             _event(conn, rid, "recipe-selection", {"slots": names})
+            # Task 16: selection grants durable run-scoped recipe stage consent.
+            conn.execute(
+                "INSERT INTO run_stage_consent (run_id, stage, status, granted_at) "
+                "VALUES (?, 'recipe', 'granted', ?)",
+                (rid, _now_utc()),
+            )
+            _event(
+                conn,
+                rid,
+                "consent-granted",
+                {"stage": "recipe", "granted_by": "selection-apply"},
+            )
         dinners = selected_candidates(conn, rid)
         report = json.loads(
             conn.execute(
