@@ -35,43 +35,33 @@ RUNNER = CliRunner()
 # --- seed spec definitions (FR-86) --------------------------------------------------
 
 
-def test_four_seed_specs_defined() -> None:
-    """FR-86: Exactly four seed recipes are defined."""
-    assert len(SEED_SPECS) == 4
-
-
-def test_seed_specs_cover_all_classes() -> None:
-    """The four seeds cover meat, fish, poultry, and vegetarian."""
-    classes = [s["protein_class"] for s in SEED_SPECS]
-    assert classes == ["meat", "fish", "poultry", "vegetarian"]
-
-
-def test_seed_specs_have_required_fields() -> None:
-    """Each seed spec has recipe_id, title, reference_url, source_name, source_tier."""
-    for spec in SEED_SPECS:
-        assert "recipe_id" in spec
-        assert "title" in spec
-        assert "reference_url" in spec
-        assert "source_name" in spec
-        assert "source_tier" in spec
-        assert "interpretation" in spec
-        assert spec["reference_url"].startswith("https://")
-
-
-def test_seed_spec_urls_match_prd() -> None:
-    """The canonical URLs match the PRD table exactly."""
-    urls = {s["protein_class"]: s["reference_url"] for s in SEED_SPECS}
-    assert urls["meat"] == (
-        "https://akispetretzikis.com/en/recipe/8684/snitsel-choirino-me-patates-sto-air-fryer"
-    )
-    assert urls["fish"] == (
-        "https://www.foodnetwork.com/recipes/food-network-kitchen/"
-        "ginger-and-soy-salmon-fillets-with-broccoli-5277868"
-    )
-    assert urls["poultry"] == "https://www.bbcgoodfood.com/recipes/chicken-alfredo"
-    assert urls["vegetarian"] == (
-        "https://www.bbcgoodfood.com/recipes/mexican-bean-burgers-lime-yogurt-salsa/"
-    )
+def test_seed_specs_match_prd_table() -> None:
+    """FR-86: exactly four complete seed specs, one per class, with the PRD's URLs."""
+    required = {
+        "recipe_id",
+        "title",
+        "reference_url",
+        "source_name",
+        "source_tier",
+        "interpretation",
+    }
+    assert all(required <= set(spec) for spec in SEED_SPECS)
+    assert [(s["protein_class"], s["reference_url"]) for s in SEED_SPECS] == [
+        (
+            "meat",
+            "https://akispetretzikis.com/en/recipe/8684/snitsel-choirino-me-patates-sto-air-fryer",
+        ),
+        (
+            "fish",
+            "https://www.foodnetwork.com/recipes/food-network-kitchen/"
+            "ginger-and-soy-salmon-fillets-with-broccoli-5277868",
+        ),
+        ("poultry", "https://www.bbcgoodfood.com/recipes/chicken-alfredo"),
+        (
+            "vegetarian",
+            "https://www.bbcgoodfood.com/recipes/mexican-bean-burgers-lime-yogurt-salsa/",
+        ),
+    ]
 
 
 # --- seed fixture helpers --------------------------------------------------------------

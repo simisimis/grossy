@@ -109,41 +109,54 @@ def test_assumed_equipment_is_defined() -> None:
 # --- check_appliance_eligibility ----------------------------------------------------------
 
 
-def test_all_requirements_satisfied() -> None:
-    """When all requirements are met, no unmet items are reported."""
-    requirements = [
-        {"type": "stovetop", "capability": "searing"},
-        {"type": "conventional_oven", "capability": "baking"},
-    ]
-    configured = {
-        "induction_cooktop": ApplianceConfig(available=True),
-        "steam_oven": ApplianceConfig(available=True),
-    }
-    unmet = check_appliance_eligibility(requirements, configured)
-    assert unmet == []
-
-
-def test_unmet_requirement_reported_with_reason() -> None:
-    """Unmet requirements are reported with type, capability, and reason."""
-    requirements = [{"type": "air_fryer", "capability": "air_frying"}]
-    configured = {"stovetop": ApplianceConfig(available=True)}
-    unmet = check_appliance_eligibility(requirements, configured)
-    assert len(unmet) == 1
-    assert unmet[0]["type"] == "air_fryer"
-    assert unmet[0]["capability"] == "air_frying"
-    assert "no configured appliance is available" in unmet[0]["reason"]
-
-
-def test_mixed_met_and_unmet() -> None:
-    """Only unmet requirements appear in the result."""
-    requirements = [
-        {"type": "stovetop", "capability": "searing"},
-        {"type": "pressure_cooker", "capability": "pressure_cooking"},
-    ]
-    configured = {"induction_cooktop": ApplianceConfig(available=True)}
-    unmet = check_appliance_eligibility(requirements, configured)
-    assert len(unmet) == 1
-    assert unmet[0]["type"] == "pressure_cooker"
+@pytest.mark.parametrize(
+    "requirements,configured,unmet_types",
+    [
+        pytest.param(
+            [
+                {"type": "stovetop", "capability": "searing"},
+                {"type": "conventional_oven", "capability": "baking"},
+            ],
+            {"induction_cooktop": True, "steam_oven": True},
+            [],
+            id="all-satisfied-by-equivalence",
+        ),
+        pytest.param(
+            [{"type": "air_fryer", "capability": "air_frying"}],
+            {"stovetop": True},
+            ["air_fryer"],
+            id="single-unmet",
+        ),
+        pytest.param(
+            [
+                {"type": "stovetop", "capability": "searing"},
+                {"type": "pressure_cooker", "capability": "pressure_cooking"},
+            ],
+            {"induction_cooktop": True},
+            ["pressure_cooker"],
+            id="only-unmet-reported",
+        ),
+        # FR-97: without a constraint, availability alone is sufficient.
+        pytest.param(
+            [{"type": "air_fryer", "capability": "air_frying"}],
+            {"air_fryer": True},
+            [],
+            id="no-constraint-capacity-independent",
+        ),
+    ],
+)
+def test_check_appliance_eligibility_reports_only_unmet(
+    requirements: list[dict[str, Any]], configured: dict[str, bool], unmet_types: list[str]
+) -> None:
+    unmet = check_appliance_eligibility(
+        requirements, {name: ApplianceConfig(available=flag) for name, flag in configured.items()}
+    )
+    assert [u["type"] for u in unmet] == unmet_types
+    for entry in unmet:
+        assert entry["capability"] == next(
+            r["capability"] for r in requirements if r["type"] == entry["type"]
+        )
+        assert "no configured appliance is available" in entry["reason"]
 
 
 # --- model/capacity metadata semantics (FR-96, FR-97) -------------------------------------
@@ -178,13 +191,6 @@ def test_capacity_constraint(
     else:
         assert len(unmet) == 1
         assert error in unmet[0]["reason"]
-
-
-def test_no_constraint_remains_capacity_independent() -> None:
-    """FR-97: Without a constraint, availability alone is sufficient."""
-    requirements = [{"type": "air_fryer", "capability": "air_frying"}]
-    configured = {"air_fryer": ApplianceConfig(available=True)}
-    assert check_appliance_eligibility(requirements, configured) == []
 
 
 @pytest.mark.parametrize(
@@ -296,222 +302,112 @@ def env(tmp_path: Path) -> tuple[Path, GrossyPaths]:
     return tmp_path, paths
 
 
+def _import_variant_library(
+    tmp_path: Path, paths: GrossyPaths, *, air_fryer_capacity: float | None = None
+) -> None:
+    """Import ``base-v`` linking a Thermomix-native and an air-fryer variant."""
+    air_fryer: dict[str, Any] = {"type": "air_fryer", "capability": "air_frying"}
+    if air_fryer_capacity is not None:
+        air_fryer.update(capacity_constraint=air_fryer_capacity, capacity_unit="litres")
+    _import_recipe(tmp_path, paths, "air-fryer-v", appliances=[air_fryer])
+    _import_recipe(
+        tmp_path, paths, "thermo-v", appliances=[{"type": "thermomix", "capability": "mixing"}]
+    )
+    _import_recipe(
+        tmp_path,
+        paths,
+        "base-v",
+        variants=[
+            {"linked_recipe_id": "thermo-v", "variant_type": "thermomix_native"},
+            {"linked_recipe_id": "air-fryer-v", "variant_type": "air_fryer"},
+        ],
+    )
+
+
 def test_variant_resolution_no_variants(env: tuple[Path, GrossyPaths]) -> None:
     """A recipe with no variants resolves to itself."""
     tmp_path, paths = env
     _import_recipe(tmp_path, paths, "base-recipe")
-
-    configured = {"stovetop": ApplianceConfig(available=True)}
     conn = open_connection(paths.database_file)
     try:
-        result = resolve_variant_preference(conn, "base-recipe", configured)
+        result = resolve_variant_preference(
+            conn, "base-recipe", {"stovetop": ApplianceConfig(available=True)}
+        )
         assert result["preferred_variant"] is None
         assert result["resolution"] == "no_variants"
     finally:
         conn.close()
 
 
-def test_variant_resolution_prefers_air_fryer(env: tuple[Path, GrossyPaths]) -> None:
-    """FR-100: An eligible air-fryer variant is preferred over the base recipe."""
-    tmp_path, paths = env
-    # Import the air-fryer variant first (must exist for the link)
-    _import_recipe(
-        tmp_path,
-        paths,
-        "air-fryer-variant",
-        appliances=[{"type": "air_fryer", "capability": "air_frying"}],
-    )
-    # Import the base recipe with a variant link to the air-fryer version
-    _import_recipe(
-        tmp_path,
-        paths,
-        "base-recipe",
-        variants=[{"linked_recipe_id": "air-fryer-variant", "variant_type": "air_fryer"}],
-    )
-
-    configured = {"air_fryer": ApplianceConfig(available=True)}
-    conn = open_connection(paths.database_file)
-    try:
-        result = resolve_variant_preference(conn, "base-recipe", configured)
-        assert result["preferred_variant"] == "air-fryer-variant"
-        assert result["variant_type"] == "air_fryer"
-        assert result["resolution"] == "variant_preferred"
-    finally:
-        conn.close()
-
-
-def test_variant_resolution_prefers_thermomix(env: tuple[Path, GrossyPaths]) -> None:
-    """FR-100: An eligible Thermomix-native variant is preferred over the base recipe."""
-    tmp_path, paths = env
-    _import_recipe(
-        tmp_path,
-        paths,
-        "thermomix-variant",
-        appliances=[{"type": "thermomix", "capability": "mixing"}],
-    )
-    _import_recipe(
-        tmp_path,
-        paths,
-        "manual-recipe",
-        variants=[{"linked_recipe_id": "thermomix-variant", "variant_type": "thermomix_native"}],
-    )
-
-    configured = {"thermomix": ApplianceConfig(available=True)}
-    conn = open_connection(paths.database_file)
-    try:
-        result = resolve_variant_preference(conn, "manual-recipe", configured)
-        assert result["preferred_variant"] == "thermomix-variant"
-        assert result["variant_type"] == "thermomix_native"
-    finally:
-        conn.close()
-
-
-def test_variant_resolution_air_fryer_over_thermomix(env: tuple[Path, GrossyPaths]) -> None:
-    """FR-100: Air-fryer preference takes priority over Thermomix-native."""
-    tmp_path, paths = env
-    _import_recipe(
-        tmp_path,
-        paths,
-        "air-fryer-v",
-        appliances=[{"type": "air_fryer", "capability": "air_frying"}],
-    )
-    _import_recipe(
-        tmp_path,
-        paths,
-        "thermo-v",
-        appliances=[{"type": "thermomix", "capability": "mixing"}],
-    )
-    _import_recipe(
-        tmp_path,
-        paths,
-        "base-v",
-        variants=[
-            {"linked_recipe_id": "thermo-v", "variant_type": "thermomix_native"},
-            {"linked_recipe_id": "air-fryer-v", "variant_type": "air_fryer"},
-        ],
-    )
-
-    configured = {
-        "air_fryer": ApplianceConfig(available=True),
-        "thermomix": ApplianceConfig(available=True),
-    }
-    conn = open_connection(paths.database_file)
-    try:
-        result = resolve_variant_preference(conn, "base-v", configured)
-        assert result["preferred_variant"] == "air-fryer-v"
-        assert result["variant_type"] == "air_fryer"
-    finally:
-        conn.close()
-
-
-def test_variant_resolution_falls_back_when_variant_unavailable(
-    env: tuple[Path, GrossyPaths],
-) -> None:
-    """An unavailable variant must not displace the base recipe.
-
-    The air-fryer variant requires an air fryer that is not configured:
-    resolution falls back to the base recipe instead of the variant.
-    """
-    tmp_path, paths = env
-    _import_recipe(
-        tmp_path,
-        paths,
-        "air-fryer-variant",
-        appliances=[{"type": "air_fryer", "capability": "air_frying"}],
-    )
-    _import_recipe(
-        tmp_path,
-        paths,
-        "base-recipe",
-        variants=[{"linked_recipe_id": "air-fryer-variant", "variant_type": "air_fryer"}],
-    )
-
-    # No air fryer configured: the variant is not eligible.
-    configured = {"stovetop": ApplianceConfig(available=True)}
-    conn = open_connection(paths.database_file)
-    try:
-        result = resolve_variant_preference(conn, "base-recipe", configured)
-        assert result["preferred_variant"] is None
-        assert result["resolution"] == "base_recipe"
-        assert "no linked variant is eligible" in result["detail"]
-    finally:
-        conn.close()
-
-
-def test_variant_resolution_falls_back_on_missing_capacity_metadata(
-    env: tuple[Path, GrossyPaths],
-) -> None:
-    """FR-97: A capacity-dependent variant is not eligible without capacity metadata."""
-    tmp_path, paths = env
-    _import_recipe(
-        tmp_path,
-        paths,
-        "air-fryer-variant",
-        appliances=[
+@pytest.mark.parametrize(
+    "configured,capacity_constraint,preferred,variant_type,resolution",
+    [
+        pytest.param(
+            {"air_fryer": ApplianceConfig(available=True)},
+            None,
+            "air-fryer-v",
+            "air_fryer",
+            "variant_preferred",
+            id="air-fryer-preferred",
+        ),
+        pytest.param(
+            {"thermomix": ApplianceConfig(available=True)},
+            None,
+            "thermo-v",
+            "thermomix_native",
+            "variant_preferred",
+            id="thermomix-preferred-when-air-fryer-ineligible",
+        ),
+        pytest.param(
             {
-                "type": "air_fryer",
-                "capability": "air_frying",
-                "capacity_constraint": 4.0,
-                "capacity_unit": "litres",
-            }
-        ],
-    )
-    _import_recipe(
-        tmp_path,
-        paths,
-        "base-recipe",
-        variants=[{"linked_recipe_id": "air-fryer-variant", "variant_type": "air_fryer"}],
-    )
-
-    # Air fryer available but with no capacity metadata: the variant is not
-    # eligible for a capacity-dependent choice (FR-97).
-    configured = {"air_fryer": ApplianceConfig(available=True, capacity_litres=None)}
-    conn = open_connection(paths.database_file)
-    try:
-        result = resolve_variant_preference(conn, "base-recipe", configured)
-        assert result["preferred_variant"] is None
-        assert result["resolution"] == "base_recipe"
-    finally:
-        conn.close()
-
-
-def test_variant_resolution_skips_ineligible_to_eligible_lower_preference(
+                "air_fryer": ApplianceConfig(available=True),
+                "thermomix": ApplianceConfig(available=True),
+            },
+            None,
+            "air-fryer-v",
+            "air_fryer",
+            "variant_preferred",
+            id="air-fryer-over-thermomix",
+        ),
+        pytest.param(
+            {"stovetop": ApplianceConfig(available=True)},
+            None,
+            None,
+            None,
+            "base_recipe",
+            id="no-eligible-variant-keeps-base",
+        ),
+        # FR-97: a capacity-dependent variant is not eligible without capacity metadata.
+        pytest.param(
+            {"air_fryer": ApplianceConfig(available=True, capacity_litres=None)},
+            4.0,
+            None,
+            None,
+            "base_recipe",
+            id="missing-capacity-metadata-keeps-base",
+        ),
+    ],
+)
+def test_variant_resolution_prefers_only_eligible_variants(
     env: tuple[Path, GrossyPaths],
+    configured: dict[str, ApplianceConfig],
+    capacity_constraint: float | None,
+    preferred: str | None,
+    variant_type: str | None,
+    resolution: str,
 ) -> None:
-    """Preference applies only among eligible variants.
-
-    The higher-preference air-fryer variant is not eligible (no air fryer),
-    so the lower-preference Thermomix-native variant (eligible) is chosen.
-    """
+    """FR-100/FR-102: preference order applies only among eligible variants."""
     tmp_path, paths = env
-    _import_recipe(
-        tmp_path,
-        paths,
-        "air-fryer-v",
-        appliances=[{"type": "air_fryer", "capability": "air_frying"}],
-    )
-    _import_recipe(
-        tmp_path,
-        paths,
-        "thermo-v",
-        appliances=[{"type": "thermomix", "capability": "mixing"}],
-    )
-    _import_recipe(
-        tmp_path,
-        paths,
-        "base-v",
-        variants=[
-            {"linked_recipe_id": "thermo-v", "variant_type": "thermomix_native"},
-            {"linked_recipe_id": "air-fryer-v", "variant_type": "air_fryer"},
-        ],
-    )
-
-    configured = {"thermomix": ApplianceConfig(available=True)}
+    _import_variant_library(tmp_path, paths, air_fryer_capacity=capacity_constraint)
     conn = open_connection(paths.database_file)
     try:
         result = resolve_variant_preference(conn, "base-v", configured)
-        assert result["preferred_variant"] == "thermo-v"
-        assert result["variant_type"] == "thermomix_native"
+        assert result["preferred_variant"] == preferred
+        assert result["resolution"] == resolution
+        if preferred is None:
+            assert "no linked variant is eligible" in result["detail"]
+        else:
+            assert result["variant_type"] == variant_type
     finally:
         conn.close()
 

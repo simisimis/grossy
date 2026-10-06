@@ -257,188 +257,167 @@ def test_edited_and_rechecksummed_proposal_cannot_be_applied(env: tuple[Path, Gr
         conn.close()
 
 
-def test_missing_checksum_field_rejected() -> None:
-    data = _proposal(_recipe_payload())
-    del data["checksum"]
-    with pytest.raises(RecipeImportError, match="missing field"):
-        validate_recipe_import(data)
-
-
-def test_unknown_top_level_field_rejected() -> None:
-    data = _proposal(_recipe_payload())
-    data["extra"] = 1
-    with pytest.raises(RecipeImportError, match="unknown field"):
-        validate_recipe_import(data)
-
-
-def test_unknown_nested_field_rejected() -> None:
-    recipe = _recipe_payload()
-    recipe["mystery"] = True
-    with pytest.raises(RecipeImportError, match="recipe-import proposal validation failed"):
-        validate_recipe_import(_proposal(recipe))
-
-
 # --- envelope, enums, and sanitization gates -----------------------------------
+
+
+def _envelope(**overrides: Any) -> dict[str, Any]:
+    """A proposal whose checksum is recomputed over the edited envelope.
+
+    This isolates each envelope gate: the checksum binding stays valid, so
+    only the specific diagnostic under test can reject the proposal.
+    """
+    return _proposal(_recipe_payload(), **overrides)
+
+
+@pytest.mark.parametrize(
+    "build, match",
+    [
+        pytest.param(lambda: _envelope(extra=1), "unknown field", id="unknown-top-level-field"),
+        pytest.param(
+            lambda: {k: v for k, v in _envelope().items() if k != "checksum"},
+            "missing field",
+            id="missing-checksum",
+        ),
+        pytest.param(
+            lambda: _envelope(schema_name="grossy.recipe.import.v2"),
+            "schema_name must be",
+            id="wrong-schema-name",
+        ),
+        pytest.param(
+            lambda: _envelope(schema_version=2), "schema_version must be 1", id="wrong-version"
+        ),
+        pytest.param(
+            lambda: _envelope(generated_at="2026-09-26T12:00:00"),
+            "timezone-aware",
+            id="naive-generated_at",
+        ),
+        pytest.param(
+            lambda: _envelope(generated_at="not-a-time"), "valid ISO 8601", id="bad-generated_at"
+        ),
+        pytest.param(
+            lambda: {**_envelope(), "checksum": "abc"}, "64-character hex", id="bad-checksum"
+        ),
+    ],
+)
+def test_envelope_violations_rejected(build: Any, match: str) -> None:
+    """Each envelope gate rejects with its own diagnostic, not the checksum fallback."""
+    with pytest.raises(RecipeImportError, match=match):
+        validate_recipe_import(build())
 
 
 @pytest.mark.parametrize(
     "mutation, match",
     [
-        (lambda d: d.update(schema_name="grossy.recipe.import.v2"), "schema_name must be"),
-        (lambda d: d.update(schema_version=2), "schema_version must be 1"),
-        (lambda d: d.update(generated_at="2026-09-26T12:00:00"), "timezone-aware"),
-        (lambda d: d.update(generated_at="not-a-time"), "valid ISO 8601"),
+        pytest.param(
+            lambda r: r.update(mystery=True),
+            "recipe-import proposal validation failed",
+            id="unknown-nested-field",
+        ),
+        pytest.param(
+            lambda r: r.update(steps=["<script>alert(1)</script>", "Normal step"]),
+            "prohibited content",
+            id="script-step",
+        ),
+        pytest.param(
+            lambda r: r["ingredients"][0].update(notes="use the bottle; SELECT * FROM secrets"),
+            "prohibited content",
+            id="sql-in-notes",
+        ),
+        pytest.param(
+            lambda r: r.update(protein_class="insect"),
+            "protein_class must be one of",
+            id="invalid-protein-class",
+        ),
+        pytest.param(
+            lambda r: r.update(source_tier="random_blog"),
+            "source_tier must be one of",
+            id="invalid-source-tier",
+        ),
+        pytest.param(
+            lambda r: r.update(appliances=[{"type": "toaster", "capability": "toasting"}]),
+            "appliance type must be one of",
+            id="invalid-appliance-type",
+        ),
+        pytest.param(
+            lambda r: r.update(
+                appliances=[
+                    {"type": "air_fryer", "capability": "air_frying", "capacity_constraint": 4.0}
+                ]
+            ),
+            "provided together",
+            id="capacity-without-unit",
+        ),
+        pytest.param(
+            lambda r: r.update(
+                variants=[{"linked_recipe_id": "other", "variant_type": "microwave"}]
+            ),
+            "variant_type must be one of",
+            id="invalid-variant-type",
+        ),
+        pytest.param(
+            lambda r: r["ingredients"][0].update(amount=0), "greater than 0", id="zero-amount"
+        ),
+        pytest.param(
+            lambda r: r["ingredients"][0].update(amount=float("inf")),
+            "ingredient amount",
+            id="non-finite-amount",
+        ),
+        pytest.param(lambda r: r.update(servings=0), "servings", id="zero-servings"),
+        pytest.param(
+            lambda r: r.update(ingredients=[]),
+            "between 1 and 50 ingredients",
+            id="no-ingredients",
+        ),
+        pytest.param(lambda r: r.update(steps=[]), "between 1 and 40 steps", id="no-steps"),
+        pytest.param(
+            lambda r: r.update(steps=["Mix everything.\nThen rest for ten minutes."]),
+            "must be a single line",
+            id="multiline-step",
+        ),
+        pytest.param(
+            lambda r: r.update(title="x" * 201), "title must be at most 200", id="overlong-title"
+        ),
+        pytest.param(
+            lambda r: r.update(steps=["y" * 401]),
+            "steps\\[0\\] must be at most 400",
+            id="overlong-step",
+        ),
+        pytest.param(
+            lambda r: r.update(is_favorite=True, is_regular=True),
+            "mutually exclusive",
+            id="favorite-and-regular",
+        ),
+        pytest.param(
+            lambda r: r.pop("reference_url"),
+            "recipe-import proposal validation failed",
+            id="missing-reference-url",
+        ),
+        pytest.param(
+            lambda r: r.update(reference_url="http://akispetretzikis.com/en/recipe/1"),
+            "must be an https URL",
+            id="http-reference-url",
+        ),
+        pytest.param(
+            lambda r: r.update(reference_url="https://akispetretzikis.com/en/recipe/1?ref=agent"),
+            "query or fragment",
+            id="query-in-reference-url",
+        ),
+        pytest.param(
+            lambda r: r.update(recipe_id="Air Fryer!"),
+            "recipe-import proposal validation failed",
+            id="invalid-recipe-id",
+        ),
+        pytest.param(
+            lambda r: r["ingredients"][0].update(package_size=250.0),
+            "provided together",
+            id="package-size-without-unit",
+        ),
     ],
 )
-def test_envelope_violations_rejected(mutation: Any, match: str) -> None:
-    data = _proposal(_recipe_payload())
-    mutation(data)
-    # Envelope edits invalidate the checksum binding too; either gate
-    # failing closed is the correct outcome for tampering.
-    with pytest.raises(RecipeImportError) as excinfo:
-        validate_recipe_import(data)
-    assert match in str(excinfo.value) or "checksum does not match" in str(excinfo.value)
-
-
-def test_bad_checksum_format_rejected() -> None:
-    data = _proposal(_recipe_payload())
-    data["checksum"] = "abc"
-    with pytest.raises(RecipeImportError, match="64-character hex"):
-        validate_recipe_import(data)
-
-
-def test_prohibited_content_rejected_in_steps() -> None:
+def test_recipe_violations_rejected(mutation: Any, match: str) -> None:
     recipe = _recipe_payload()
-    recipe["steps"] = ["<script>alert(1)</script>", "Normal step"]
-    with pytest.raises(RecipeImportError, match="prohibited content"):
-        validate_recipe_import(_proposal(recipe))
-
-
-def test_prohibited_content_rejected_in_ingredient_notes() -> None:
-    recipe = _recipe_payload()
-    recipe["ingredients"][0]["notes"] = "use the bottle; SELECT * FROM secrets"
-    with pytest.raises(RecipeImportError, match="prohibited content"):
-        validate_recipe_import(_proposal(recipe))
-
-
-def test_invalid_protein_class_rejected() -> None:
-    with pytest.raises(RecipeImportError, match="protein_class must be one of"):
-        validate_recipe_import(_proposal(_recipe_payload(protein_class="insect")))
-
-
-def test_invalid_source_tier_rejected() -> None:
-    with pytest.raises(RecipeImportError, match="source_tier must be one of"):
-        validate_recipe_import(_proposal(_recipe_payload(source_tier="random_blog")))
-
-
-def test_invalid_appliance_type_rejected() -> None:
-    recipe = _recipe_payload()
-    recipe["appliances"] = [{"type": "toaster", "capability": "toasting"}]
-    with pytest.raises(RecipeImportError, match="appliance type must be one of"):
-        validate_recipe_import(_proposal(recipe))
-
-
-def test_capacity_pairing_rejected() -> None:
-    recipe = _recipe_payload()
-    recipe["appliances"] = [
-        {"type": "air_fryer", "capability": "air_frying", "capacity_constraint": 4.0}
-    ]
-    with pytest.raises(RecipeImportError, match="provided together"):
-        validate_recipe_import(_proposal(recipe))
-
-
-def test_invalid_variant_type_rejected() -> None:
-    recipe = _recipe_payload()
-    recipe["variants"] = [{"linked_recipe_id": "other", "variant_type": "microwave"}]
-    with pytest.raises(RecipeImportError, match="variant_type must be one of"):
-        validate_recipe_import(_proposal(recipe))
-
-
-def test_non_positive_ingredient_amount_rejected() -> None:
-    recipe = _recipe_payload()
-    recipe["ingredients"][0]["amount"] = 0
-    with pytest.raises(RecipeImportError, match="greater than 0"):
-        validate_recipe_import(_proposal(recipe))
-
-
-def test_non_finite_ingredient_amount_rejected() -> None:
-    recipe = _recipe_payload()
-    recipe["ingredients"][0]["amount"] = float("inf")
-    with pytest.raises(RecipeImportError, match="ingredient amount"):
-        validate_recipe_import(_proposal(recipe))
-
-
-def test_zero_servings_rejected() -> None:
-    with pytest.raises(RecipeImportError, match="servings"):
-        validate_recipe_import(_proposal(_recipe_payload(servings=0)))
-
-
-def test_no_ingredients_rejected() -> None:
-    with pytest.raises(RecipeImportError, match="between 1 and 50 ingredients"):
-        validate_recipe_import(_proposal(_recipe_payload(ingredients=[])))
-
-
-def test_no_steps_rejected() -> None:
-    with pytest.raises(RecipeImportError, match="between 1 and 40 steps"):
-        validate_recipe_import(_proposal(_recipe_payload(steps=[])))
-
-
-def test_sourced_step_must_be_single_line() -> None:
-    recipe = _recipe_payload()
-    recipe["steps"] = ["Mix everything.\nThen rest for ten minutes."]
-    with pytest.raises(RecipeImportError, match="must be a single line"):
-        validate_recipe_import(_proposal(recipe))
-
-
-def test_overlong_title_rejected() -> None:
-    with pytest.raises(RecipeImportError, match="title must be at most 200"):
-        validate_recipe_import(_proposal(_recipe_payload(title="x" * 201)))
-
-
-def test_overlong_sourced_step_rejected() -> None:
-    recipe = _recipe_payload()
-    recipe["steps"] = ["y" * 401]
-    with pytest.raises(RecipeImportError, match="steps\\[0\\] must be at most 400"):
-        validate_recipe_import(_proposal(recipe))
-
-
-def test_favorite_and_regular_conflict_rejected() -> None:
-    with pytest.raises(RecipeImportError, match="mutually exclusive"):
-        validate_recipe_import(_proposal(_recipe_payload(is_favorite=True, is_regular=True)))
-
-
-def test_reference_url_required_for_url_import() -> None:
-    recipe = _recipe_payload()
-    del recipe["reference_url"]
-    with pytest.raises(RecipeImportError, match="recipe-import proposal validation failed"):
-        validate_recipe_import(_proposal(recipe))
-
-
-def test_http_reference_url_rejected() -> None:
-    with pytest.raises(RecipeImportError, match="must be an https URL"):
-        validate_recipe_import(
-            _proposal(_recipe_payload(reference_url="http://akispetretzikis.com/en/recipe/1"))
-        )
-
-
-def test_reference_url_with_query_rejected() -> None:
-    with pytest.raises(RecipeImportError, match="query or fragment"):
-        validate_recipe_import(
-            _proposal(
-                _recipe_payload(reference_url="https://akispetretzikis.com/en/recipe/1?ref=agent")
-            )
-        )
-
-
-def test_invalid_recipe_id_rejected() -> None:
-    with pytest.raises(RecipeImportError, match="recipe-import proposal validation failed"):
-        validate_recipe_import(_proposal(_recipe_payload(recipe_id="Air Fryer!")))
-
-
-def test_package_size_without_unit_rejected() -> None:
-    recipe = _recipe_payload()
-    recipe["ingredients"][0]["package_size"] = 250.0
-    with pytest.raises(RecipeImportError, match="provided together"):
+    mutation(recipe)
+    with pytest.raises(RecipeImportError, match=match):
         validate_recipe_import(_proposal(recipe))
 
 

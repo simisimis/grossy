@@ -194,6 +194,18 @@ def _preview_path(paths: GrossyPaths) -> Path:
     return paths.state_dir / "refresh_previews" / "test-recipe.json"
 
 
+def _diff(
+    tmp_path: Path, paths: GrossyPaths, payload: dict[str, Any] | None = None
+) -> tuple[Path, dict[str, Any]]:
+    """Write a refresh proposal and run the diff preview; return (path, diff dict)."""
+    path = _write_json(tmp_path, _refresh_proposal(payload or _refresh_payload()), "refresh.json")
+    return path, run_refresh_diff_with_paths(path, paths).to_dict()
+
+
+UNCHANGED_INGREDIENTS = _recipe_payload()["ingredients"]
+UNCHANGED_STEPS = _recipe_payload()["steps"]
+
+
 # --- refresh proposal validation -------------------------------------------------
 
 
@@ -240,9 +252,7 @@ def test_refresh_proposal_rejects_tampered_checksum() -> None:
 
 def test_refresh_diff_reports_changes(env: tuple[Path, GrossyPaths]) -> None:
     tmp_path, paths = env
-    refresh_path = _write_json(tmp_path, _refresh_proposal(_refresh_payload()), "refresh.json")
-    result = run_refresh_diff_with_paths(refresh_path, paths)
-    diff = result.to_dict()
+    _, diff = _diff(tmp_path, paths)
 
     assert diff["schema_name"] == "grossy.recipe.refresh-diff"
     assert diff["status"] == "preview"
@@ -261,129 +271,224 @@ def test_refresh_diff_reports_changes(env: tuple[Path, GrossyPaths]) -> None:
     assert diff["next_revision_number"] == 2
 
 
-def test_refresh_diff_reports_appliance_constraint_changes(env: tuple[Path, GrossyPaths]) -> None:
-    """Appliance diff reports changes to model/capacity constraints (FR-78).
-
-    The current recipe has ``stovetop/searing`` with no constraints. A refresh
-    that adds a model constraint must produce a visible appliance diff. Uses
-    the unchanged builder so only the intended constraint change appears.
-    """
-    tmp_path, paths = env
-    payload = _unchanged_refresh_payload(
-        appliances=[
-            {"type": "stovetop", "capability": "searing", "model_constraint": "induction"},
-        ]
-    )
-    refresh_path = _write_json(tmp_path, _refresh_proposal(payload), "refresh.json")
-    result = run_refresh_diff_with_paths(refresh_path, paths)
-    diff = result.to_dict()
-
-    # The complete diff must contain exactly the one appliance change — no
-    # spurious recipe/ingredient/step/provenance changes.
-    assert diff["has_changes"] is True
-    assert diff["changes"] == {
-        "appliances": [
-            {
-                "action": "changed",
-                "type": "stovetop",
-                "capability": "searing",
-                "fields": {"model_constraint": {"old": None, "new": "induction"}},
-            }
-        ]
+def _appliance_row(**fields: Any) -> dict[str, Any]:
+    return {
+        "type": "stovetop",
+        "capability": "searing",
+        "model_constraint": None,
+        "capacity_constraint": None,
+        "capacity_unit": None,
+        **fields,
     }
 
 
-def test_refresh_diff_appliance_capacity_constraint_change(env: tuple[Path, GrossyPaths]) -> None:
-    """A capacity_constraint change on an existing appliance is reported.
+GARLIC_INPUT = {"name": "garlic", "amount": 3.0, "unit": "cloves", "indivisible": True}
+GARLIC_ROW = {
+    "name": "garlic",
+    "amount": 3.0,
+    "unit": "cloves",
+    "pantry_eligible": False,
+    "indivisible": True,
+    "package_unit": None,
+    "package_size": None,
+    "notes": None,
+}
 
-    Uses the unchanged builder so only the intended constraint change appears
-    in the diff (no spurious title/ingredient/step/provenance entries).
-    """
+
+@pytest.mark.parametrize(
+    "overrides,expected_changes",
+    [
+        pytest.param(
+            {
+                "appliances": [
+                    {"type": "stovetop", "capability": "searing", "model_constraint": "induction"}
+                ]
+            },
+            {
+                "appliances": [
+                    {
+                        "action": "changed",
+                        "type": "stovetop",
+                        "capability": "searing",
+                        "fields": {"model_constraint": {"old": None, "new": "induction"}},
+                    }
+                ]
+            },
+            id="model-constraint-changed",
+        ),
+        pytest.param(
+            {
+                "appliances": [
+                    {
+                        "type": "stovetop",
+                        "capability": "searing",
+                        "capacity_constraint": 5.0,
+                        "capacity_unit": "liters",
+                    }
+                ]
+            },
+            {
+                "appliances": [
+                    {
+                        "action": "changed",
+                        "type": "stovetop",
+                        "capability": "searing",
+                        "fields": {
+                            "capacity_constraint": {"old": None, "new": 5.0},
+                            "capacity_unit": {"old": None, "new": "liters"},
+                        },
+                    }
+                ]
+            },
+            id="capacity-constraint-changed",
+        ),
+        pytest.param(
+            {"appliances": [{"type": "pressure_cooker", "capability": "pressure_cooking"}]},
+            {
+                "appliances": [
+                    {
+                        "action": "added",
+                        "type": "pressure_cooker",
+                        "capability": "pressure_cooking",
+                        "new": _appliance_row(
+                            type="pressure_cooker", capability="pressure_cooking"
+                        ),
+                    },
+                    {
+                        "action": "removed",
+                        "type": "stovetop",
+                        "capability": "searing",
+                        "old": _appliance_row(),
+                    },
+                ]
+            },
+            id="appliance-added-and-removed",
+        ),
+        # P2 (FR-78): duplicates are compared by multiplicity, never collapsed.
+        pytest.param(
+            {"ingredients": [*UNCHANGED_INGREDIENTS, {**UNCHANGED_INGREDIENTS[2]}]},
+            {"ingredients": [{"action": "added", "name": "garlic", "new": GARLIC_ROW}]},
+            id="duplicate-ingredient-added",
+        ),
+        pytest.param(
+            {
+                "appliances": [
+                    {"type": "stovetop", "capability": "searing"},
+                    {"type": "stovetop", "capability": "searing"},
+                ]
+            },
+            {
+                "appliances": [
+                    {
+                        "action": "added",
+                        "type": "stovetop",
+                        "capability": "searing",
+                        "new": _appliance_row(),
+                    }
+                ]
+            },
+            id="duplicate-appliance-added",
+        ),
+        pytest.param(
+            {
+                "appliances": [
+                    {"type": "stovetop", "capability": "searing"},
+                    {"type": "stovetop", "capability": "searing", "model_constraint": "induction"},
+                ]
+            },
+            {
+                "appliances": [
+                    {
+                        "action": "added",
+                        "type": "stovetop",
+                        "capability": "searing",
+                        "new": _appliance_row(model_constraint="induction"),
+                    }
+                ]
+            },
+            id="duplicate-appliance-with-constraint-added",
+        ),
+        # P2 (FR-78): a provenance-only change is visible, never silently applied.
+        pytest.param(
+            {"provenance": "manual-import"},
+            {"provenance": {"old": "url-import", "new": "manual-import"}},
+            id="provenance-only",
+        ),
+    ],
+)
+def test_refresh_diff_reports_exactly_the_changed_facts(
+    env: tuple[Path, GrossyPaths], overrides: dict[str, Any], expected_changes: dict[str, Any]
+) -> None:
+    """FR-78: starting from the imported content, the diff contains exactly the
+    intended change and no spurious recipe/ingredient/step/provenance entries."""
     tmp_path, paths = env
-    payload = _unchanged_refresh_payload(
-        appliances=[
-            {
-                "type": "stovetop",
-                "capability": "searing",
-                "capacity_constraint": 5.0,
-                "capacity_unit": "liters",
-            },
-        ]
-    )
-    refresh_path = _write_json(tmp_path, _refresh_proposal(payload), "refresh.json")
-    result = run_refresh_diff_with_paths(refresh_path, paths)
-    diff = result.to_dict()
-
-    # The complete diff must contain exactly the one appliance change — no
-    # spurious recipe/ingredient/step/provenance changes.
+    _, diff = _diff(tmp_path, paths, _unchanged_refresh_payload(**overrides))
     assert diff["has_changes"] is True
-    assert diff["changes"] == {
-        "appliances": [
+    assert diff["changes"] == expected_changes
+
+
+@pytest.mark.parametrize(
+    "imported,refreshed,expected_changes",
+    [
+        pytest.param(
             {
-                "action": "changed",
-                "type": "stovetop",
-                "capability": "searing",
-                "fields": {
-                    "capacity_constraint": {"old": None, "new": 5.0},
-                    "capacity_unit": {"old": None, "new": "liters"},
-                },
-            }
-        ]
-    }
-
-
-def test_refresh_diff_appliance_add_and_remove(env: tuple[Path, GrossyPaths]) -> None:
-    """Adding and removing appliance entries produce correct diff actions.
-
-    Replaces the imported stovetop/searing with a pressure_cooker/pressure_cooking,
-    exercising both removal and addition in a single diff.
-    """
-    tmp_path, paths = env
-    # Remove stovetop, add pressure_cooker.
-    payload = _unchanged_refresh_payload(
-        appliances=[
-            {"type": "pressure_cooker", "capability": "pressure_cooking"},
-        ]
+                "ingredients": [
+                    UNCHANGED_INGREDIENTS[0],
+                    GARLIC_INPUT,
+                    {**GARLIC_INPUT, "amount": 5.0},
+                ]
+            },
+            {"ingredients": [UNCHANGED_INGREDIENTS[0], GARLIC_INPUT]},
+            {
+                "ingredients": [
+                    {"action": "removed", "name": "garlic", "old": {**GARLIC_ROW, "amount": 5.0}}
+                ]
+            },
+            id="existing-duplicate-ingredient-removed",
+        ),
+        pytest.param(
+            {
+                "appliances": [
+                    {"type": "stovetop", "capability": "searing"},
+                    {"type": "stovetop", "capability": "searing", "model_constraint": "induction"},
+                ]
+            },
+            {"appliances": [{"type": "stovetop", "capability": "searing"}]},
+            {
+                "appliances": [
+                    {
+                        "action": "removed",
+                        "type": "stovetop",
+                        "capability": "searing",
+                        "old": _appliance_row(model_constraint="induction"),
+                    }
+                ]
+            },
+            id="existing-duplicate-appliance-removed",
+        ),
+    ],
+)
+def test_refresh_diff_compares_existing_duplicates_by_multiplicity(
+    tmp_path: Path,
+    imported: dict[str, Any],
+    refreshed: dict[str, Any],
+    expected_changes: dict[str, Any],
+) -> None:
+    """FR-78: duplicate rows stored by an earlier import are diffed row by row."""
+    paths = GrossyPaths(
+        config_dir=tmp_path / "config" / "grossy",
+        data_dir=tmp_path / "data" / "grossy",
+        state_dir=tmp_path / "state" / "grossy",
     )
-    refresh_path = _write_json(tmp_path, _refresh_proposal(payload), "refresh.json")
-    result = run_refresh_diff_with_paths(refresh_path, paths)
-    diff = result.to_dict()
-
+    do_init(paths)
+    import_path = _write_json(
+        tmp_path, _import_proposal(_recipe_payload(**imported)), "import.json"
+    )
+    checksum = run_import_validate(import_path).to_dict()["proposal_checksum"]
+    run_import_apply(import_path, checksum, paths)
+    _, diff = _diff(tmp_path, paths, _unchanged_refresh_payload(**refreshed))
     assert diff["has_changes"] is True
-    # assert the complete expected changes mapping — full old/new row
-    # fields including constraints — so a spurious extra change or a wrong
-    # nested constraint value fails the test.
-    expected_changes = {
-        "appliances": [
-            {
-                "action": "added",
-                "type": "pressure_cooker",
-                "capability": "pressure_cooking",
-                "new": {
-                    "type": "pressure_cooker",
-                    "capability": "pressure_cooking",
-                    "model_constraint": None,
-                    "capacity_constraint": None,
-                    "capacity_unit": None,
-                },
-            },
-            {
-                "action": "removed",
-                "type": "stovetop",
-                "capability": "searing",
-                "old": {
-                    "type": "stovetop",
-                    "capability": "searing",
-                    "model_constraint": None,
-                    "capacity_constraint": None,
-                    "capacity_unit": None,
-                },
-            },
-        ]
-    }
-    assert diff["changes"] == expected_changes, (
-        f"appliance add/remove diff must be exactly {expected_changes}, got {diff['changes']}"
-    )
+    assert diff["changes"] == expected_changes
 
 
 def test_refresh_diff_unknown_recipe(env: tuple[Path, GrossyPaths]) -> None:
@@ -413,82 +518,44 @@ def test_refresh_diff_requires_database(env: tuple[Path, GrossyPaths]) -> None:
 # --- refresh apply (FR-79) -----------------------------------------------------------
 
 
-def test_refresh_apply_creates_new_revision(env: tuple[Path, GrossyPaths]) -> None:
-    """Refresh apply creates a new revision using the diff-returned checksum.
-
-    Merges the checksum-binding assertion: the apply accepts exactly the
-    checksum the diff preview returned (FR-78), and the result carries it.
-    """
+def test_refresh_apply_creates_revision_and_retains_historical_snapshot(
+    env: tuple[Path, GrossyPaths],
+) -> None:
+    """FR-78/79/80: apply accepts exactly the previewed checksum, appends an
+    immutable revision and leaves the prior revision snapshot (including its
+    identity fields) byte-identical."""
     tmp_path, paths = env
-    refresh_path = _write_json(tmp_path, _refresh_proposal(_refresh_payload()), "refresh.json")
-    # The diff preview returns the checksum apply must be given (FR-78).
-    diff = run_refresh_diff_with_paths(refresh_path, paths).to_dict()
+    old_snapshot = _current_snapshot(paths)
+    payload = _refresh_payload(
+        title="Completely Different Title", source_tier="akis_petretzikis", protein_class="meat"
+    )
+    refresh_path, diff = _diff(tmp_path, paths, payload)
     checksum = str(diff["proposal_checksum"])
 
     result = run_refresh_apply(refresh_path, checksum, paths)
     assert result.recipe_id == "test-recipe"
     assert result.revision_number == 2
-    # The result carries the exact checksum from the diff preview.
     assert result.checksum == checksum
 
-    # Verify the new revision exists.
-    conn = _db(paths)
-    try:
-        revisions = list_revisions(conn, "test-recipe")
-        assert len(revisions) == 2
-        assert revisions[0]["revision_number"] == 1
-        assert revisions[1]["revision_number"] == 2
-        # The new revision has the updated content.
-        assert revisions[1]["servings"] == 3.0
-    finally:
-        conn.close()
-
-
-def test_refresh_apply_retains_historical_snapshot(env: tuple[Path, GrossyPaths]) -> None:
-    """FR-80: Historical planner runs retain their exact recipe-revision snapshots.
-
-    Captures the full old revision snapshot before the refresh and asserts
-    byte-level equality after the apply. The new revision must have different
-    content, proving the old snapshot was not mutated in place.
-    """
-    tmp_path, paths = env
-
-    # Capture the full old snapshot BEFORE the refresh.
-    conn = _db(paths)
-    try:
-        orig_revision_id = conn.execute(
-            "SELECT r.id FROM recipe_revisions r "
-            "JOIN recipes p ON p.id = r.recipe_id "
-            "WHERE p.recipe_id = 'test-recipe' "
-            "ORDER BY r.revision_number ASC LIMIT 1"
-        ).fetchone()[0]
-        old_snapshot_before = get_revision_snapshot(conn, orig_revision_id)
-    finally:
-        conn.close()
-
-    # Refresh with changed content (title, servings, ingredients, steps, provenance).
-    refresh_path = _write_json(tmp_path, _refresh_proposal(_refresh_payload()), "refresh.json")
-    diff = run_refresh_diff_with_paths(refresh_path, paths).to_dict()
-    result = run_refresh_apply(refresh_path, str(diff["proposal_checksum"]), paths)
-
-    # Assert the old snapshot is byte-for-byte identical after the refresh.
-    conn = _db(paths)
-    try:
-        old_snapshot_after = get_revision_snapshot(conn, orig_revision_id)
-        assert old_snapshot_after == old_snapshot_before, (
-            "historical revision snapshot was mutated by refresh; "
-            f"before={old_snapshot_before}, after={old_snapshot_after}"
-        )
-        # The new revision has the updated content.
+    with closing(_db(paths)) as conn:
+        assert [r["revision_number"] for r in list_revisions(conn, "test-recipe")] == [1, 2]
+        assert get_revision_snapshot(conn, old_snapshot["revision_id"]) == old_snapshot
         new_snapshot = get_revision_snapshot(conn, result.revision_id)
-        assert new_snapshot["servings"] == 3.0
-        assert new_snapshot["total_time_minutes"] == 35
-        assert len(new_snapshot["ingredients"]) == 4
-        # The new revision is distinct from the old one.
-        assert new_snapshot["servings"] != old_snapshot_before["servings"]
-        assert new_snapshot["steps"] != old_snapshot_before["steps"]
-    finally:
-        conn.close()
+    assert (old_snapshot["title"], old_snapshot["source_tier"], old_snapshot["protein_class"]) == (
+        "Test Recipe",
+        "approved_established",
+        "poultry",
+    )
+    assert (new_snapshot["title"], new_snapshot["source_tier"], new_snapshot["protein_class"]) == (
+        "Completely Different Title",
+        "akis_petretzikis",
+        "meat",
+    )
+    assert new_snapshot["servings"] == 3.0
+    assert new_snapshot["total_time_minutes"] == 35
+    assert len(new_snapshot["ingredients"]) == 4
+    assert new_snapshot["steps"] != old_snapshot["steps"]
+    assert _current_snapshot(paths)["revision_id"] == result.revision_id
 
 
 def test_refresh_apply_preserves_linked_variant_snapshot(
@@ -631,17 +698,17 @@ def test_refresh_apply_requires_accepted_checksum(env: tuple[Path, GrossyPaths])
         run_refresh_apply(refresh_path, "0" * 64, paths)
 
 
-def test_refresh_apply_unknown_recipe_fails(env: tuple[Path, GrossyPaths]) -> None:
-    """Apply fails for an unknown recipe (no preview possible for nonexistent)."""
+@pytest.mark.parametrize("recipe_id", ["test-recipe", "nonexistent"], ids=["known", "unknown"])
+def test_refresh_apply_requires_prior_preview(
+    env: tuple[Path, GrossyPaths], recipe_id: str
+) -> None:
+    """FR-78: apply is rejected when no refresh-diff preview was persisted, for a
+    known recipe and for one that could never have been previewed."""
     tmp_path, paths = env
     refresh_path = _write_json(
-        tmp_path,
-        _refresh_proposal(_refresh_payload(recipe_id="nonexistent")),
-        "refresh.json",
+        tmp_path, _refresh_proposal(_refresh_payload(recipe_id=recipe_id)), "refresh.json"
     )
-    data = json.loads(refresh_path.read_text(encoding="utf-8"))
-    checksum = data["checksum"]
-    # A nonexistent recipe cannot have a preview; FR-78 rejects it.
+    checksum = json.loads(refresh_path.read_text(encoding="utf-8"))["checksum"]
     with pytest.raises(RecipeRefreshError, match="no matching persisted preview"):
         run_refresh_apply(refresh_path, checksum, paths)
 
@@ -790,65 +857,6 @@ def test_cli_refresh_apply_wrong_checksum_rejected(cli_home: tuple[Path, GrossyP
     assert result.exit_code == 1
     assert json.loads(result.stdout)["status"] == "error"
     assert _recipe_rows(paths.database_file) == before
-
-
-# --- FR-78 preview enforcement --------------------------------------------------
-
-
-def test_refresh_apply_requires_prior_preview(env: tuple[Path, GrossyPaths]) -> None:
-    """FR-78: apply is rejected when no refresh-diff preview was performed."""
-    tmp_path, paths = env
-    refresh_path = _write_json(tmp_path, _refresh_proposal(_refresh_payload()), "refresh.json")
-    data = json.loads(refresh_path.read_text(encoding="utf-8"))
-    checksum = data["checksum"]
-    # No refresh-diff called: apply must be rejected
-    with pytest.raises(RecipeRefreshError, match="no matching persisted preview"):
-        run_refresh_apply(refresh_path, checksum, paths)
-
-
-def test_revision_snapshot_retains_identity_fields(env: tuple[Path, GrossyPaths]) -> None:
-    """FR-79/80: historical revision snapshots retain title, source_tier, protein_class.
-
-    After a refresh changes these fields, the old revision's snapshot must
-    still report the original values (not the post-refresh values).
-    """
-    tmp_path, paths = env
-    # The imported recipe has title="Test Recipe", source_tier="approved_established",
-    # protein_class="poultry".
-
-    # Refresh with a changed title, source_tier, and protein_class
-    payload = _refresh_payload(
-        title="Completely Different Title",
-        source_tier="akis_petretzikis",
-        protein_class="meat",
-    )
-    refresh_path = _write_json(tmp_path, _refresh_proposal(payload), "refresh.json")
-    run_refresh_diff_with_paths(refresh_path, paths)
-    data = json.loads(refresh_path.read_text(encoding="utf-8"))
-    checksum = data["checksum"]
-    result = run_refresh_apply(refresh_path, checksum, paths)
-
-    conn = _db(paths)
-    try:
-        # Original revision must retain its identity fields
-        orig_revision_id = conn.execute(
-            "SELECT r.id FROM recipe_revisions r "
-            "JOIN recipes p ON p.id = r.recipe_id "
-            "WHERE p.recipe_id = 'test-recipe' "
-            "ORDER BY r.revision_number ASC LIMIT 1"
-        ).fetchone()[0]
-        old_snapshot = get_revision_snapshot(conn, orig_revision_id)
-        assert old_snapshot["title"] == "Test Recipe"
-        assert old_snapshot["source_tier"] == "approved_established"
-        assert old_snapshot["protein_class"] == "poultry"
-
-        # New revision has the updated identity fields
-        new_snapshot = get_revision_snapshot(conn, result.revision_id)
-        assert new_snapshot["title"] == "Completely Different Title"
-        assert new_snapshot["source_tier"] == "akis_petretzikis"
-        assert new_snapshot["protein_class"] == "meat"
-    finally:
-        conn.close()
 
 
 # --- schema-v6 refresh-diff upgrade regression (task 08 fix) -------------------
@@ -1102,331 +1110,6 @@ def test_cli_refresh_diff_failed_backup_verification_reports_no_verified_backup(
     assert new_backups.pop().read_bytes() == corrupt_bytes
     assert _recipe_rows(paths.database_file) == before
     assert not _preview_path(paths).exists()
-
-
-# --- ingredient duplicate multiplicity (P2 fix: FR-78) ------------------------
-
-
-def test_refresh_diff_duplicate_only_change_is_visible(env: tuple[Path, GrossyPaths]) -> None:
-    """adding a duplicate ingredient is visible in the diff.
-
-    The current revision has a single ``garlic``. A refresh that is otherwise
-    identical (including matching provenance) but adds a second identical
-    ``garlic`` must produce exactly one ingredient diff entry: the duplicate
-    addition. No other field may appear in the changes mapping.
-    """
-    tmp_path, paths = env
-    payload = _unchanged_refresh_payload(
-        ingredients=[
-            {"name": "chicken breast", "amount": 500.0, "unit": "g"},
-            {"name": "olive oil", "amount": 2.0, "unit": "tbsp", "pantry_eligible": True},
-            {"name": "garlic", "amount": 3.0, "unit": "cloves", "indivisible": True},
-            {"name": "garlic", "amount": 3.0, "unit": "cloves", "indivisible": True},
-        ],
-    )
-    refresh_path = _write_json(tmp_path, _refresh_proposal(payload), "refresh.json")
-    diff = run_refresh_diff_with_paths(refresh_path, paths).to_dict()
-
-    assert diff["has_changes"] is True
-    # Assert the complete expected changes value, including every row field.
-    expected_changes = {
-        "ingredients": [
-            {
-                "action": "added",
-                "name": "garlic",
-                "new": {
-                    "name": "garlic",
-                    "amount": 3.0,
-                    "unit": "cloves",
-                    "pantry_eligible": False,
-                    "indivisible": True,
-                    "package_unit": None,
-                    "package_size": None,
-                    "notes": None,
-                },
-            }
-        ]
-    }
-    assert diff["changes"] == expected_changes, (
-        f"duplicate ingredient diff must be exactly {expected_changes}, got {diff['changes']}"
-    )
-
-
-def test_refresh_diff_existing_imported_duplicate_change_is_visible(
-    tmp_path: Path,
-) -> None:
-    """imported duplicate ingredients are compared by multiplicity.
-
-    The import schema permits repeated ingredient names and an existing
-    revision stores them. A refresh that removes one of two ``garlic`` rows
-    (differing in amount) must report the removed row rather than collapsing
-    the duplicates into a single entry (FR-78).
-    """
-    paths = GrossyPaths(
-        config_dir=tmp_path / "config" / "grossy",
-        data_dir=tmp_path / "data" / "grossy",
-        state_dir=tmp_path / "state" / "grossy",
-    )
-    do_init(paths)
-    dup_recipe = _recipe_payload(
-        ingredients=[
-            {"name": "chicken breast", "amount": 500.0, "unit": "g"},
-            {"name": "garlic", "amount": 3.0, "unit": "cloves", "indivisible": True},
-            {"name": "garlic", "amount": 5.0, "unit": "cloves", "indivisible": True},
-        ],
-    )
-    import_path = _write_json(tmp_path, _import_proposal(dup_recipe), "import.json")
-    checksum = run_import_validate(import_path).to_dict()["proposal_checksum"]
-    run_import_apply(import_path, checksum, paths)
-
-    # Refresh that removes one of the two garlic rows (the 5-clove one).
-    # Provenance must match the imported recipe ("url-import") to avoid
-    # a spurious provenance diff ('otherwise identical').
-    payload = _refresh_payload(
-        title="Test Recipe",
-        reference_url="https://example.com/recipe/test",
-        total_time_minutes=30,
-        servings=2.0,
-        steps=[
-            "Season the chicken with salt and pepper",
-            "Sear in olive oil until golden, 5 minutes per side",
-            "Add garlic and cook for 2 minutes",
-        ],
-        ingredients=[
-            {"name": "chicken breast", "amount": 500.0, "unit": "g"},
-            {"name": "garlic", "amount": 3.0, "unit": "cloves", "indivisible": True},
-        ],
-        provenance="url-import",
-    )
-    refresh_path = _write_json(tmp_path, _refresh_proposal(payload), "refresh.json")
-    diff = run_refresh_diff_with_paths(refresh_path, paths).to_dict()
-
-    assert diff["has_changes"] is True
-    # Assert the complete expected changes value for the removed duplicate.
-    expected_changes = {
-        "ingredients": [
-            {
-                "action": "removed",
-                "name": "garlic",
-                "old": {
-                    "name": "garlic",
-                    "amount": 5.0,
-                    "unit": "cloves",
-                    "pantry_eligible": False,
-                    "indivisible": True,
-                    "package_unit": None,
-                    "package_size": None,
-                    "notes": None,
-                },
-            }
-        ]
-    }
-    got = diff["changes"]
-    assert got == expected_changes, (
-        f"removed dup ingredient diff: expected {expected_changes}, got {got}"
-    )
-
-
-# --- appliance duplicate multiplicity (P2 fix: FR-78) ------------------------
-
-
-def test_refresh_diff_duplicate_appliance_proposal_is_visible(
-    env: tuple[Path, GrossyPaths],
-) -> None:
-    """adding a duplicate appliance is visible in the diff.
-
-    The current revision has a single ``stovetop/searing`` appliance. A
-    refresh that is otherwise identical (including matching provenance) but
-    adds a second identical ``stovetop/searing`` must produce exactly one
-    appliance diff entry: the duplicate addition.
-    """
-    tmp_path, paths = env
-    payload = _unchanged_refresh_payload(
-        appliances=[
-            {"type": "stovetop", "capability": "searing"},
-            {"type": "stovetop", "capability": "searing"},
-        ],
-    )
-    refresh_path = _write_json(tmp_path, _refresh_proposal(payload), "refresh.json")
-    diff = run_refresh_diff_with_paths(refresh_path, paths).to_dict()
-
-    assert diff["has_changes"] is True
-    # Assert the complete expected changes value for the duplicate appliance.
-    expected_changes = {
-        "appliances": [
-            {
-                "action": "added",
-                "type": "stovetop",
-                "capability": "searing",
-                "new": {
-                    "type": "stovetop",
-                    "capability": "searing",
-                    "model_constraint": None,
-                    "capacity_constraint": None,
-                    "capacity_unit": None,
-                },
-            }
-        ]
-    }
-    assert diff["changes"] == expected_changes, (
-        f"duplicate appliance diff must be exactly {expected_changes}, got {diff['changes']}"
-    )
-
-
-def test_refresh_diff_duplicate_appliance_with_constraints_is_visible(
-    env: tuple[Path, GrossyPaths],
-) -> None:
-    """adding a duplicate with different constraints is visible.
-
-    The current revision has a single ``stovetop/searing`` with no
-    constraints. A refresh (matching provenance) that adds a second
-    ``stovetop/searing`` with a model constraint must produce exactly one
-    appliance diff entry: the constrained addition.
-    """
-    tmp_path, paths = env
-    payload = _unchanged_refresh_payload(
-        appliances=[
-            {"type": "stovetop", "capability": "searing"},
-            {"type": "stovetop", "capability": "searing", "model_constraint": "induction"},
-        ],
-    )
-    refresh_path = _write_json(tmp_path, _refresh_proposal(payload), "refresh.json")
-    diff = run_refresh_diff_with_paths(refresh_path, paths).to_dict()
-
-    assert diff["has_changes"] is True
-    # Assert the complete expected changes value for the constrained addition.
-    expected_changes = {
-        "appliances": [
-            {
-                "action": "added",
-                "type": "stovetop",
-                "capability": "searing",
-                "new": {
-                    "type": "stovetop",
-                    "capability": "searing",
-                    "model_constraint": "induction",
-                    "capacity_constraint": None,
-                    "capacity_unit": None,
-                },
-            }
-        ]
-    }
-    assert diff["changes"] == expected_changes, (
-        f"constrained appliance diff must be exactly {expected_changes}, got {diff['changes']}"
-    )
-
-
-def test_refresh_diff_existing_duplicate_appliance_removed_is_visible(
-    tmp_path: Path,
-) -> None:
-    """existing duplicate appliances are compared by multiplicity.
-
-    The imported recipe has two ``stovetop/searing`` rows (one with a model
-    constraint). A refresh that removes the constrained one must report it as
-    "removed" rather than collapsing the duplicates (FR-78).
-    """
-    paths = GrossyPaths(
-        config_dir=tmp_path / "config" / "grossy",
-        data_dir=tmp_path / "data" / "grossy",
-        state_dir=tmp_path / "state" / "grossy",
-    )
-    do_init(paths)
-    dup_recipe = _recipe_payload(
-        appliances=[
-            {"type": "stovetop", "capability": "searing"},
-            {"type": "stovetop", "capability": "searing", "model_constraint": "induction"},
-        ],
-    )
-    import_path = _write_json(tmp_path, _import_proposal(dup_recipe), "import.json")
-    checksum = run_import_validate(import_path).to_dict()["proposal_checksum"]
-    run_import_apply(import_path, checksum, paths)
-
-    # Refresh that keeps only the unconstrained stovetop/searing.
-    # Provenance must match the imported recipe ("url-import").
-    payload = _refresh_payload(
-        title="Test Recipe",
-        reference_url="https://example.com/recipe/test",
-        total_time_minutes=30,
-        servings=2.0,
-        ingredients=[
-            {"name": "chicken breast", "amount": 500.0, "unit": "g"},
-            {"name": "olive oil", "amount": 2.0, "unit": "tbsp", "pantry_eligible": True},
-            {"name": "garlic", "amount": 3.0, "unit": "cloves", "indivisible": True},
-        ],
-        steps=[
-            "Season the chicken with salt and pepper",
-            "Sear in olive oil until golden, 5 minutes per side",
-            "Add garlic and cook for 2 minutes",
-        ],
-        appliances=[
-            {"type": "stovetop", "capability": "searing"},
-        ],
-        provenance="url-import",
-    )
-    refresh_path = _write_json(tmp_path, _refresh_proposal(payload), "refresh.json")
-    diff = run_refresh_diff_with_paths(refresh_path, paths).to_dict()
-
-    assert diff["has_changes"] is True
-    # Assert the complete expected changes value for the removed appliance.
-    expected_changes = {
-        "appliances": [
-            {
-                "action": "removed",
-                "type": "stovetop",
-                "capability": "searing",
-                "old": {
-                    "type": "stovetop",
-                    "capability": "searing",
-                    "model_constraint": "induction",
-                    "capacity_constraint": None,
-                    "capacity_unit": None,
-                },
-            }
-        ]
-    }
-    got = diff["changes"]
-    assert got == expected_changes, (
-        f"removed dup appliance diff: expected {expected_changes}, got {got}"
-    )
-
-
-# --- provenance-only change (P2 fix: FR-78) --------------------------------
-
-
-def test_refresh_diff_provenance_only_change_is_visible(
-    env: tuple[Path, GrossyPaths],
-) -> None:
-    """a provenance-only change is visible in the diff.
-
-    A refresh that is otherwise identical to the current recipe but differs
-    only in the provenance field must produce a non-empty diff (FR-78):
-    the provenance change must not be silently applied without visibility.
-    """
-    tmp_path, paths = env
-    payload = _refresh_payload(
-        title="Test Recipe",
-        reference_url="https://example.com/recipe/test",
-        total_time_minutes=30,
-        servings=2.0,
-        ingredients=[
-            {"name": "chicken breast", "amount": 500.0, "unit": "g"},
-            {"name": "olive oil", "amount": 2.0, "unit": "tbsp", "pantry_eligible": True},
-            {"name": "garlic", "amount": 3.0, "unit": "cloves", "indivisible": True},
-        ],
-        steps=[
-            "Season the chicken with salt and pepper",
-            "Sear in olive oil until golden, 5 minutes per side",
-            "Add garlic and cook for 2 minutes",
-        ],
-        provenance="manual-import",
-    )
-    refresh_path = _write_json(tmp_path, _refresh_proposal(payload), "refresh.json")
-    diff = run_refresh_diff_with_paths(refresh_path, paths).to_dict()
-
-    assert diff["has_changes"] is True
-    assert "provenance" in diff["changes"]
-    assert diff["changes"]["provenance"]["old"] == "url-import"
-    assert diff["changes"]["provenance"]["new"] == "manual-import"
 
 
 # --- stale preview rejection (P2 fix: FR-78) --------------------------------

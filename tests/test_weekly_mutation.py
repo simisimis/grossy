@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 import yaml
+from test_weekly_recipes import proposal as empty_recipe_options
 from typer.testing import CliRunner
 
 from grossy.browser.mutation import AdditiveCartAdapter, apply_recurring
@@ -472,14 +473,7 @@ def test_blacklist_change_after_preflight_and_writer_lock_reject_intent(home: Gr
 
 def test_fr129_gate_zero_completion_and_legacy_snapshot_retry(home: GrossyPaths) -> None:
     run_id = prepare(home, {"111": 5, "222": 2, "999": 8})
-    body = {
-        "schema_name": "grossy.weekly.recipe-options.v1",
-        "schema_version": 1,
-        "generated_at": now(),
-        "run_id": run_id,
-        "matches": [],
-    }
-    proposal = {**body, "checksum": proposal_checksum(body)}
+    proposal = empty_recipe_options(run_id)
     with pytest.raises(WeeklyPlanError, match="recurring"):
         run_recipes_apply(home, run_id, proposal)
     fake = FakeAdditiveCart(home, {"111": 5, "222": 2, "999": 8})
@@ -665,14 +659,7 @@ def test_consumed_intent_cannot_replay_and_new_preflight_invalidates_completion(
     run_recurring_intent(home, run_id, manifest)
     with pytest.raises(WeeklyPlanError, match="consumed"):
         run_recurring_intent(home, run_id, manifest)
-    body = {
-        "schema_name": "grossy.weekly.recipe-options.v1",
-        "schema_version": 1,
-        "generated_at": now(),
-        "run_id": run_id,
-        "matches": [],
-    }
-    proposal = {**body, "checksum": proposal_checksum(body)}
+    proposal = empty_recipe_options(run_id)
     # A new acceptance cannot reuse the older completion marker.
     current = observation({"111": 5, "222": 2, "999": 8})
     new = run_recurring_preflight(home, run_id, current)["manifest"]
@@ -791,14 +778,7 @@ def test_recipe_preview_credits_verified_recurring_additions_and_preserves_basel
     from grossy.weekly.mutation import run_advance
 
     run_advance(home, run_id, observation(fake.quantities))
-    body = {
-        "schema_name": "grossy.weekly.recipe-options.v1",
-        "schema_version": 1,
-        "generated_at": now(),
-        "run_id": run_id,
-        "matches": [],
-    }
-    proposal = {**body, "checksum": proposal_checksum(body)}
+    proposal = empty_recipe_options(run_id)
     result = run_recipes_apply(home, run_id, proposal)
     preview = result["recipe_slots"][0]["preview"]
     ingredient = preview["ingredients"][0]

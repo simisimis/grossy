@@ -27,21 +27,11 @@ class TestWriterLock:
         with WriterLock(tmp_path):
             pass
 
-    def test_lock_prevents_concurrent_writers(self, tmp_path: Path) -> None:
-        """PRD 13.6: process lock prevents concurrent writers."""
-        lock1 = WriterLock(tmp_path)
-        with lock1:
-            # Second lock on same path should fail.
-            lock2 = WriterLock(tmp_path)
-            with pytest.raises(LockHeldError):
-                lock2.__enter__()
-
-    def test_lock_held_error_includes_pid(self, tmp_path: Path) -> None:
-        lock1 = WriterLock(tmp_path)
-        with lock1:
-            lock2 = WriterLock(tmp_path)
+    def test_held_lock_rejects_second_writer_with_holder_pid(self, tmp_path: Path) -> None:
+        """PRD 13.6: process lock prevents concurrent writers and names the holder."""
+        with WriterLock(tmp_path):
             with pytest.raises(LockHeldError) as exc_info:
-                lock2.__enter__()
+                WriterLock(tmp_path).__enter__()
             assert exc_info.value.holder_pid == os.getpid()
 
     def test_lock_released_on_exception(self, tmp_path: Path) -> None:
@@ -52,17 +42,12 @@ class TestWriterLock:
         with WriterLock(tmp_path):
             pass
 
-    def test_lock_file_created_in_state_dir(self, tmp_path: Path) -> None:
-        lock = WriterLock(tmp_path / "state")
-        with lock:
-            assert lock.lock_path == tmp_path / "state" / "writer.lock"
-            assert lock.lock_path.exists()
-
-    def test_lock_creates_parent_directory(self, tmp_path: Path) -> None:
-        """The lock should create the state directory if it doesn't exist."""
+    def test_lock_file_lives_in_created_state_dir(self, tmp_path: Path) -> None:
+        """The lock creates a missing state directory and lives at writer.lock inside it."""
         state_dir = tmp_path / "deep" / "state"
         assert not state_dir.exists()
         lock = WriterLock(state_dir)
         with lock:
-            pass
+            assert lock.lock_path == state_dir / "writer.lock"
+            assert lock.lock_path.exists()
         assert state_dir.exists()

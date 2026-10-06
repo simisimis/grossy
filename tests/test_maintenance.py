@@ -215,38 +215,6 @@ class TestSetPrimary:
         finally:
             c.close()
 
-    def test_set_primary_not_a_member_fails(self, tmp_env: tuple[Path, GrossyPaths]) -> None:
-        _, paths = tmp_env
-        # Product "200" is not a member of "fam-100" yet.
-        with pytest.raises(MaintenanceError, match="not a member"):
-            run_set_primary(paths, "fam-100", "200")
-
-    def test_set_primary_unknown_family_fails(self, tmp_env: tuple[Path, GrossyPaths]) -> None:
-        _, paths = tmp_env
-        with pytest.raises(MaintenanceError, match="unknown family"):
-            run_set_primary(paths, "nonexistent", "100")
-
-    def test_set_primary_unknown_product_rejected(self, tmp_env: tuple[Path, GrossyPaths]) -> None:
-        """Early validation: an unknown product is rejected before any write."""
-        _, paths = tmp_env
-        c = open_connection(paths.database_file)
-        try:
-            before = c.execute(
-                "SELECT product_id, role FROM family_members "
-                "WHERE family_id = (SELECT id FROM product_families WHERE family_id = 'fam-100') "
-                "ORDER BY product_id"
-            ).fetchall()
-            with pytest.raises(MaintenanceError, match="unknown product"):
-                run_set_primary(paths, "fam-100", "999")  # unknown product
-            after = c.execute(
-                "SELECT product_id, role FROM family_members "
-                "WHERE family_id = (SELECT id FROM product_families WHERE family_id = 'fam-100') "
-                "ORDER BY product_id"
-            ).fetchall()
-            assert before == after
-        finally:
-            c.close()
-
     def test_set_primary_rolls_back_after_state_update_when_audit_fails(
         self, tmp_env: tuple[Path, GrossyPaths], monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -318,16 +286,6 @@ class TestSetRecurrence:
         finally:
             c.close()
 
-    def test_set_recurrence_invalid_weeks_fails(self, tmp_env: tuple[Path, GrossyPaths]) -> None:
-        _, paths = tmp_env
-        with pytest.raises(MaintenanceError, match="positive integer"):
-            run_set_recurrence(paths, "fam-100", 0)
-
-    def test_set_recurrence_unknown_family_fails(self, tmp_env: tuple[Path, GrossyPaths]) -> None:
-        _, paths = tmp_env
-        with pytest.raises(MaintenanceError, match="unknown family"):
-            run_set_recurrence(paths, "nonexistent", 2)
-
 
 # --- set-quantity --------------------------------------------------------------
 
@@ -378,165 +336,79 @@ class TestSetQuantity:
         finally:
             c.close()
 
-    def test_set_quantity_invalid_fails(self, tmp_env: tuple[Path, GrossyPaths]) -> None:
-        _, paths = tmp_env
-        with pytest.raises(MaintenanceError, match="positive integer"):
-            run_set_quantity(paths, "100", 0)
-
-    def test_set_quantity_unknown_target_fails(self, tmp_env: tuple[Path, GrossyPaths]) -> None:
-        _, paths = tmp_env
-        with pytest.raises(MaintenanceError, match="unknown product or family"):
-            run_set_quantity(paths, "nonexistent", 3)
-
 
 # --- enable / disable ----------------------------------------------------------
 
 
 class TestEnableDisable:
-    def test_disable_family(self, tmp_env: tuple[Path, GrossyPaths]) -> None:
+    def test_disable_then_enable_family(self, tmp_env: tuple[Path, GrossyPaths]) -> None:
         _, paths = tmp_env
+        enabled_sql = "SELECT enabled FROM product_families WHERE family_id = 'fam-100'"
         result = run_disable(paths, "fam-100")
-        assert result["status"] == "success"
-        assert result["enabled"] is False
-
+        assert result["status"] == "success" and result["enabled"] is False
         c = open_connection(paths.database_file)
         try:
-            row = c.execute(
-                "SELECT enabled FROM product_families WHERE family_id = 'fam-100'"
-            ).fetchone()
-            assert row is not None
-            assert row[0] == 0
+            assert c.execute(enabled_sql).fetchone() == (0,)
+            result = run_enable(paths, "fam-100")
+            assert result["status"] == "success" and result["enabled"] is True
+            assert c.execute(enabled_sql).fetchone() == (1,)
         finally:
             c.close()
-
-    def test_enable_family(self, tmp_env: tuple[Path, GrossyPaths]) -> None:
-        _, paths = tmp_env
-        run_disable(paths, "fam-100")
-        result = run_enable(paths, "fam-100")
-        assert result["status"] == "success"
-        assert result["enabled"] is True
-
-        c = open_connection(paths.database_file)
-        try:
-            row = c.execute(
-                "SELECT enabled FROM product_families WHERE family_id = 'fam-100'"
-            ).fetchone()
-            assert row is not None
-            assert row[0] == 1
-        finally:
-            c.close()
-
-    def test_disable_unknown_family_fails(self, tmp_env: tuple[Path, GrossyPaths]) -> None:
-        _, paths = tmp_env
-        with pytest.raises(MaintenanceError, match="unknown family"):
-            run_disable(paths, "nonexistent")
 
 
 # --- blacklist / unblacklist ---------------------------------------------------
 
 
 class TestBlacklist:
-    def test_blacklist_product(self, tmp_env: tuple[Path, GrossyPaths]) -> None:
+    @pytest.mark.parametrize(
+        "blacklist,unblacklist,target_type,target_id,table,column",
+        [
+            (
+                run_blacklist_product,
+                run_unblacklist_product,
+                "product",
+                "100",
+                "products",
+                "retailer_product_id",
+            ),
+            (
+                run_blacklist_family,
+                run_unblacklist_family,
+                "family",
+                "fam-100",
+                "product_families",
+                "family_id",
+            ),
+        ],
+        ids=["product", "family"],
+    )
+    def test_blacklist_round_trip_persists_state_and_ordered_events(
+        self,
+        tmp_env: tuple[Path, GrossyPaths],
+        blacklist: Any,
+        unblacklist: Any,
+        target_type: str,
+        target_id: str,
+        table: str,
+        column: str,
+    ) -> None:
         _, paths = tmp_env
-        result = run_blacklist_product(paths, "100")
-        assert result["status"] == "success"
-        assert result["blacklisted"] is True
-
+        state_sql = f"SELECT blacklist_state FROM {table} WHERE {column} = ?"
+        result = blacklist(paths, target_id)
+        assert result["status"] == "success" and result["blacklisted"] is True
         c = open_connection(paths.database_file)
         try:
-            row = c.execute(
-                "SELECT blacklist_state FROM products WHERE retailer_product_id = '100'"
-            ).fetchone()
-            assert row is not None
-            assert row[0] == "blacklisted"
-
-            # Event is recorded.
-            event = c.execute(
-                "SELECT target_type, target_id, action FROM blacklist_events "
-                "WHERE target_id = '100' AND action = 'blacklist'"
-            ).fetchone()
-            assert event is not None
-            assert event[0] == "product"
+            assert c.execute(state_sql, (target_id,)).fetchone() == ("blacklisted",)
+            result = unblacklist(paths, target_id)
+            assert result["status"] == "success" and result["blacklisted"] is False
+            assert c.execute(state_sql, (target_id,)).fetchone() == ("active",)
+            assert c.execute(
+                "SELECT action FROM blacklist_events WHERE target_type = ? AND target_id = ? "
+                "ORDER BY id",
+                (target_type, target_id),
+            ).fetchall() == [("blacklist",), ("unblacklist",)]
         finally:
             c.close()
-
-    def test_blacklist_family(self, tmp_env: tuple[Path, GrossyPaths]) -> None:
-        _, paths = tmp_env
-        result = run_blacklist_family(paths, "fam-100")
-        assert result["status"] == "success"
-        assert result["blacklisted"] is True
-
-        c = open_connection(paths.database_file)
-        try:
-            row = c.execute(
-                "SELECT blacklist_state FROM product_families WHERE family_id = 'fam-100'"
-            ).fetchone()
-            assert row is not None
-            assert row[0] == "blacklisted"
-        finally:
-            c.close()
-
-    def test_unblacklist_product(self, tmp_env: tuple[Path, GrossyPaths]) -> None:
-        _, paths = tmp_env
-        run_blacklist_product(paths, "100")
-        result = run_unblacklist_product(paths, "100")
-        assert result["status"] == "success"
-        assert result["blacklisted"] is False
-
-        c = open_connection(paths.database_file)
-        try:
-            row = c.execute(
-                "SELECT blacklist_state FROM products WHERE retailer_product_id = '100'"
-            ).fetchone()
-            assert row is not None
-            assert row[0] == "active"
-
-            # Two events: blacklist then unblacklist.
-            events = c.execute(
-                "SELECT action FROM blacklist_events WHERE target_id = '100' ORDER BY id"
-            ).fetchall()
-            assert len(events) == 2
-            assert events[0][0] == "blacklist"
-            assert events[1][0] == "unblacklist"
-        finally:
-            c.close()
-
-    def test_unblacklist_family(self, tmp_env: tuple[Path, GrossyPaths]) -> None:
-        _, paths = tmp_env
-        run_blacklist_family(paths, "fam-100")
-        result = run_unblacklist_family(paths, "fam-100")
-        assert result["status"] == "success"
-        assert result["blacklisted"] is False
-
-        c = open_connection(paths.database_file)
-        try:
-            # Durable family state is active again.
-            row = c.execute(
-                "SELECT blacklist_state FROM product_families WHERE family_id = 'fam-100'"
-            ).fetchone()
-            assert row is not None
-            assert row[0] == "active"
-
-            # Ordered family blacklist/unblacklist events are recorded.
-            events = c.execute(
-                "SELECT action FROM blacklist_events "
-                "WHERE target_type = 'family' AND target_id = 'fam-100' ORDER BY id"
-            ).fetchall()
-            assert len(events) == 2
-            assert events[0][0] == "blacklist"
-            assert events[1][0] == "unblacklist"
-        finally:
-            c.close()
-
-    def test_blacklist_unknown_product_fails(self, tmp_env: tuple[Path, GrossyPaths]) -> None:
-        _, paths = tmp_env
-        with pytest.raises(MaintenanceError, match="unknown product"):
-            run_blacklist_product(paths, "nonexistent")
-
-    def test_blacklist_unknown_family_fails(self, tmp_env: tuple[Path, GrossyPaths]) -> None:
-        _, paths = tmp_env
-        with pytest.raises(MaintenanceError, match="unknown family"):
-            run_blacklist_family(paths, "nonexistent")
 
     def test_product_blacklist_blocks_selection(self, tmp_env: tuple[Path, GrossyPaths]) -> None:
         """A blacklisted product is not selected for a due family (FR-65)."""
@@ -594,21 +466,6 @@ class TestFamilyLinkUnlinkMerge:
         finally:
             c.close()
 
-    def test_family_link_already_member_fails(self, tmp_env: tuple[Path, GrossyPaths]) -> None:
-        _, paths = tmp_env
-        with pytest.raises(MaintenanceError, match="already"):
-            run_family_link(paths, "100", "fam-100")
-
-    def test_family_link_unknown_product_fails(self, tmp_env: tuple[Path, GrossyPaths]) -> None:
-        _, paths = tmp_env
-        with pytest.raises(MaintenanceError, match="unknown product"):
-            run_family_link(paths, "nonexistent", "fam-100")
-
-    def test_family_link_unknown_family_fails(self, tmp_env: tuple[Path, GrossyPaths]) -> None:
-        _, paths = tmp_env
-        with pytest.raises(MaintenanceError, match="unknown family"):
-            run_family_link(paths, "100", "nonexistent")
-
     def test_family_unlink_success(self, tmp_env: tuple[Path, GrossyPaths]) -> None:
         _, paths = tmp_env
         # Link "200" into "fam-100" first.
@@ -627,11 +484,6 @@ class TestFamilyLinkUnlinkMerge:
             assert row is None
         finally:
             c.close()
-
-    def test_family_unlink_unknown_product_fails(self, tmp_env: tuple[Path, GrossyPaths]) -> None:
-        _, paths = tmp_env
-        with pytest.raises(MaintenanceError, match="unknown product"):
-            run_family_unlink(paths, "999")
 
     def test_family_unlink_sole_member_deletes_family(
         self, tmp_env: tuple[Path, GrossyPaths]
@@ -671,49 +523,6 @@ class TestFamilyLinkUnlinkMerge:
             assert row[0] == "alternative"
         finally:
             c.close()
-
-    def test_family_merge_same_family_fails(self, tmp_env: tuple[Path, GrossyPaths]) -> None:
-        _, paths = tmp_env
-        with pytest.raises(MaintenanceError, match="must differ"):
-            run_family_merge(paths, "fam-100", "fam-100")
-
-    def test_family_merge_unknown_source_fails(self, tmp_env: tuple[Path, GrossyPaths]) -> None:
-        """An invalid merge leaves state unchanged."""
-        _, paths = tmp_env
-        c = open_connection(paths.database_file)
-        try:
-            families_before = c.execute(
-                "SELECT family_id FROM product_families ORDER BY family_id"
-            ).fetchall()
-            members_before = c.execute(
-                "SELECT family_id, product_id, role FROM family_members ORDER BY product_id"
-            ).fetchall()
-            overrides_before = c.execute("SELECT * FROM manual_overrides ORDER BY id").fetchall()
-            events_before = c.execute("SELECT * FROM blacklist_events ORDER BY id").fetchall()
-            with pytest.raises(MaintenanceError, match="unknown family"):
-                run_family_merge(paths, "nonexistent", "fam-100")
-            families_after = c.execute(
-                "SELECT family_id FROM product_families ORDER BY family_id"
-            ).fetchall()
-            members_after = c.execute(
-                "SELECT family_id, product_id, role FROM family_members ORDER BY product_id"
-            ).fetchall()
-            assert families_before == families_after
-            assert members_before == members_after
-            assert (
-                c.execute("SELECT * FROM manual_overrides ORDER BY id").fetchall()
-                == overrides_before
-            )
-            assert (
-                c.execute("SELECT * FROM blacklist_events ORDER BY id").fetchall() == events_before
-            )
-        finally:
-            c.close()
-
-    def test_family_merge_unknown_target_fails(self, tmp_env: tuple[Path, GrossyPaths]) -> None:
-        _, paths = tmp_env
-        with pytest.raises(MaintenanceError, match="unknown family"):
-            run_family_merge(paths, "fam-100", "nonexistent")
 
     def test_family_merge_rolls_back_after_moves_when_audit_fails(
         self, tmp_env: tuple[Path, GrossyPaths], monkeypatch: pytest.MonkeyPatch
@@ -805,16 +614,6 @@ class TestSetCategory:
         finally:
             c.close()
 
-    def test_set_category_unknown_target_fails(self, tmp_env: tuple[Path, GrossyPaths]) -> None:
-        _, paths = tmp_env
-        with pytest.raises(MaintenanceError, match="unknown product or family"):
-            run_set_category(paths, "nonexistent", "Breakfast")
-
-    def test_set_category_empty_name_fails(self, tmp_env: tuple[Path, GrossyPaths]) -> None:
-        _, paths = tmp_env
-        with pytest.raises(MaintenanceError, match="must not be empty"):
-            run_set_category(paths, "100", "  ")
-
     def test_set_category_misc_rejected(self, tmp_env: tuple[Path, GrossyPaths]) -> None:
         """No-misc rule (PRD 7.3 / FR-37): a `misc` category is never created,
         even by manual assignment. The product keeps its existing category
@@ -896,28 +695,6 @@ class TestCategoryRename:
         finally:
             c.close()
 
-    def test_category_rename_unknown_old_fails(self, tmp_env: tuple[Path, GrossyPaths]) -> None:
-        _, paths = tmp_env
-        with pytest.raises(MaintenanceError, match="unknown category"):
-            run_category_rename(paths, "nonexistent", "New")
-
-    def test_category_rename_conflict_fails(self, tmp_env: tuple[Path, GrossyPaths]) -> None:
-        _, paths = tmp_env
-        # Create a second category first.
-        run_set_category(paths, "200", "Bakery")
-        with pytest.raises(MaintenanceError, match="already exists"):
-            run_category_rename(paths, "dairy", "bakery")
-
-    def test_category_rename_same_name_fails(self, tmp_env: tuple[Path, GrossyPaths]) -> None:
-        _, paths = tmp_env
-        with pytest.raises(MaintenanceError, match="must differ"):
-            run_category_rename(paths, "dairy", "dairy")
-
-    def test_category_rename_empty_fails(self, tmp_env: tuple[Path, GrossyPaths]) -> None:
-        _, paths = tmp_env
-        with pytest.raises(MaintenanceError, match="must not be empty"):
-            run_category_rename(paths, "  ", "New")
-
 
 # --- override auditability --------------------------------------------------------
 
@@ -988,158 +765,84 @@ class TestOverrideAuditability:
 
 
 class TestSyncPreservation:
-    def test_sync_does_not_clear_product_blacklist(self, tmp_env: tuple[Path, GrossyPaths]) -> None:
-        """A later sync does not clear a product blacklist (FR-68) and continues
-        recording historical appearances of blacklisted products (FR-67)."""
-        _, paths = tmp_env
-        run_blacklist_product(paths, "100")
-        _apply_sync_order(paths, "10003", "2026-09-15", ["100"])
+    """FR-68: no later synchronization clears a correction or blacklist."""
 
-        c = open_connection(paths.database_file)
-        try:
-            row = c.execute(
-                "SELECT blacklist_state FROM products WHERE retailer_product_id = '100'"
-            ).fetchone()
-            assert row is not None
-            assert row[0] == "blacklisted"
-            # The product's purchase_order_count should have increased.
-            row = c.execute(
-                "SELECT purchase_order_count FROM products WHERE retailer_product_id = '100'"
-            ).fetchone()
-            assert row is not None
-            assert row[0] == 3  # was 2, now 3 after the new order.
-        finally:
-            c.close()
-
-    def test_sync_does_not_clear_family_blacklist(self, tmp_env: tuple[Path, GrossyPaths]) -> None:
-        """A later sync does not clear a family blacklist (FR-68)."""
-        _, paths = tmp_env
-        run_blacklist_family(paths, "fam-100")
-        _apply_sync_order(paths, "10003", "2026-09-15", ["100"])
-
-        c = open_connection(paths.database_file)
-        try:
-            row = c.execute(
-                "SELECT blacklist_state FROM product_families WHERE family_id = 'fam-100'"
-            ).fetchone()
-            assert row is not None
-            assert row[0] == "blacklisted"
-        finally:
-            c.close()
-
-    def test_sync_does_not_overwrite_manual_recurrence(
-        self, tmp_env: tuple[Path, GrossyPaths]
-    ) -> None:
-        """A later sync does not overwrite a manually set recurrence (FR-68)."""
-        _, paths = tmp_env
-        run_set_recurrence(paths, "fam-100", 4)
-        _apply_sync_order(paths, "10003", "2026-09-22", ["100"])
-
-        c = open_connection(paths.database_file)
-        try:
-            row = c.execute(
+    @pytest.mark.parametrize(
+        "correct,sql,expected",
+        [
+            pytest.param(
+                lambda p: run_blacklist_product(p, "100"),
+                "SELECT blacklist_state, purchase_order_count FROM products "
+                "WHERE retailer_product_id = '100'",
+                ("blacklisted", 3),  # FR-67: appearances keep counting (2 -> 3)
+                id="product-blacklist",
+            ),
+            pytest.param(
+                lambda p: run_blacklist_family(p, "fam-100"),
+                "SELECT blacklist_state FROM product_families WHERE family_id = 'fam-100'",
+                ("blacklisted",),
+                id="family-blacklist",
+            ),
+            pytest.param(
+                lambda p: run_set_recurrence(p, "fam-100", 4),
                 "SELECT recurrence_weeks, recurrence_source FROM product_families "
-                "WHERE family_id = 'fam-100'"
-            ).fetchone()
-            assert row is not None
-            assert row[0] == 4
-            assert row[1] == "manual"
-        finally:
-            c.close()
-
-    def test_sync_does_not_overwrite_manual_category(
-        self, tmp_env: tuple[Path, GrossyPaths]
-    ) -> None:
-        """A later sync does not overwrite a manually set category (FR-38, FR-68)."""
-        _, paths = tmp_env
-        run_set_category(paths, "100", "Custom Category")
-        _apply_sync_order(paths, "10003", "2026-09-15", ["100"], category="Bakery")
-
-        c = open_connection(paths.database_file)
-        try:
-            row = c.execute(
-                "SELECT c.name FROM products p "
-                "JOIN categories c ON c.id = p.category_id "
-                "WHERE p.retailer_product_id = '100'"
-            ).fetchone()
-            assert row is not None
-            assert row[0] == "custom category"
-        finally:
-            c.close()
-
-    def test_sync_does_not_overwrite_manual_quantity(
-        self, tmp_env: tuple[Path, GrossyPaths]
-    ) -> None:
-        """A later sync does not overwrite a manually set quantity (FR-35, FR-68)."""
-        _, paths = tmp_env
-        run_set_quantity(paths, "100", 9)
-        _apply_sync_order(paths, "10003", "2026-09-15", ["100"])
-
-        c = open_connection(paths.database_file)
-        try:
-            row = c.execute(
-                "SELECT typical_quantity FROM products WHERE retailer_product_id = '100'"
-            ).fetchone()
-            assert row is not None
-            assert row[0] == 9
-        finally:
-            c.close()
-
-    def test_sync_does_not_overwrite_manual_primary(
-        self, tmp_env: tuple[Path, GrossyPaths]
-    ) -> None:
-        """A later sync does not recalculate or promote the primary (FR-44, FR-68)."""
-        _, paths = tmp_env
-        run_family_link(paths, "200", "fam-100")
-        run_set_primary(paths, "fam-100", "200")  # primary is now "200", not "100"
-        _apply_sync_order(paths, "10003", "2026-09-15", ["100"])
-
-        c = open_connection(paths.database_file)
-        try:
-            row = c.execute(
+                "WHERE family_id = 'fam-100'",
+                (4, "manual"),
+                id="manual-recurrence",
+            ),
+            pytest.param(
+                lambda p: run_set_category(p, "100", "Custom Category"),
+                "SELECT c.name FROM products p JOIN categories c ON c.id = p.category_id "
+                "WHERE p.retailer_product_id = '100'",
+                ("custom category",),
+                id="manual-product-category",
+            ),
+            pytest.param(
+                lambda p: run_set_quantity(p, "100", 9),
+                "SELECT typical_quantity FROM products WHERE retailer_product_id = '100'",
+                (9,),
+                id="manual-quantity",
+            ),
+            pytest.param(
+                lambda p: (
+                    run_family_link(p, "200", "fam-100"),
+                    run_set_primary(p, "fam-100", "200"),
+                ),
                 "SELECT p.retailer_product_id FROM family_members m "
                 "JOIN products p ON p.id = m.product_id "
                 "WHERE m.family_id = (SELECT id FROM product_families WHERE family_id = 'fam-100') "
-                "AND m.role = 'primary'"
-            ).fetchone()
-            assert row is not None
-            assert row[0] == "200"
-        finally:
-            c.close()
-
-    def test_sync_does_not_overwrite_manual_family_category(
-        self, tmp_env: tuple[Path, GrossyPaths]
+                "AND m.role = 'primary'",
+                ("200",),
+                id="manual-primary",
+            ),
+            pytest.param(
+                lambda p: run_set_category(p, "fam-100", "Household"),
+                "SELECT c.name FROM product_families f JOIN categories c ON c.id = f.category_id "
+                "WHERE f.family_id = 'fam-100'",
+                ("household",),
+                id="manual-family-category",
+            ),
+            pytest.param(
+                lambda p: run_disable(p, "fam-100"),
+                "SELECT enabled FROM product_families WHERE family_id = 'fam-100'",
+                (0,),
+                id="disabled-state",
+            ),
+        ],
+    )
+    def test_correction_survives_later_sync(
+        self,
+        tmp_env: tuple[Path, GrossyPaths],
+        correct: Any,
+        sql: str,
+        expected: tuple[Any, ...],
     ) -> None:
-        """A later sync does not overwrite a manually set family category (FR-40, FR-68)."""
         _, paths = tmp_env
-        run_set_category(paths, "fam-100", "Household")
+        correct(paths)
         _apply_sync_order(paths, "10003", "2026-09-15", ["100"], category="Bakery")
-
         c = open_connection(paths.database_file)
         try:
-            row = c.execute(
-                "SELECT c.name FROM product_families f "
-                "JOIN categories c ON c.id = f.category_id "
-                "WHERE f.family_id = 'fam-100'"
-            ).fetchone()
-            assert row is not None
-            assert row[0] == "household"
-        finally:
-            c.close()
-
-    def test_sync_does_not_clear_disabled_state(self, tmp_env: tuple[Path, GrossyPaths]) -> None:
-        """A later sync does not re-enable a disabled family (FR-68)."""
-        _, paths = tmp_env
-        run_disable(paths, "fam-100")
-        _apply_sync_order(paths, "10003", "2026-09-15", ["100"])
-
-        c = open_connection(paths.database_file)
-        try:
-            row = c.execute(
-                "SELECT enabled FROM product_families WHERE family_id = 'fam-100'"
-            ).fetchone()
-            assert row is not None
-            assert row[0] == 0
+            assert c.execute(sql).fetchone() == expected
         finally:
             c.close()
 
@@ -1270,42 +973,31 @@ class TestRationaleAuditability:
 
 
 class TestCategoryNormalization:
-    def test_whitespace_collapse_in_set_category(self, tmp_env: tuple[Path, GrossyPaths]) -> None:
-        """Multiple internal spaces are collapsed to one (consistent with sync)."""
+    @pytest.mark.parametrize(
+        "raw,normalized",
+        [("Dairy   Products", "dairy products"), ("Snacks\tAnd\nDrinks", "snacks and drinks")],
+        ids=["multiple-spaces", "tabs-and-newlines"],
+    )
+    def test_whitespace_collapse_in_set_category(
+        self, tmp_env: tuple[Path, GrossyPaths], raw: str, normalized: str
+    ) -> None:
+        """All internal whitespace collapses to one space (consistent with sync)."""
         _, paths = tmp_env
-        run_set_category(paths, "100", "Dairy   Products")
-
+        assert run_set_category(paths, "100", raw)["category"] == normalized
         c = open_connection(paths.database_file)
         try:
-            row = c.execute("SELECT name FROM categories WHERE name = 'dairy products'").fetchone()
-            assert row is not None
+            assert c.execute("SELECT 1 FROM categories WHERE name = ?", (normalized,)).fetchone()
         finally:
             c.close()
 
     def test_whitespace_collapse_in_rename(self, tmp_env: tuple[Path, GrossyPaths]) -> None:
         """Rename uses the same whitespace-collapsing normalizer."""
         _, paths = tmp_env
-        # First create a category with multiple spaces.
         run_set_category(paths, "100", "Bread   Products")
-        # Now rename it (the normalizer will collapse spaces).
         result = run_category_rename(paths, "Bread   Products", "Grain Items")
         assert result["status"] == "success"
         assert result["old_name"] == "bread products"
         assert result["new_name"] == "grain items"
-
-    def test_tab_and_newline_collapsed(self, tmp_env: tuple[Path, GrossyPaths]) -> None:
-        """Tabs and newlines are treated as whitespace and collapsed."""
-        _, paths = tmp_env
-        run_set_category(paths, "100", "Snacks\tAnd\nDrinks")
-
-        c = open_connection(paths.database_file)
-        try:
-            row = c.execute(
-                "SELECT name FROM categories WHERE name = 'snacks and drinks'"
-            ).fetchone()
-            assert row is not None
-        finally:
-            c.close()
 
 
 # --- category rename persistence through sync ----------------------------------
@@ -1783,6 +1475,181 @@ class TestYamlPolicyBoundary:
             assert result.disabled_references == ()
         finally:
             c.close()
+
+
+def _maintenance_state(paths: GrossyPaths) -> dict[str, list[Any]]:
+    c = open_connection(paths.database_file)
+    try:
+        return {
+            table: c.execute(f"SELECT * FROM {table} ORDER BY 1").fetchall()
+            for table in (
+                "products",
+                "product_families",
+                "family_members",
+                "categories",
+                "manual_overrides",
+                "blacklist_events",
+            )
+        }
+    finally:
+        c.close()
+
+
+@pytest.mark.parametrize(
+    "setup,request_call,match",
+    [
+        pytest.param(
+            None,
+            lambda p: run_set_primary(p, "fam-100", "200"),
+            "not a member",
+            id="set-primary-not-member",
+        ),
+        pytest.param(
+            None,
+            lambda p: run_set_primary(p, "nonexistent", "100"),
+            "unknown family",
+            id="set-primary-unknown-family",
+        ),
+        pytest.param(
+            None,
+            lambda p: run_set_primary(p, "fam-100", "999"),
+            "unknown product",
+            id="set-primary-unknown-product",
+        ),
+        pytest.param(
+            None,
+            lambda p: run_set_recurrence(p, "fam-100", 0),
+            "positive integer",
+            id="set-recurrence-zero",
+        ),
+        pytest.param(
+            None,
+            lambda p: run_set_recurrence(p, "nonexistent", 2),
+            "unknown family",
+            id="set-recurrence-unknown-family",
+        ),
+        pytest.param(
+            None,
+            lambda p: run_set_quantity(p, "100", 0),
+            "positive integer",
+            id="set-quantity-zero",
+        ),
+        pytest.param(
+            None,
+            lambda p: run_set_quantity(p, "nonexistent", 3),
+            "unknown product or family",
+            id="set-quantity-unknown",
+        ),
+        pytest.param(
+            None,
+            lambda p: run_disable(p, "nonexistent"),
+            "unknown family",
+            id="disable-unknown-family",
+        ),
+        pytest.param(
+            None,
+            lambda p: run_blacklist_product(p, "nonexistent"),
+            "unknown product",
+            id="blacklist-unknown-product",
+        ),
+        pytest.param(
+            None,
+            lambda p: run_blacklist_family(p, "nonexistent"),
+            "unknown family",
+            id="blacklist-unknown-family",
+        ),
+        pytest.param(
+            None,
+            lambda p: run_family_link(p, "100", "fam-100"),
+            "already",
+            id="link-already-member",
+        ),
+        pytest.param(
+            None,
+            lambda p: run_family_link(p, "nonexistent", "fam-100"),
+            "unknown product",
+            id="link-unknown-product",
+        ),
+        pytest.param(
+            None,
+            lambda p: run_family_link(p, "100", "nonexistent"),
+            "unknown family",
+            id="link-unknown-family",
+        ),
+        pytest.param(
+            None,
+            lambda p: run_family_unlink(p, "999"),
+            "unknown product",
+            id="unlink-unknown-product",
+        ),
+        pytest.param(
+            None,
+            lambda p: run_family_merge(p, "fam-100", "fam-100"),
+            "must differ",
+            id="merge-same-family",
+        ),
+        pytest.param(
+            None,
+            lambda p: run_family_merge(p, "nonexistent", "fam-100"),
+            "unknown family",
+            id="merge-unknown-source",
+        ),
+        pytest.param(
+            None,
+            lambda p: run_family_merge(p, "fam-100", "nonexistent"),
+            "unknown family",
+            id="merge-unknown-target",
+        ),
+        pytest.param(
+            None,
+            lambda p: run_set_category(p, "nonexistent", "Breakfast"),
+            "unknown product or family",
+            id="set-category-unknown",
+        ),
+        pytest.param(
+            None,
+            lambda p: run_set_category(p, "100", "  "),
+            "must not be empty",
+            id="set-category-empty",
+        ),
+        pytest.param(
+            None,
+            lambda p: run_category_rename(p, "nonexistent", "New"),
+            "unknown category",
+            id="rename-unknown-old",
+        ),
+        pytest.param(
+            lambda p: run_set_category(p, "200", "Bakery"),
+            lambda p: run_category_rename(p, "dairy", "bakery"),
+            "already exists",
+            id="rename-conflict",
+        ),
+        pytest.param(
+            None,
+            lambda p: run_category_rename(p, "dairy", "dairy"),
+            "must differ",
+            id="rename-same-name",
+        ),
+        pytest.param(
+            None,
+            lambda p: run_category_rename(p, "  ", "New"),
+            "must not be empty",
+            id="rename-empty",
+        ),
+    ],
+)
+def test_invalid_maintenance_request_fails_without_state_change(
+    tmp_env: tuple[Path, GrossyPaths], setup: Any, request_call: Any, match: str
+) -> None:
+    """Invalid link, merge, category, primary, quantity or recurrence requests are
+    rejected with a specific diagnostic and leave every maintenance table unchanged."""
+    _, paths = tmp_env
+    if setup is not None:
+        setup(paths)
+    before = _maintenance_state(paths)
+    with pytest.raises(MaintenanceError, match=match):
+        request_call(paths)
+    assert _maintenance_state(paths) == before
 
 
 @pytest.mark.parametrize(

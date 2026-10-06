@@ -15,6 +15,7 @@ acceptance criteria:
 
 from __future__ import annotations
 
+import itertools
 import json
 from datetime import UTC, date
 from pathlib import Path
@@ -124,6 +125,24 @@ def _write(tmp_path: Path, name: str, payload: dict[str, Any]) -> Path:
     return path
 
 
+_SCAN_FILES = itertools.count()
+
+
+def _sync(paths: GrossyPaths, tmp_path: Path, orders: list[dict[str, Any]]) -> Any:
+    """Apply one scan proposal of the given orders through the public sync phase."""
+    path = _write(tmp_path, f"scan-{next(_SCAN_FILES)}.json", _scan_payload(orders))
+    return run_sync_apply(path, paths)
+
+
+def _link_alternative(db: Path, family_id: str, product_id: str) -> None:
+    conn = open_connection(db)
+    try:
+        link_alternative(conn, family_id, product_id, NOW)
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def _family_row(db: Path, family_id: str) -> tuple[Any, ...]:
     conn = open_connection(db)
     try:
@@ -153,55 +172,45 @@ def _product_row_id(db: Path, product_id: str) -> int:
 # --- pure recurrence inference (FR-50, FR-51, FR-52, FR-53, FR-54) ----------
 
 
-class TestInferRecurrence:
-    def test_no_occurrences_is_empty(self) -> None:
-        r = infer_recurrence([])
-        assert r.weeks is None
-        assert r.source is None
-        assert r.confidence is None
-        assert not r.is_auto_add_eligible()
-
-    def test_single_occurrence_is_guarded_estimate(self) -> None:
-        r = infer_recurrence(["2026-09-20"])
-        assert r.source == "category-estimate"
-        assert r.confidence == "low"
-        assert r.weeks == 1
+@pytest.mark.parametrize(
+    "occurrences,weeks,source,confidence,auto_add",
+    [
+        pytest.param([], None, None, None, False, id="no-occurrences"),
         # FR-54: a low single-occurrence estimate is reported, not auto-added.
-        assert not r.is_auto_add_eligible()
-
-    def test_single_occurrence_duplicate_dates_deduplicated(self) -> None:
-        # The same order date repeated is still a single dated occurrence.
-        r = infer_recurrence(["2026-09-20", "2026-09-20"])
-        assert r.source == "category-estimate"
-        assert not r.is_auto_add_eligible()
-
-    def test_two_occurrences_weekly_is_observed_high(self) -> None:
-        r = infer_recurrence(["2026-09-06", "2026-09-13"])
-        assert r.source == "observed"
-        assert r.weeks == 1
-        assert r.confidence == "high"
+        pytest.param(["2026-09-20"], 1, "category-estimate", "low", False, id="single"),
+        pytest.param(
+            ["2026-09-20", "2026-09-20"], 1, "category-estimate", "low", False, id="single-deduped"
+        ),
         # FR-52: observed recurrence (2+) is eligible for automatic addition.
-        assert r.is_auto_add_eligible()
-
-    def test_two_occurrences_biweekly(self) -> None:
-        r = infer_recurrence(["2026-09-01", "2026-09-15"])
-        assert r.source == "observed"
-        assert r.weeks == 2
-        assert r.is_auto_add_eligible()
-
-    def test_inconsistent_intervals_are_medium(self) -> None:
-        # 7 days then 21 days -> whole weeks 1 and 3 -> not a stable cadence.
-        r = infer_recurrence(["2026-09-01", "2026-09-08", "2026-09-29"])
-        assert r.source == "observed"
-        assert r.confidence == "medium"
-        # Still observed, so still auto-add-eligible (FR-52).
-        assert r.is_auto_add_eligible()
-
-    def test_three_occurrences_weekly_stays_high(self) -> None:
-        r = infer_recurrence(["2026-09-01", "2026-09-08", "2026-09-15"])
-        assert r.source == "observed"
-        assert r.confidence == "high"
-        assert r.weeks == 1
+        pytest.param(["2026-09-06", "2026-09-13"], 1, "observed", "high", True, id="weekly"),
+        pytest.param(["2026-09-01", "2026-09-15"], 2, "observed", "high", True, id="biweekly"),
+        pytest.param(
+            ["2026-09-01", "2026-09-08", "2026-09-15"], 1, "observed", "high", True, id="3x-weekly"
+        ),
+        # 7 days then 21 days -> whole weeks 1 and 3 -> average 14 days rounds to 2 weeks,
+        # but the divergent cadence is only medium confidence; still observed.
+        pytest.param(
+            ["2026-09-01", "2026-09-08", "2026-09-29"],
+            2,
+            "observed",
+            "medium",
+            True,
+            id="inconsistent-intervals",
+        ),
+    ],
+)
+def test_infer_recurrence(
+    occurrences: list[str],
+    weeks: int | None,
+    source: str | None,
+    confidence: str | None,
+    auto_add: bool,
+) -> None:
+    """FR-50..FR-54: recurrence inference from dated occurrences with confidence gates."""
+    r = infer_recurrence(occurrences)
+    # ``weeks`` is None only for the empty-history case; assert it unconditionally.
+    assert (r.weeks, r.source, r.confidence) == (weeks, source, confidence)
+    assert r.is_auto_add_eligible() is auto_add
 
 
 class TestDueDateEuropeAthens:
@@ -209,15 +218,14 @@ class TestDueDateEuropeAthens:
         assert family_due_date("2026-09-13", 1) == date(2026, 9, 20)
         assert family_due_date("2026-09-13", 2) == date(2026, 9, 27)
 
-    def test_not_due_before_boundary(self) -> None:
-        assert is_family_due("2026-09-13", 1, today=date(2026, 9, 19)) is False
-
-    def test_due_on_boundary_date(self) -> None:
-        # FR-49: due when current date >= last purchase + recurrence weeks.
-        assert is_family_due("2026-09-13", 1, today=date(2026, 9, 20)) is True
-
-    def test_due_after_boundary(self) -> None:
-        assert is_family_due("2026-09-13", 1, today=date(2026, 9, 21)) is True
+    @pytest.mark.parametrize(
+        "today,due",
+        [(date(2026, 9, 19), False), (date(2026, 9, 20), True), (date(2026, 9, 21), True)],
+        ids=["before-boundary", "on-boundary", "after-boundary"],
+    )
+    def test_due_when_today_reaches_boundary(self, today: date, due: bool) -> None:
+        """FR-49: due when the current date >= last purchase + recurrence weeks."""
+        assert is_family_due("2026-09-13", 1, today=today) is due
 
     def test_default_today_uses_athens_calendar_date(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # A fixed UTC instant whose HOST date is 2026-09-19 but whose Athens
@@ -245,17 +253,14 @@ class TestCategoryNormalization:
         self, initialized_home: GrossyPaths, tmp_path: Path
     ) -> None:
         # Same heading across two orders must yield one reused category.
-        path = _write(
+        _sync(
+            initialized_home,
             tmp_path,
-            "scan.json",
-            _scan_payload(
-                [
-                    _scanned_order("1001", "2026-09-06", ["71"], category="Dairy"),
-                    _scanned_order("1002", "2026-09-13", ["71"], category="Dairy"),
-                ]
-            ),
+            [
+                _scanned_order("1001", "2026-09-06", ["71"], category="Dairy"),
+                _scanned_order("1002", "2026-09-13", ["71"], category="Dairy"),
+            ],
         )
-        run_sync_apply(path, initialized_home)
         conn = open_connection(initialized_home.database_file)
         try:
             categories = conn.execute("SELECT name, display_name FROM categories").fetchall()
@@ -271,12 +276,11 @@ class TestCategoryNormalization:
     def test_missing_heading_is_reviewable_not_misc(
         self, initialized_home: GrossyPaths, tmp_path: Path
     ) -> None:
-        path = _write(
+        _sync(
+            initialized_home,
             tmp_path,
-            "scan.json",
-            _scan_payload([_scanned_order("1001", "2026-09-06", ["71"], category=None)]),
+            [_scanned_order("1001", "2026-09-06", ["71"], category=None)],
         )
-        run_sync_apply(path, initialized_home)
         conn = open_connection(initialized_home.database_file)
         try:
             row = conn.execute(
@@ -299,12 +303,11 @@ class TestCategoryNormalization:
     ) -> None:
         # First sync: no heading -> review item. Second sync: heading present ->
         # category assigned and the review item is cleared.
-        path1 = _write(
+        _sync(
+            initialized_home,
             tmp_path,
-            "s1.json",
-            _scan_payload([_scanned_order("1001", "2026-09-06", ["71"], category=None)]),
+            [_scanned_order("1001", "2026-09-06", ["71"], category=None)],
         )
-        run_sync_apply(path1, initialized_home)
         conn = open_connection(initialized_home.database_file)
         try:
             # Assign a normalized category manually (task 06 would do this via
@@ -348,18 +351,15 @@ class TestBinaryCounts:
     ) -> None:
         # Product 71 in three distinct dated orders -> count 3 (not a sum of
         # units; there are no units in the model).
-        path = _write(
+        _sync(
+            initialized_home,
             tmp_path,
-            "scan.json",
-            _scan_payload(
-                [
-                    _scanned_order("1001", "2026-09-06", ["71"]),
-                    _scanned_order("1002", "2026-09-13", ["71"]),
-                    _scanned_order("1003", "2026-09-20", ["71"]),
-                ]
-            ),
+            [
+                _scanned_order("1001", "2026-09-06", ["71"]),
+                _scanned_order("1002", "2026-09-13", ["71"]),
+                _scanned_order("1003", "2026-09-20", ["71"]),
+            ],
         )
-        run_sync_apply(path, initialized_home)
         conn = open_connection(initialized_home.database_file)
         try:
             row = conn.execute(
@@ -379,17 +379,14 @@ class TestFixedPrimary:
     def test_recurring_product_becomes_single_member_family(
         self, initialized_home: GrossyPaths, tmp_path: Path
     ) -> None:
-        path = _write(
+        _sync(
+            initialized_home,
             tmp_path,
-            "scan.json",
-            _scan_payload(
-                [
-                    _scanned_order("1001", "2026-09-06", ["71"]),
-                    _scanned_order("1002", "2026-09-13", ["71"]),
-                ]
-            ),
+            [
+                _scanned_order("1001", "2026-09-06", ["71"]),
+                _scanned_order("1002", "2026-09-13", ["71"]),
+            ],
         )
-        run_sync_apply(path, initialized_home)
         primary_row = _product_row_id(initialized_home.database_file, "71")
         row = _family_row(initialized_home.database_file, "fam-71")
         assert row is not None
@@ -410,43 +407,32 @@ class TestFixedPrimary:
     ) -> None:
         # P is bought once (single-member family). A later sync adds more
         # evidence for Q; inference must leave P as the primary of its family.
-        path1 = _write(
-            tmp_path,
-            "s1.json",
-            _scan_payload([_scanned_order("1001", "2026-09-06", ["71", "72"])]),
-        )
-        run_sync_apply(path1, initialized_home)
+        _sync(initialized_home, tmp_path, [_scanned_order("1001", "2026-09-06", ["71", "72"])])
         p_row = _product_row_id(initialized_home.database_file, "71")
         assert _family_row(initialized_home.database_file, "fam-71")[0] == p_row
 
-        path2 = _write(
+        _sync(
+            initialized_home,
             tmp_path,
-            "s2.json",
-            _scan_payload(
-                [
-                    _scanned_order("1002", "2026-09-13", ["72"]),
-                    _scanned_order("1003", "2026-09-20", ["72"]),
-                ]
-            ),
+            [
+                _scanned_order("1002", "2026-09-13", ["72"]),
+                _scanned_order("1003", "2026-09-20", ["72"]),
+            ],
         )
-        run_sync_apply(path2, initialized_home)
         # P is still the primary of fam-71; Q owns its own family as primary.
         assert _family_row(initialized_home.database_file, "fam-71")[0] == p_row
         q_row = _product_row_id(initialized_home.database_file, "72")
         assert _family_row(initialized_home.database_file, "fam-72")[0] == q_row
 
     def test_inference_is_idempotent(self, initialized_home: GrossyPaths, tmp_path: Path) -> None:
-        path = _write(
+        _sync(
+            initialized_home,
             tmp_path,
-            "scan.json",
-            _scan_payload(
-                [
-                    _scanned_order("1001", "2026-09-06", ["71"]),
-                    _scanned_order("1002", "2026-09-13", ["71"]),
-                ]
-            ),
+            [
+                _scanned_order("1001", "2026-09-06", ["71"]),
+                _scanned_order("1002", "2026-09-13", ["71"]),
+            ],
         )
-        run_sync_apply(path, initialized_home)
         conn = open_connection(initialized_home.database_file)
         try:
             for _ in range(3):
@@ -474,12 +460,7 @@ class TestFamilyRecurrence:
     def test_recurrence_advances_from_completed_orders(
         self, initialized_home: GrossyPaths, tmp_path: Path
     ) -> None:
-        path1 = _write(
-            tmp_path,
-            "s1.json",
-            _scan_payload([_scanned_order("1001", "2026-09-06", ["71"])]),
-        )
-        run_sync_apply(path1, initialized_home)
+        _sync(initialized_home, tmp_path, [_scanned_order("1001", "2026-09-06", ["71"])])
         row1 = _family_row(initialized_home.database_file, "fam-71")
         # Single occurrence -> guarded category estimate, low confidence.
         assert row1[1] == 1
@@ -489,12 +470,7 @@ class TestFamilyRecurrence:
 
         # A second completed order turns it into observed recurrence and
         # advances the last purchase date.
-        path2 = _write(
-            tmp_path,
-            "s2.json",
-            _scan_payload([_scanned_order("1002", "2026-09-13", ["71"])]),
-        )
-        run_sync_apply(path2, initialized_home)
+        _sync(initialized_home, tmp_path, [_scanned_order("1002", "2026-09-13", ["71"])])
         row2 = _family_row(initialized_home.database_file, "fam-71")
         assert row2[2] == "observed"
         assert row2[3] == "high"
@@ -503,12 +479,7 @@ class TestFamilyRecurrence:
     def test_single_occurrence_family_is_reviewable(
         self, initialized_home: GrossyPaths, tmp_path: Path
     ) -> None:
-        path = _write(
-            tmp_path,
-            "scan.json",
-            _scan_payload([_scanned_order("1001", "2026-09-06", ["71"])]),
-        )
-        run_sync_apply(path, initialized_home)
+        _sync(initialized_home, tmp_path, [_scanned_order("1001", "2026-09-06", ["71"])])
         conn = open_connection(initialized_home.database_file)
         try:
             review = conn.execute(
@@ -524,12 +495,7 @@ class TestFamilyRecurrence:
         self, initialized_home: GrossyPaths, tmp_path: Path
     ) -> None:
         # A single dated occurrence leaves a reviewable recurrence item...
-        path1 = _write(
-            tmp_path,
-            "s1.json",
-            _scan_payload([_scanned_order("1001", "2026-09-06", ["71"])]),
-        )
-        run_sync_apply(path1, initialized_home)
+        _sync(initialized_home, tmp_path, [_scanned_order("1001", "2026-09-06", ["71"])])
         conn = open_connection(initialized_home.database_file)
         try:
             review = conn.execute(
@@ -543,12 +509,7 @@ class TestFamilyRecurrence:
         # ...that a second dated occurrence resolves into observed recurrence;
         # the stale review item must be cleared so the review state always
         # matches the current evidence.
-        path2 = _write(
-            tmp_path,
-            "s2.json",
-            _scan_payload([_scanned_order("1002", "2026-09-13", ["71"])]),
-        )
-        run_sync_apply(path2, initialized_home)
+        _sync(initialized_home, tmp_path, [_scanned_order("1002", "2026-09-13", ["71"])])
         conn = open_connection(initialized_home.database_file)
         try:
             review = conn.execute(
@@ -562,17 +523,14 @@ class TestFamilyRecurrence:
     def test_report_surfaces_recurrence_and_review(
         self, initialized_home: GrossyPaths, tmp_path: Path
     ) -> None:
-        path = _write(
+        result = _sync(
+            initialized_home,
             tmp_path,
-            "scan.json",
-            _scan_payload(
-                [
-                    _scanned_order("1001", "2026-09-06", ["71"], category=None),
-                    _scanned_order("1002", "2026-09-13", ["72"]),
-                ]
-            ),
+            [
+                _scanned_order("1001", "2026-09-06", ["71"], category=None),
+                _scanned_order("1002", "2026-09-13", ["72"]),
+            ],
         )
-        result = run_sync_apply(path, initialized_home)
         assert result.report_path is not None
         text = result.report_path.read_text(encoding="utf-8")
         assert "deferred" not in text
@@ -591,18 +549,16 @@ class TestObservationUpdates:
         # First observation carries a heading; a later card without a heading
         # is absence of evidence, not evidence of absence: the learned
         # category is preserved and no review item is raised.
-        path1 = _write(
+        _sync(
+            initialized_home,
             tmp_path,
-            "s1.json",
-            _scan_payload([_scanned_order("1001", "2026-09-06", ["71"], category="Dairy")]),
+            [_scanned_order("1001", "2026-09-06", ["71"], category="Dairy")],
         )
-        run_sync_apply(path1, initialized_home)
-        path2 = _write(
+        _sync(
+            initialized_home,
             tmp_path,
-            "s2.json",
-            _scan_payload([_scanned_order("1002", "2026-09-13", ["71"], category=None)]),
+            [_scanned_order("1002", "2026-09-13", ["71"], category=None)],
         )
-        run_sync_apply(path2, initialized_home)
         conn = open_connection(initialized_home.database_file)
         try:
             row = conn.execute(
@@ -625,18 +581,16 @@ class TestObservationUpdates:
     ) -> None:
         # A present heading that normalizes to a different category updates
         # the stored category and is reported as a changed product fact.
-        path1 = _write(
+        _sync(
+            initialized_home,
             tmp_path,
-            "s1.json",
-            _scan_payload([_scanned_order("1001", "2026-09-06", ["71"], category="Dairy")]),
+            [_scanned_order("1001", "2026-09-06", ["71"], category="Dairy")],
         )
-        run_sync_apply(path1, initialized_home)
-        path2 = _write(
+        result = _sync(
+            initialized_home,
             tmp_path,
-            "s2.json",
-            _scan_payload([_scanned_order("1002", "2026-09-13", ["71"], category="Bakery")]),
+            [_scanned_order("1002", "2026-09-13", ["71"], category="Bakery")],
         )
-        result = run_sync_apply(path2, initialized_home)
         conn = open_connection(initialized_home.database_file)
         try:
             row = conn.execute(
@@ -664,17 +618,14 @@ class TestFamilyCategory:
     ) -> None:
         # The family owns a category (FR-40); inference derives it from the
         # primary product's normalized category.
-        path = _write(
+        _sync(
+            initialized_home,
             tmp_path,
-            "scan.json",
-            _scan_payload(
-                [
-                    _scanned_order("1001", "2026-09-06", ["71"], category="Dairy"),
-                    _scanned_order("1002", "2026-09-13", ["71"], category="Dairy"),
-                ]
-            ),
+            [
+                _scanned_order("1001", "2026-09-06", ["71"], category="Dairy"),
+                _scanned_order("1002", "2026-09-13", ["71"], category="Dairy"),
+            ],
         )
-        run_sync_apply(path, initialized_home)
         conn = open_connection(initialized_home.database_file)
         try:
             row = conn.execute(
@@ -694,12 +645,11 @@ class TestFamilyCategory:
         # A later (e.g. manual, task 06) family category assignment must
         # survive subsequent inference passes: inference only fills an unset
         # family category, it never reverses an existing one.
-        path1 = _write(
+        _sync(
+            initialized_home,
             tmp_path,
-            "s1.json",
-            _scan_payload([_scanned_order("1001", "2026-09-06", ["71"], category="Dairy")]),
+            [_scanned_order("1001", "2026-09-06", ["71"], category="Dairy")],
         )
-        run_sync_apply(path1, initialized_home)
         conn = open_connection(initialized_home.database_file)
         try:
             conn.execute(
@@ -716,12 +666,11 @@ class TestFamilyCategory:
         finally:
             conn.close()
 
-        path2 = _write(
+        _sync(
+            initialized_home,
             tmp_path,
-            "s2.json",
-            _scan_payload([_scanned_order("1002", "2026-09-13", ["71"], category="Dairy")]),
+            [_scanned_order("1002", "2026-09-13", ["71"], category="Dairy")],
         )
-        run_sync_apply(path2, initialized_home)
         conn = open_connection(initialized_home.database_file)
         try:
             row = conn.execute(
@@ -739,23 +688,10 @@ class TestFamilyCategory:
 
 
 class TestAlternatives:
-    def _link_alternative(self, db: Path, family_id: str, product_id: str) -> None:
-        conn = open_connection(db)
-        try:
-            link_alternative(conn, family_id, product_id, NOW)
-            conn.commit()
-        finally:
-            conn.close()
-
     def test_primary_selected_first(self, initialized_home: GrossyPaths, tmp_path: Path) -> None:
         # Import P (primary of fam-71) and A (primary of its own fam-80).
-        path = _write(
-            tmp_path,
-            "scan.json",
-            _scan_payload([_scanned_order("1001", "2026-09-06", ["71", "80"])]),
-        )
-        run_sync_apply(path, initialized_home)
-        self._link_alternative(initialized_home.database_file, "fam-71", "80")
+        _sync(initialized_home, tmp_path, [_scanned_order("1001", "2026-09-06", ["71", "80"])])
+        _link_alternative(initialized_home.database_file, "fam-71", "80")
         conn = open_connection(initialized_home.database_file)
         try:
             sel = select_family_product(conn, "fam-71", frozenset({"71", "80"}))
@@ -769,13 +705,8 @@ class TestAlternatives:
     def test_unavailable_primary_falls_back_to_approved_alternative(
         self, initialized_home: GrossyPaths, tmp_path: Path
     ) -> None:
-        path = _write(
-            tmp_path,
-            "scan.json",
-            _scan_payload([_scanned_order("1001", "2026-09-06", ["71", "80"])]),
-        )
-        run_sync_apply(path, initialized_home)
-        self._link_alternative(initialized_home.database_file, "fam-71", "80")
+        _sync(initialized_home, tmp_path, [_scanned_order("1001", "2026-09-06", ["71", "80"])])
+        _link_alternative(initialized_home.database_file, "fam-71", "80")
         conn = open_connection(initialized_home.database_file)
         try:
             sel = select_family_product(conn, "fam-71", frozenset({"80"}))
@@ -789,13 +720,8 @@ class TestAlternatives:
     def test_no_available_member_returns_none(
         self, initialized_home: GrossyPaths, tmp_path: Path
     ) -> None:
-        path = _write(
-            tmp_path,
-            "scan.json",
-            _scan_payload([_scanned_order("1001", "2026-09-06", ["71", "80"])]),
-        )
-        run_sync_apply(path, initialized_home)
-        self._link_alternative(initialized_home.database_file, "fam-71", "80")
+        _sync(initialized_home, tmp_path, [_scanned_order("1001", "2026-09-06", ["71", "80"])])
+        _link_alternative(initialized_home.database_file, "fam-71", "80")
         conn = open_connection(initialized_home.database_file)
         try:
             sel = select_family_product(conn, "fam-71", frozenset())
@@ -806,23 +732,13 @@ class TestAlternatives:
     def test_alternative_purchase_advances_cadence_without_promotion(
         self, initialized_home: GrossyPaths, tmp_path: Path
     ) -> None:
-        path1 = _write(
-            tmp_path,
-            "s1.json",
-            _scan_payload([_scanned_order("1001", "2026-09-06", ["71", "80"])]),
-        )
-        run_sync_apply(path1, initialized_home)
-        self._link_alternative(initialized_home.database_file, "fam-71", "80")
+        _sync(initialized_home, tmp_path, [_scanned_order("1001", "2026-09-06", ["71", "80"])])
+        _link_alternative(initialized_home.database_file, "fam-71", "80")
         primary_row = _product_row_id(initialized_home.database_file, "71")
 
         # A completed order containing the alternative on a later date.
         # Inference advances the family cadence (FR-47) without promoting.
-        path2 = _write(
-            tmp_path,
-            "s2.json",
-            _scan_payload([_scanned_order("1002", "2026-10-01", ["80"])]),
-        )
-        run_sync_apply(path2, initialized_home)
+        _sync(initialized_home, tmp_path, [_scanned_order("1002", "2026-10-01", ["80"])])
         row = _family_row(initialized_home.database_file, "fam-71")
         # Cadence advanced to the alternative's completed order date...
         assert row[4] == "2026-10-01"
@@ -841,18 +757,8 @@ class TestAlternatives:
 
     def test_advance_is_monotonic(self, initialized_home: GrossyPaths, tmp_path: Path) -> None:
         # Import two orders; inference sets last_purchase to the later date.
-        path1 = _write(
-            tmp_path,
-            "s1.json",
-            _scan_payload([_scanned_order("1001", "2026-09-06", ["71"])]),
-        )
-        run_sync_apply(path1, initialized_home)
-        path2 = _write(
-            tmp_path,
-            "s2.json",
-            _scan_payload([_scanned_order("1002", "2026-10-01", ["71"])]),
-        )
-        run_sync_apply(path2, initialized_home)
+        _sync(initialized_home, tmp_path, [_scanned_order("1001", "2026-09-06", ["71"])])
+        _sync(initialized_home, tmp_path, [_scanned_order("1002", "2026-10-01", ["71"])])
         # After inference, last_purchase is 2026-10-01. An earlier date is
         # rejected (monotonic), and the same date is also rejected.
         conn = open_connection(initialized_home.database_file)
@@ -872,12 +778,7 @@ class TestAlternatives:
         # A date that does not correspond to any synchronized order must be
         # rejected (FR-47: only synchronized completed order appearances
         # advance cadence).
-        path = _write(
-            tmp_path,
-            "scan.json",
-            _scan_payload([_scanned_order("1001", "2026-09-06", ["71"])]),
-        )
-        run_sync_apply(path, initialized_home)
+        _sync(initialized_home, tmp_path, [_scanned_order("1001", "2026-09-06", ["71"])])
         conn = open_connection(initialized_home.database_file)
         try:
             with pytest.raises(InferenceError, match="no synchronized completed order"):
@@ -891,17 +792,14 @@ class TestAlternatives:
     ) -> None:
         # An order that exists but does not contain a member of the target
         # family must be rejected.
-        path = _write(
+        _sync(
+            initialized_home,
             tmp_path,
-            "scan.json",
-            _scan_payload(
-                [
-                    _scanned_order("1001", "2026-09-06", ["71"]),
-                    _scanned_order("1002", "2026-09-13", ["99"]),  # different product
-                ]
-            ),
+            [
+                _scanned_order("1001", "2026-09-06", ["71"]),
+                _scanned_order("1002", "2026-09-13", ["99"]),  # different product
+            ],
         )
-        run_sync_apply(path, initialized_home)
         conn = open_connection(initialized_home.database_file)
         try:
             with pytest.raises(InferenceError, match="no synchronized completed order"):
@@ -918,25 +816,10 @@ class TestAlternatives:
         # (order 3). Because recurrence is family-owned over the union of
         # members, order 3 advances fam-71's last-purchase date (FR-47) without
         # promoting the primary (FR-62).
-        path1 = _write(
-            tmp_path,
-            "s1.json",
-            _scan_payload([_scanned_order("1001", "2026-09-06", ["71"])]),
-        )
-        run_sync_apply(path1, initialized_home)
-        path2 = _write(
-            tmp_path,
-            "s2.json",
-            _scan_payload([_scanned_order("1002", "2026-09-13", ["80"])]),
-        )
-        run_sync_apply(path2, initialized_home)
-        self._link_alternative(initialized_home.database_file, "fam-71", "80")
-        path3 = _write(
-            tmp_path,
-            "s3.json",
-            _scan_payload([_scanned_order("1003", "2026-09-20", ["80"])]),
-        )
-        run_sync_apply(path3, initialized_home)
+        _sync(initialized_home, tmp_path, [_scanned_order("1001", "2026-09-06", ["71"])])
+        _sync(initialized_home, tmp_path, [_scanned_order("1002", "2026-09-13", ["80"])])
+        _link_alternative(initialized_home.database_file, "fam-71", "80")
+        _sync(initialized_home, tmp_path, [_scanned_order("1003", "2026-09-20", ["80"])])
         row = _family_row(initialized_home.database_file, "fam-71")
         assert row[4] == "2026-09-20"  # advanced by the alternative's order
         primary_row = _product_row_id(initialized_home.database_file, "71")
@@ -947,14 +830,6 @@ class TestAlternatives:
 
 
 class TestInvariants:
-    def _link_alternative(self, db: Path, family_id: str, product_id: str) -> None:
-        conn = open_connection(db)
-        try:
-            link_alternative(conn, family_id, product_id, NOW)
-            conn.commit()
-        finally:
-            conn.close()
-
     def test_link_alternative_unknown_product_raises(self, initialized_home: GrossyPaths) -> None:
         conn = open_connection(initialized_home.database_file)
         try:
@@ -976,12 +851,7 @@ class TestInvariants:
     ) -> None:
         # Linking a product that is the primary of the target family must be
         # rejected (FR-42, FR-44): it would destroy the established primary.
-        path = _write(
-            tmp_path,
-            "scan.json",
-            _scan_payload([_scanned_order("1001", "2026-09-06", ["71"])]),
-        )
-        run_sync_apply(path, initialized_home)
+        _sync(initialized_home, tmp_path, [_scanned_order("1001", "2026-09-06", ["71"])])
         conn = open_connection(initialized_home.database_file)
         try:
             with pytest.raises(InferenceError, match="primary of family"):
@@ -995,13 +865,8 @@ class TestInvariants:
     ) -> None:
         # Linking a product that is already an alternative in the target family
         # must be rejected.
-        path = _write(
-            tmp_path,
-            "scan.json",
-            _scan_payload([_scanned_order("1001", "2026-09-06", ["71", "80"])]),
-        )
-        run_sync_apply(path, initialized_home)
-        self._link_alternative(initialized_home.database_file, "fam-71", "80")
+        _sync(initialized_home, tmp_path, [_scanned_order("1001", "2026-09-06", ["71", "80"])])
+        _link_alternative(initialized_home.database_file, "fam-71", "80")
         conn = open_connection(initialized_home.database_file)
         try:
             with pytest.raises(InferenceError, match="already a member"):
@@ -1030,8 +895,7 @@ class TestFamilyLinkInference:
             _scanned_product("71", title="Olympus Milk 1L", category="Dairy"),
             _scanned_product("72", title="Olympus Milk 2L", category="Dairy"),
         ]
-        path = _write(tmp_path, "scan.json", _scan_payload(orders))
-        run_sync_apply(path, initialized_home)
+        _sync(initialized_home, tmp_path, orders)
         conn = open_connection(initialized_home.database_file)
         try:
             # Product 72 should now be an alternative in fam-71 (auto-linked
@@ -1058,21 +922,18 @@ class TestFamilyLinkInference:
     ) -> None:
         # Two products in the same category with different base names that do
         # not share a 2-word prefix remain separate (no review item, no link).
-        path = _write(
+        _sync(
+            initialized_home,
             tmp_path,
-            "scan.json",
-            _scan_payload(
-                [
-                    _scanned_order(
-                        "1001",
-                        "2026-09-06",
-                        ["71", "72"],
-                        category="Dairy",
-                    ),
-                ]
-            ),
+            [
+                _scanned_order(
+                    "1001",
+                    "2026-09-06",
+                    ["71", "72"],
+                    category="Dairy",
+                ),
+            ],
         )
-        run_sync_apply(path, initialized_home)
         conn = open_connection(initialized_home.database_file)
         try:
             conn.execute(
@@ -1110,21 +971,18 @@ class TestFamilyLinkInference:
     ) -> None:
         # Two products in the same category whose base names share a 2-word
         # prefix produce a family_link review item (FR-56) and remain separate.
-        path = _write(
+        _sync(
+            initialized_home,
             tmp_path,
-            "scan.json",
-            _scan_payload(
-                [
-                    _scanned_order(
-                        "1001",
-                        "2026-09-06",
-                        ["71", "72"],
-                        category="Dairy",
-                    ),
-                ]
-            ),
+            [
+                _scanned_order(
+                    "1001",
+                    "2026-09-06",
+                    ["71", "72"],
+                    category="Dairy",
+                ),
+            ],
         )
-        run_sync_apply(path, initialized_home)
         conn = open_connection(initialized_home.database_file)
         try:
             conn.execute(
@@ -1165,12 +1023,7 @@ class TestFamilyLinkInference:
     def test_a_product_belongs_to_at_most_one_family(
         self, initialized_home: GrossyPaths, tmp_path: Path
     ) -> None:
-        path = _write(
-            tmp_path,
-            "scan.json",
-            _scan_payload([_scanned_order("1001", "2026-09-06", ["71", "80"])]),
-        )
-        run_sync_apply(path, initialized_home)
+        _sync(initialized_home, tmp_path, [_scanned_order("1001", "2026-09-06", ["71", "80"])])
         conn = open_connection(initialized_home.database_file)
         try:
             link_alternative(conn, "fam-71", "80", NOW)  # moves 80 to fam-71
@@ -1191,18 +1044,15 @@ class TestFamilyLinkInference:
         # must NOT demote any established primary (FR-44). The products remain
         # in their separate families and review items are generated for the
         # high-confidence links that cannot be auto-applied.
-        path = _write(
+        _sync(
+            initialized_home,
             tmp_path,
-            "scan.json",
-            _scan_payload(
-                [
-                    _scanned_order("1001", "2026-09-06", ["71", "72", "73"], category="Dairy"),
-                    _scanned_order("1002", "2026-09-13", ["73"], category="Dairy"),
-                    _scanned_order("1003", "2026-09-20", ["73"], category="Dairy"),
-                ]
-            ),
+            [
+                _scanned_order("1001", "2026-09-06", ["71", "72", "73"], category="Dairy"),
+                _scanned_order("1002", "2026-09-13", ["73"], category="Dairy"),
+                _scanned_order("1003", "2026-09-20", ["73"], category="Dairy"),
+            ],
         )
-        run_sync_apply(path, initialized_home)
         conn = open_connection(initialized_home.database_file)
         try:
             for pid, suffix in (("71", "1L"), ("72", "2L"), ("73", "3L")):
@@ -1362,12 +1212,11 @@ class TestEstablishedPrimaryNotDemoted:
         # Product 71 is imported first (established primary of fam-71). A later
         # sync imports product 73 with more purchases and the same base name.
         # Inference must NOT demote 71 to an alternative (FR-44).
-        path1 = _write(
+        _sync(
+            initialized_home,
             tmp_path,
-            "s1.json",
-            _scan_payload([_scanned_order("1001", "2026-09-06", ["71"], category="Dairy")]),
+            [_scanned_order("1001", "2026-09-06", ["71"], category="Dairy")],
         )
-        run_sync_apply(path1, initialized_home)
         # Verify 71 is the primary of fam-71.
         p_row = _product_row_id(initialized_home.database_file, "71")
         assert _family_row(initialized_home.database_file, "fam-71")[0] == p_row
@@ -1393,8 +1242,7 @@ class TestEstablishedPrimaryNotDemoted:
         orders[1]["products"] = [
             _scanned_product("73", title="Olympus Milk 3L", category="Dairy"),
         ]
-        path2 = _write(tmp_path, "s2.json", _scan_payload(orders))
-        run_sync_apply(path2, initialized_home)
+        _sync(initialized_home, tmp_path, orders)
 
         # Product 71 must still be the primary of fam-71.
         conn = open_connection(initialized_home.database_file)
@@ -1439,8 +1287,7 @@ class TestOverlappingLinkedUncertainReview:
             _scanned_product("72", title="Olympus Greek Yogurt 1L", category="Dairy"),
             _scanned_product("73", title="Olympus Greek Kefir 200ml", category="Dairy"),
         ]
-        path = _write(tmp_path, "scan.json", _scan_payload(orders))
-        run_sync_apply(path, initialized_home)
+        _sync(initialized_home, tmp_path, orders)
 
         conn = open_connection(initialized_home.database_file)
         try:
@@ -1491,8 +1338,7 @@ class TestOverlappingLinkedUncertainReview:
             _scanned_product("72", title="Olympus Greek Kefir 200ml", category="Dairy"),
             _scanned_product("80", title="Dairy Milk 1L", category="Dairy"),
         ]
-        path = _write(tmp_path, "scan.json", _scan_payload(orders))
-        run_sync_apply(path, initialized_home)
+        _sync(initialized_home, tmp_path, orders)
 
         # Generate an uncertain review for 71<->72 (same prefix "olympus greek",
         # different base names). Then manually link 80 into fam-71 so 71 is in
@@ -1549,8 +1395,7 @@ class TestMiscHeadingRejected:
         orders[0]["products"] = [
             _scanned_product("71", title="Product 71", category="misc"),
         ]
-        path = _write(tmp_path, "scan.json", _scan_payload(orders))
-        run_sync_apply(path, initialized_home)
+        _sync(initialized_home, tmp_path, orders)
         conn = open_connection(initialized_home.database_file)
         try:
             # No misc category should exist.
@@ -1583,8 +1428,7 @@ class TestUnitBasis:
         order = _scanned_order("1001", "2026-09-06", ["71", "72"])
         order["products"][0]["package_unit"] = "ml"
         order["products"][1]["package_unit"] = "pcs"
-        path = _write(tmp_path, "s1.json", _scan_payload([order]))
-        run_sync_apply(path, initialized_home)
+        _sync(initialized_home, tmp_path, [order])
         conn = open_connection(initialized_home.database_file)
         try:
             basis = dict(
@@ -1604,14 +1448,8 @@ class TestUnitBasis:
         # stored basis is preserved and no unit-basis change is reported.
         order1 = _scanned_order("1001", "2026-09-06", ["71"])
         order1["products"][0]["package_unit"] = "ml"
-        path1 = _write(tmp_path, "s1.json", _scan_payload([order1]))
-        run_sync_apply(path1, initialized_home)
-        path2 = _write(
-            tmp_path,
-            "s2.json",
-            _scan_payload([_scanned_order("1002", "2026-09-13", ["71"])]),
-        )
-        result = run_sync_apply(path2, initialized_home)
+        _sync(initialized_home, tmp_path, [order1])
+        result = _sync(initialized_home, tmp_path, [_scanned_order("1002", "2026-09-13", ["71"])])
         conn = open_connection(initialized_home.database_file)
         try:
             row = conn.execute(
@@ -1633,12 +1471,10 @@ class TestUnitBasis:
         # basis and is reported as a changed product fact.
         order1 = _scanned_order("1001", "2026-09-06", ["71"])
         order1["products"][0]["package_unit"] = "ml"
-        path1 = _write(tmp_path, "s1.json", _scan_payload([order1]))
-        run_sync_apply(path1, initialized_home)
+        _sync(initialized_home, tmp_path, [order1])
         order2 = _scanned_order("1002", "2026-09-13", ["71"])
         order2["products"][0]["package_unit"] = "l"
-        path2 = _write(tmp_path, "s2.json", _scan_payload([order2]))
-        result = run_sync_apply(path2, initialized_home)
+        result = _sync(initialized_home, tmp_path, [order2])
         conn = open_connection(initialized_home.database_file)
         try:
             row = conn.execute(

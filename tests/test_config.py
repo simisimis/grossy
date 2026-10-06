@@ -20,6 +20,12 @@ OBSERVED_PRODUCT_URL = (
     "https://www.ab.gr/en/eshop/Dairy-Plant-Based-Beverages-and-Chilled-Products/"
     "Yogurt/Plain-yoghurts/Yogurt-Dessert-2-Fat-1kg/p/7633916"
 )
+GREEK_PRODUCT_URL = (
+    "https://www.ab.gr/el/eshop/Γαλακτοκομικά/Γιαούρτι/Γιαουρτι-2-Κατά-1kg/p/7633916"
+)
+ENCODED_GREEK_PRODUCT_URL = (
+    "https://www.ab.gr/en/eshop/Dairy/%CE%93%CE%B9%CE%B1%CF%8C%CF%85%CF%81%CF%84%CE%B9/p/7633916"
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SAMPLE_CONFIG = REPO_ROOT / "config" / "grossy.sample.yaml"
@@ -77,6 +83,13 @@ staples:
 
 def staples_text(breakfast: str, lunch: str = "  lunch: []") -> str:
     return f"  breakfast:\n{breakfast}\n{lunch}" if breakfast else "  breakfast: []\n  lunch: []"
+
+
+def bread_staple(*extra_lines: str, product_id: str = '"1"', quantity: str = "1") -> str:
+    """One breakfast staple block with optional extra indented lines."""
+    lines = ["    - key: bread", f"      product_id: {product_id}", f"      quantity: {quantity}"]
+    lines.extend(f"      {line}" for line in extra_lines)
+    return staples_text("\n".join(lines))
 
 
 class TestCanonicalSample:
@@ -191,159 +204,209 @@ class TestDuplicateKeys:
         assert "household > children" in message
 
 
-class TestRanges:
-    def test_negative_budget_fails(self) -> None:
-        with pytest.raises(GrossyConfigError) as excinfo:
-            load_config_text(config_text(weekly_budget="-1"))
-        assert "config.weekly_budget:" in str(excinfo.value)
+@pytest.mark.parametrize(
+    "text,path",
+    [
+        # Ranges and required blocks.
+        pytest.param(
+            config_text(weekly_budget="-1"), "config.weekly_budget:", id="negative-budget"
+        ),
+        pytest.param(
+            config_text(material_unit_price_improvement_pct="101"),
+            "config.material_unit_price_improvement_pct:",
+            id="improvement-above-100",
+        ),
+        pytest.param(
+            config_text(household="  adults: 0\n  children: 1\n  recipe_servings: 3"),
+            "config.household.adults:",
+            id="zero-household-count",
+        ),
+        pytest.param(config_text(household=""), "config.household:", id="missing-required-block"),
+        # Wrong YAML scalar types are rejected, not coerced (PRD 7.3.5/7.3.10).
+        pytest.param(
+            config_text(household='  adults: "2"\n  children: 1\n  recipe_servings: 3'),
+            "config.household.adults:",
+            id="quoted-int-household",
+        ),
+        pytest.param(
+            config_text(household="  adults: true\n  children: 1\n  recipe_servings: 3"),
+            "config.household.adults:",
+            id="boolean-household",
+        ),
+        pytest.param(
+            config_text(staples=bread_staple(quantity='"1"')),
+            "config.staples.breakfast.0.quantity:",
+            id="quoted-int-staple-quantity",
+        ),
+        pytest.param(
+            config_text().replace(
+                "  air_fryer:\n    available: true", '  air_fryer:\n    available: "yes"'
+            ),
+            "config.appliances.air_fryer.available:",
+            id="quoted-bool-appliance",
+        ),
+        pytest.param(
+            config_text(
+                appliance_preferences=(
+                    '  prefer_air_fryer_over_pan_frying: "false"\n'
+                    "  prefer_thermomix_native_over_manual: true"
+                )
+            ),
+            "config.appliance_preferences.prefer_air_fryer_over_pan_frying:",
+            id="quoted-bool-preference",
+        ),
+        pytest.param(
+            config_text(staples=bread_staple('allow_substitution: "false"')),
+            "config.staples.breakfast.0.allow_substitution:",
+            id="quoted-bool-allow-substitution",
+        ),
+        # Staple field validation.
+        pytest.param(
+            config_text(staples=bread_staple(quantity="0")),
+            "config.staples.breakfast.0.quantity:",
+            id="zero-staple-quantity",
+        ),
+        pytest.param(
+            config_text(staples=bread_staple("max_line_price_eur: 0")),
+            "config.staples.breakfast.0.max_line_price_eur:",
+            id="zero-price-limit",
+        ),
+        pytest.param(
+            config_text(
+                staples=staples_text(
+                    "    - key: bread\n"
+                    "      product_url: https://www.ab.gr/eshop/%2e%2e/white-loaf/p/12345\n"
+                    "      quantity: 1"
+                )
+            ),
+            "config.staples.breakfast.0.product_url:",
+            id="encoded-traversal-url",
+        ),
+        pytest.param(
+            config_text(
+                staples=staples_text(
+                    "    - key: bread\n"
+                    "      product_url: https://example.com/1234567\n"
+                    "      quantity: 1"
+                )
+            ),
+            "config.staples.breakfast.0.product_url:",
+            id="non-canonical-url",
+        ),
+        pytest.param(
+            config_text().replace(
+                "  air_fryer:\n    available: true",
+                "  air_fryer:\n    available: true\n    capacity_litres: 0",
+            ),
+            "config.appliances.air_fryer.capacity_litres:",
+            id="zero-appliance-capacity",
+        ),
+    ],
+)
+def test_invalid_value_fails_with_field_path(text: str, path: str) -> None:
+    with pytest.raises(GrossyConfigError) as excinfo:
+        load_config_text(text)
+    assert path in str(excinfo.value)
 
-    def test_fractional_budget_ok(self) -> None:
-        config = load_config_text(config_text(weekly_budget="50.5"))
-        assert config.weekly_budget == Decimal("50.5")
 
-    def test_improvement_above_100_fails(self) -> None:
-        with pytest.raises(GrossyConfigError) as excinfo:
-            load_config_text(config_text(material_unit_price_improvement_pct="101"))
-        assert "config.material_unit_price_improvement_pct:" in str(excinfo.value)
+@pytest.mark.parametrize(
+    "text,messages",
+    [
+        pytest.param(
+            config_text(staples=staples_text("    - key: bread\n      quantity: 1")),
+            ["staples.breakfast.0", "product_id or a canonical product_url"],
+            id="needs-id-or-url",
+        ),
+        pytest.param(
+            config_text(
+                staples=bread_staple(
+                    "product_url: https://www.ab.gr/eshop/bread/white-loaf/p/7654321",
+                    product_id='"1234567"',
+                )
+            ),
+            ["staples.breakfast.0", "does not agree"],
+            id="id-and-url-disagree",
+        ),
+        pytest.param(
+            config_text(
+                staples=staples_text(
+                    "    - key: bread\n"
+                    "      product_url: https://www.ab.gr/eshop/category/bread\n"
+                    "      quantity: 1"
+                )
+            ),
+            ["staples.breakfast.0", "canonical AB.gr product URL"],
+            id="category-url",
+        ),
+        pytest.param(
+            config_text(
+                staples=(
+                    "  breakfast:\n"
+                    "    - key: bread\n"
+                    '      product_id: "1"\n'
+                    "      quantity: 1\n"
+                    "  lunch:\n"
+                    "    - key: bread\n"
+                    '      product_id: "2"\n'
+                    "      quantity: 1"
+                )
+            ),
+            ["'bread'", "staples.breakfast", "staples.lunch"],
+            id="duplicate-key-across-categories",
+        ),
+        pytest.param(
+            config_text(staples=bread_staple('approved_alternative_product_ids: ["1"]')),
+            ["equals the preferred product ID"],
+            id="alternative-equals-preferred",
+        ),
+        pytest.param(
+            config_text(staples=bread_staple('approved_alternative_product_ids: ["2", "2"]')),
+            ["duplicated"],
+            id="duplicate-alternatives",
+        ),
+    ],
+)
+def test_invalid_staple_relations_fail_with_diagnostic(text: str, messages: list[str]) -> None:
+    with pytest.raises(GrossyConfigError) as excinfo:
+        load_config_text(text)
+    for message in messages:
+        assert message in str(excinfo.value)
+
+
+class TestAcceptedValues:
+    def test_fractional_and_quoted_decimal_budget_ok(self) -> None:
+        assert load_config_text(config_text(weekly_budget="50.5")).weekly_budget == Decimal("50.5")
+        # Decimal fields stay YAML-compatible: quoted decimal strings are valid.
+        assert load_config_text(config_text(weekly_budget='"50.50"')).weekly_budget == Decimal(
+            "50.5"
+        )
 
     def test_improvement_zero_ok(self) -> None:
         config = load_config_text(config_text(material_unit_price_improvement_pct="0"))
         assert config.material_unit_price_improvement_pct == Decimal("0")
 
-    def test_zero_household_count_fails(self) -> None:
-        with pytest.raises(GrossyConfigError) as excinfo:
-            load_config_text(
-                config_text(household="  adults: 0\n  children: 1\n  recipe_servings: 3")
-            )
-        assert "config.household.adults:" in str(excinfo.value)
-
-    def test_missing_required_block_fails(self) -> None:
-        with pytest.raises(GrossyConfigError) as excinfo:
-            load_config_text(config_text(household=""))
-        assert "config.household:" in str(excinfo.value)
-
-
-class TestStrictScalarTypes:
-    """Wrong YAML scalar types must be rejected, not coerced (PRD 7.3.5/7.3.10)."""
-
-    def test_quoted_int_household_count_fails(self) -> None:
-        with pytest.raises(GrossyConfigError) as excinfo:
-            load_config_text(
-                config_text(household='  adults: "2"\n  children: 1\n  recipe_servings: 3')
-            )
-        assert "config.household.adults:" in str(excinfo.value)
-
-    def test_boolean_household_count_fails(self) -> None:
-        with pytest.raises(GrossyConfigError) as excinfo:
-            load_config_text(
-                config_text(household="  adults: true\n  children: 1\n  recipe_servings: 3")
-            )
-        assert "config.household.adults:" in str(excinfo.value)
-
-    def test_quoted_int_staple_quantity_fails(self) -> None:
-        text = config_text(
-            staples=staples_text('    - key: bread\n      product_id: "1"\n      quantity: "1"')
-        )
-        with pytest.raises(GrossyConfigError) as excinfo:
-            load_config_text(text)
-        assert "config.staples.breakfast.0.quantity:" in str(excinfo.value)
-
-    def test_quoted_bool_appliance_available_fails(self) -> None:
-        text = config_text().replace(
-            "  air_fryer:\n    available: true",
-            '  air_fryer:\n    available: "yes"',
-        )
-        with pytest.raises(GrossyConfigError) as excinfo:
-            load_config_text(text)
-        assert "config.appliances.air_fryer.available:" in str(excinfo.value)
-
-    def test_quoted_bool_preference_fails(self) -> None:
-        text = config_text(
-            appliance_preferences=(
-                '  prefer_air_fryer_over_pan_frying: "false"\n'
-                "  prefer_thermomix_native_over_manual: true"
-            )
-        )
-        with pytest.raises(GrossyConfigError) as excinfo:
-            load_config_text(text)
-        assert "config.appliance_preferences.prefer_air_fryer_over_pan_frying:" in str(
-            excinfo.value
-        )
-
-    def test_quoted_bool_allow_substitution_fails(self) -> None:
-        text = config_text(
-            staples=staples_text(
-                '    - key: bread\n      product_id: "1"\n      quantity: 1\n'
-                '      allow_substitution: "false"'
-            )
-        )
-        with pytest.raises(GrossyConfigError) as excinfo:
-            load_config_text(text)
-        assert "config.staples.breakfast.0.allow_substitution:" in str(excinfo.value)
-
     def test_native_yaml_scalars_still_accepted(self) -> None:
-        text = config_text(
-            staples=staples_text(
-                '    - key: bread\n      product_id: "1"\n      quantity: 1\n'
-                "      allow_substitution: true"
-            )
-        )
-        config = load_config_text(text)
-        assert config.household.adults == 2
-        assert config.staples.breakfast[0].quantity == 1
-        assert config.staples.breakfast[0].allow_substitution is True
-
-    def test_quoted_decimal_budget_still_accepted(self) -> None:
-        # Decimal fields stay YAML-compatible: quoted decimal strings are valid.
-        config = load_config_text(config_text(weekly_budget='"50.50"'))
-        assert config.weekly_budget == Decimal("50.5")
-
-
-class TestStaples:
-    def test_valid_staple(self) -> None:
         config = load_config_text(
             config_text(
-                staples=staples_text(
-                    '    - key: bread\n      product_id: "1234567"\n      quantity: 1'
+                staples=bread_staple(
+                    "allow_substitution: true", "max_product_price_eur: 3.5", product_id='"1234567"'
                 )
             )
         )
+        assert config.household.adults == 2
         staple = config.staples.breakfast[0]
         assert staple.key == "bread"
         assert staple.product_id == "1234567"
         assert staple.quantity == 1
-
-    def test_staple_needs_id_or_url(self) -> None:
-        text = config_text(staples=staples_text("    - key: bread\n      quantity: 1"))
-        with pytest.raises(GrossyConfigError) as excinfo:
-            load_config_text(text)
-        message = str(excinfo.value)
-        assert "staples.breakfast.0" in message
-        assert "product_id or a canonical product_url" in message
-
-    def test_id_and_url_must_agree(self) -> None:
-        text = config_text(
-            staples=staples_text(
-                "    - key: bread\n"
-                '      product_id: "1234567"\n'
-                "      product_url: https://www.ab.gr/eshop/bread/white-loaf/p/7654321\n"
-                "      quantity: 1"
-            )
-        )
-        with pytest.raises(GrossyConfigError) as excinfo:
-            load_config_text(text)
-        message = str(excinfo.value)
-        assert "staples.breakfast.0" in message
-        assert "does not agree" in message
+        assert staple.allow_substitution is True
+        assert staple.max_product_price_eur == Decimal("3.5")
 
     def test_id_and_url_agree(self) -> None:
         config = load_config_text(
             config_text(
-                staples=staples_text(
-                    "    - key: bread\n"
-                    '      product_id: "1234567"\n'
-                    "      product_url: https://www.ab.gr/eshop/bread/white-loaf/p/1234567\n"
-                    "      quantity: 1"
+                staples=bread_staple(
+                    "product_url: https://www.ab.gr/eshop/bread/white-loaf/p/1234567",
+                    product_id='"1234567"',
                 )
             )
         )
@@ -352,35 +415,17 @@ class TestStaples:
             == "https://www.ab.gr/eshop/bread/white-loaf/p/1234567"
         )
 
-    def test_category_url_fails_with_field_path(self) -> None:
-        # A category (or any non-product route) URL carries no product
-        # identity and fails closed at the product_url field.
-        text = config_text(
-            staples=staples_text(
-                "    - key: bread\n"
-                "      product_url: https://www.ab.gr/eshop/category/bread\n"
-                "      quantity: 1"
-            )
-        )
-        with pytest.raises(GrossyConfigError) as excinfo:
-            load_config_text(text)
-        message = str(excinfo.value)
-        assert "staples.breakfast.0" in message
-        assert "canonical AB.gr product URL" in message
+    @pytest.mark.parametrize(
+        "url", [OBSERVED_PRODUCT_URL, GREEK_PRODUCT_URL], ids=["observed", "greek"]
+    )
+    def test_url_only_staple_in_yaml(self, url: str) -> None:
+        staple_line = f"    - key: yogurt\n      product_url: {url}\n      quantity: 1"
+        config = load_config_text(config_text(staples=staples_text(staple_line)))
+        assert config.staples.breakfast[0].product_id is None
+        assert config.staples.breakfast[0].product_url == url
 
-    def test_observed_product_url_accepted(self) -> None:
-        # The real observed AB.gr product page URL must validate.
-        config = load_config_text(
-            config_text(
-                staples=staples_text(
-                    "    - key: yogurt\n"
-                    f"      product_url: {OBSERVED_PRODUCT_URL}\n"
-                    "      quantity: 1"
-                )
-            )
-        )
-        assert config.staples.breakfast[0].product_url == OBSERVED_PRODUCT_URL
 
+class TestStapleModelUrlBoundary:
     @pytest.mark.parametrize(
         "url",
         [
@@ -407,144 +452,19 @@ class TestStaples:
         with pytest.raises(ValueError):
             StapleModel(key="x", quantity=1, product_url=url)
 
-    def test_greek_url_accepted_at_model_level(self) -> None:
-        url = "https://www.ab.gr/el/eshop/Γαλακτοκομικά/Γιαούρτι/p/7633916"
-        staple = StapleModel(key="yogurt", quantity=1, product_id="7633916", product_url=url)
+    @pytest.mark.parametrize(
+        "url,product_id",
+        [
+            pytest.param(GREEK_PRODUCT_URL, "7633916", id="greek"),
+            pytest.param(ENCODED_GREEK_PRODUCT_URL, None, id="percent-encoded-greek"),
+            pytest.param(
+                "https://www.ab.gr/eshop/bread/white-loaf/p/1234567", "1234567", id="plain"
+            ),
+        ],
+    )
+    def test_model_accepts_canonical_forms(self, url: str, product_id: str | None) -> None:
+        staple = StapleModel(key="yogurt", quantity=1, product_id=product_id, product_url=url)
         assert staple.product_url == url
-
-    def test_encoded_greek_url_accepted_at_model_level(self) -> None:
-        # UTF-8 percent-encoding of the same Greek slug is accepted and
-        # yields the same identity.
-        url = "https://www.ab.gr/en/eshop/Dairy/%CE%93%CE%B9%CE%B1%CF%8C%CF%85%CF%81%CF%84%CE%B9/p/7633916"
-        staple = StapleModel(key="yogurt", quantity=1, product_url=url)
-        assert staple.product_url == url
-
-    def test_plain_no_port_url_accepted_at_model_level(self) -> None:
-        # The ordinary canonical port-free URL remains accepted at the
-        # StapleModel boundary.
-        url = "https://www.ab.gr/eshop/bread/white-loaf/p/1234567"
-        staple = StapleModel(key="bread", quantity=1, product_id="1234567", product_url=url)
-        assert staple.product_url == url
-
-    def test_greek_url_in_yaml(self) -> None:
-        url = "https://www.ab.gr/el/eshop/Γαλακτοκομικά/Γιαούρτι/p/7633916"
-        staple_line = f"    - key: yogurt\n      product_url: {url}\n      quantity: 1"
-        config = load_config_text(config_text(staples=staples_text(staple_line)))
-        assert config.staples.breakfast[0].product_id is None
-        assert config.staples.breakfast[0].product_url == url
-
-    def test_encoded_traversal_url_fails_with_field_path(self) -> None:
-        text = config_text(
-            staples=staples_text(
-                "    - key: bread\n"
-                "      product_url: https://www.ab.gr/eshop/%2e%2e/white-loaf/p/12345\n"
-                "      quantity: 1"
-            )
-        )
-        with pytest.raises(GrossyConfigError) as excinfo:
-            load_config_text(text)
-        assert "config.staples.breakfast.0.product_url:" in str(excinfo.value)
-
-    def test_non_canonical_url_fails_with_field_path(self) -> None:
-        text = config_text(
-            staples=staples_text(
-                "    - key: bread\n"
-                "      product_url: https://example.com/1234567\n"
-                "      quantity: 1"
-            )
-        )
-        with pytest.raises(GrossyConfigError) as excinfo:
-            load_config_text(text)
-        assert "config.staples.breakfast.0.product_url:" in str(excinfo.value)
-
-    def test_zero_quantity_fails_with_precise_path(self) -> None:
-        text = config_text(
-            staples=staples_text('    - key: bread\n      product_id: "1"\n      quantity: 0')
-        )
-        with pytest.raises(GrossyConfigError) as excinfo:
-            load_config_text(text)
-        assert "config.staples.breakfast.0.quantity:" in str(excinfo.value)
-
-    def test_duplicate_key_across_categories_fails(self) -> None:
-        text = config_text(
-            staples=(
-                "  breakfast:\n"
-                "    - key: bread\n"
-                '      product_id: "1"\n'
-                "      quantity: 1\n"
-                "  lunch:\n"
-                "    - key: bread\n"
-                '      product_id: "2"\n'
-                "      quantity: 1"
-            )
-        )
-        with pytest.raises(GrossyConfigError) as excinfo:
-            load_config_text(text)
-        message = str(excinfo.value)
-        assert "'bread'" in message
-        assert "staples.breakfast" in message
-        assert "staples.lunch" in message
-
-    def test_alternative_equal_to_preferred_fails(self) -> None:
-        text = config_text(
-            staples=staples_text(
-                "    - key: bread\n"
-                '      product_id: "1"\n'
-                "      quantity: 1\n"
-                '      approved_alternative_product_ids: ["1"]'
-            )
-        )
-        with pytest.raises(GrossyConfigError) as excinfo:
-            load_config_text(text)
-        assert "equals the preferred product ID" in str(excinfo.value)
-
-    def test_duplicate_alternatives_fail(self) -> None:
-        text = config_text(
-            staples=staples_text(
-                "    - key: bread\n"
-                '      product_id: "1"\n'
-                "      quantity: 1\n"
-                '      approved_alternative_product_ids: ["2", "2"]'
-            )
-        )
-        with pytest.raises(GrossyConfigError) as excinfo:
-            load_config_text(text)
-        assert "duplicated" in str(excinfo.value)
-
-    def test_zero_price_limit_fails_with_precise_path(self) -> None:
-        text = config_text(
-            staples=staples_text(
-                "    - key: bread\n"
-                '      product_id: "1"\n'
-                "      quantity: 1\n"
-                "      max_line_price_eur: 0"
-            )
-        )
-        with pytest.raises(GrossyConfigError) as excinfo:
-            load_config_text(text)
-        assert "config.staples.breakfast.0.max_line_price_eur:" in str(excinfo.value)
-
-    def test_positive_price_limit_ok(self) -> None:
-        config = load_config_text(
-            config_text(
-                staples=staples_text(
-                    "    - key: bread\n"
-                    '      product_id: "1"\n'
-                    "      quantity: 1\n"
-                    "      max_product_price_eur: 3.5"
-                )
-            )
-        )
-        assert config.staples.breakfast[0].max_product_price_eur == Decimal("3.5")
-
-    def test_appliance_capacity_must_be_positive(self) -> None:
-        text = config_text().replace(
-            "  air_fryer:\n    available: true",
-            "  air_fryer:\n    available: true\n    capacity_litres: 0",
-        )
-        with pytest.raises(GrossyConfigError) as excinfo:
-            load_config_text(text)
-        assert "config.appliances.air_fryer.capacity_litres:" in str(excinfo.value)
 
 
 class TestLoaderErrors:
@@ -594,188 +514,148 @@ class TestProductIdFromUrl:
     normalizes into an accepted route marker or identity.
     """
 
-    GREEK_PRODUCT_URL = (
-        "https://www.ab.gr/el/eshop/Γαλακτοκομικά/Γιαούρτι/Γιαουρτι-2-Κατά-1kg/p/7633916"
+    @pytest.mark.parametrize(
+        "url,product_id",
+        [
+            pytest.param(OBSERVED_PRODUCT_URL, "7633916", id="observed-locale-route"),
+            pytest.param(
+                "https://www.ab.gr/eshop/bread/white-loaf/p/1234567", "1234567", id="unprefixed"
+            ),
+            pytest.param(
+                "https://www.ab.gr/el/eshop/bread/white-loaf/p/1234567", "1234567", id="el-locale"
+            ),
+            # Raw Greek (and other printable Unicode) category and slug text is
+            # harmless: identity comes from the host, route, and numeric ID.
+            pytest.param(GREEK_PRODUCT_URL, "7633916", id="raw-greek-slug"),
+            pytest.param(
+                "https://www.ab.gr/eshop/ｂｒｅａｄ/white-loaf/p/12345",
+                "12345",
+                id="fullwidth-slug",
+            ),
+            pytest.param(ENCODED_GREEK_PRODUCT_URL, "7633916", id="percent-encoded-greek"),
+            # Percent-encoding of unreserved characters (%2D = -, %7E = ~) is harmless.
+            pytest.param(
+                "https://www.ab.gr/eshop/bread/white%2Dloaf%7E2024/p/1234567",
+                "1234567",
+                id="encoded-unreserved",
+            ),
+        ],
     )
-    ENCODED_GREEK_PRODUCT_URL = "https://www.ab.gr/en/eshop/Dairy/%CE%93%CE%B9%CE%B1%CF%8C%CF%85%CF%81%CF%84%CE%B9/p/7633916"
-
-    def test_parses_observed_locale_product_url(self) -> None:
-        assert product_id_from_url(OBSERVED_PRODUCT_URL) == "7633916"
-
-    def test_parses_unprefixed_eshop_route(self) -> None:
-        assert (
-            product_id_from_url("https://www.ab.gr/eshop/bread/white-loaf/p/1234567") == "1234567"
-        )
-
-    def test_rejects_numeric_category_url(self) -> None:
-        # A numeric segment in any position other than the identity marker
-        # (for example a numeric category ID) is not a product ID.
-        assert product_id_from_url("https://www.ab.gr/eshop/category/1234567") is None
-        assert product_id_from_url("https://www.ab.gr/eshop/1234567") is None
-
-    def test_rejects_dot_segments(self) -> None:
-        assert product_id_from_url("https://www.ab.gr/eshop/1234567/../../checkout") is None
-        assert product_id_from_url("https://www.ab.gr/eshop/bread/./white-loaf/p/1") is None
-
-    def test_rejects_encoded_traversal(self) -> None:
-        # Percent-encoded dot segments and slashes decode (or normalize) to a
-        # different destination; every encoding must fail closed.
-        assert product_id_from_url("https://www.ab.gr/en/eshop/%2e%2e/p/12345") is None
-        assert product_id_from_url("https://www.ab.gr/en/eshop/%2E%2E/p/12345") is None
-        assert product_id_from_url("https://www.ab.gr/eshop/%2e/white-loaf/p/12345") is None
-        assert product_id_from_url("https://www.ab.gr/eshop/bread%2fwhite-loaf/p/12345") is None
-        assert product_id_from_url("https://www.ab.gr/eshop/white-loaf/p/12345%2e") is None
-        assert product_id_from_url("https://www.ab.gr/eshop/white-loaf/p/%252e%252e12345") is None
-
-    def test_rejects_backslash_path_segments(self) -> None:
-        # Browsers normalize backslashes to slashes, changing the destination.
-        assert product_id_from_url("https://www.ab.gr/eshop/bread\\white-loaf/p/12345") is None
-        assert product_id_from_url("https://www.ab.gr/en/eshop/\\../p/12345") is None
-
-    def test_rejects_control_path_characters(self) -> None:
-        # Raw C0/C1 controls, DEL, and format characters fail on the raw
-        # string (urlsplit strips tabs and newlines, so the parsed path would
-        # hide them).
-        assert product_id_from_url("https://www.ab.gr/eshop/bread\x00/white-loaf/p/12345") is None
-        assert product_id_from_url("https://www.ab.gr/eshop/bread/white-loaf\n/p/12345") is None
-        assert product_id_from_url("https://www.ab.gr/eshop/bread/white-loaf\tp/12345") is None
-        assert product_id_from_url("https://www.ab.gr/eshop/bread\x7f/white-loaf/p/12345") is None
-        assert product_id_from_url("https://www.ab.gr/eshop/bread\u200b/white-loaf/p/12345") is None
-        assert product_id_from_url("https://www.ab.gr/eshop/bread\u0085/white-loaf/p/12345") is None
-
-    def test_accepts_raw_unicode_slug(self) -> None:
-        # Raw Greek (and other printable Unicode) category and slug text is
-        # harmless: identity comes from the host, route, and numeric ID.
-        assert product_id_from_url(self.GREEK_PRODUCT_URL) == "7633916"
-        assert (
-            product_id_from_url("https://www.ab.gr/eshop/ｂｒｅａｄ/white-loaf/p/12345") == "12345"
-        )
-
-    def test_accepts_percent_encoded_greek(self) -> None:
-        assert product_id_from_url(self.ENCODED_GREEK_PRODUCT_URL) == "7633916"
-
-    def test_accepts_unreserved_character_encoding(self) -> None:
-        # Percent-encoding of unreserved characters (%2D = -, %7E = ~) is
-        # harmless and accepted.
-        assert (
-            product_id_from_url("https://www.ab.gr/eshop/bread/white%2Dloaf%7E2024/p/1234567")
-            == "1234567"
-        )
-
-    def test_rejects_malformed_percent_escapes(self) -> None:
-        assert product_id_from_url("https://www.ab.gr/eshop/bread%2g/white-loaf/p/12345") is None
-        assert product_id_from_url("https://www.ab.gr/eshop/bread%zz/white-loaf/p/12345") is None
-        assert product_id_from_url("https://www.ab.gr/eshop/bread%2/white-loaf/p/12345") is None
-        assert product_id_from_url("https://www.ab.gr/eshop/bread%/white-loaf/p/12345") is None
-
-    def test_rejects_invalid_utf8_escapes(self) -> None:
-        # Truncated or invalid UTF-8 byte sequences fail closed.
-        assert product_id_from_url("https://www.ab.gr/eshop/bread%ce/p/12345") is None
-        assert product_id_from_url("https://www.ab.gr/eshop/bread%ff%fe/p/12345") is None
-        assert product_id_from_url("https://www.ab.gr/eshop/bread%ce%28/p/12345") is None
-
-    def test_rejects_mixed_dot_traversal(self) -> None:
-        # Literal, encoded, and mixed dot segments all decode to ``.`` or
-        # ``..`` and are rejected.
-        assert product_id_from_url("https://www.ab.gr/en/eshop/%2e./p/12345") is None
-        assert product_id_from_url("https://www.ab.gr/en/eshop/.%2e/p/12345") is None
-        assert product_id_from_url("https://www.ab.gr/en/eshop/%2E%2e/p/12345") is None
-        assert product_id_from_url("https://www.ab.gr/en/eshop/%2e%2e%2f/p/12345") is None
-
-    def test_rejects_nested_encoding(self) -> None:
-        # Double encoding survives one decode as percent text; a second
-        # decode is never applied, so it fails.
-        assert product_id_from_url("https://www.ab.gr/eshop/%252e%252e/white-loaf/p/12345") is None
-        assert product_id_from_url("https://www.ab.gr/eshop/%252F/white-loaf/p/12345") is None
-        assert product_id_from_url("https://www.ab.gr/eshop/100%25/white-loaf/p/12345") is None
-
-    def test_rejects_encoded_separators_and_backslashes(self) -> None:
-        # Encoded path separators and backslashes normalize to separators
-        # after decoding and change the destination; they fail.
-        assert product_id_from_url("https://www.ab.gr/eshop/bread%2Fwhite-loaf/p/12345") is None
-        assert product_id_from_url("https://www.ab.gr/eshop/bread%5cwhite-loaf/p/12345") is None
-        assert product_id_from_url("https://www.ab.gr/eshop/bread%5Cwhite-loaf/p/12345") is None
-
-    def test_rejects_decoded_controls_and_space(self) -> None:
-        # Decoded control characters (including C1) and spaces fail even
-        # though the raw string is plain printable ASCII.
-        assert product_id_from_url("https://www.ab.gr/eshop/bread%00/white-loaf/p/12345") is None
-        assert product_id_from_url("https://www.ab.gr/eshop/bread%0ap/12345") is None
-        assert product_id_from_url("https://www.ab.gr/eshop/bread%7f/white-loaf/p/12345") is None
-        assert product_id_from_url("https://www.ab.gr/eshop/bread%c2%85/white-loaf/p/12345") is None
-        assert product_id_from_url("https://www.ab.gr/eshop/bread%20/white-loaf/p/12345") is None
-
-    def test_rejects_normalized_route_markers(self) -> None:
-        # Route markers are raw ASCII: an encoded marker, locale, or eshop
-        # segment never normalizes into acceptance.
-        assert product_id_from_url("https://www.ab.gr/eshop/bread/white-loaf/%70/12345") is None
-        assert product_id_from_url("https://www.ab.gr/es%68op/bread/white-loaf/p/12345") is None
-        assert product_id_from_url("https://www.ab.gr/%65n/eshop/bread/white-loaf/p/12345") is None
-
-    def test_rejects_encoded_identity_digits(self) -> None:
-        assert product_id_from_url("https://www.ab.gr/eshop/bread/white-loaf/p/12345%32") is None
-        assert product_id_from_url("https://www.ab.gr/eshop/bread/white-loaf/p/%312345") is None
-
-    def test_rejects_encoded_authority_forms(self) -> None:
-        # The host is an exact string match; an encoded authority cannot
-        # match www.ab.gr.
-        assert product_id_from_url("https://www.ab.gr%2e/eshop/bread/white-loaf/p/12345") is None
-
-    def test_rejects_empty_user_info_and_zero_port(self) -> None:
-        # Reviewer note (attempt 03): truthiness guards missed empty user info
-        # (username is None there) and port 0; both evade the authority policy.
-        path = "/eshop/bread/white-loaf/p/12345"
-        assert product_id_from_url(f"https://@www.ab.gr{path}") is None
-        assert product_id_from_url(f"https://www.ab.gr:0{path}") is None
-
-    def test_rejects_empty_port_delimiter(self) -> None:
-        # Reviewer finding (attempt 04): a trailing colon is an empty port
-        # delimiter. The authority is then not the exact canonical port-free
-        # host and must fail closed (both the bare and locale routes).
-        assert product_id_from_url("https://www.ab.gr:/eshop/bread/white-loaf/p/12345") is None
-        assert product_id_from_url("https://www.ab.gr:/en/eshop/bread/white-loaf/p/12345") is None
-
-    def test_accepts_plain_no_port_url(self) -> None:
-        # The ordinary canonical port-free authority remains accepted, with
-        # and without a locale segment.
-        assert (
-            product_id_from_url("https://www.ab.gr/el/eshop/bread/white-loaf/p/1234567")
-            == "1234567"
-        )
-        assert (
-            product_id_from_url("https://www.ab.gr/eshop/bread/white-loaf/p/1234567") == "1234567"
-        )
+    def test_accepts_canonical_product_route(self, url: str, product_id: str) -> None:
+        assert product_id_from_url(url) == product_id
 
     @pytest.mark.parametrize(
         "url",
         [
+            # A numeric segment anywhere but the identity marker is not a product ID.
+            pytest.param("https://www.ab.gr/eshop/category/1234567", id="numeric-category"),
+            pytest.param("https://www.ab.gr/eshop/1234567", id="bare-numeric-segment"),
+            pytest.param("https://www.ab.gr/eshop/category/bread", id="category-route"),
+            pytest.param("https://www.ab.gr/eshop/p/1234567", id="missing-slug"),
+            pytest.param("https://www.ab.gr/en/eshop/p/1234567", id="missing-slug-locale"),
+            pytest.param("https://www.ab.gr/eshop/bread/white-loaf/p/12a3", id="non-numeric-id"),
+            # Dot segments, literal or encoded in any mix, decode to . or .. and fail.
+            pytest.param("https://www.ab.gr/eshop/1234567/../../checkout", id="literal-dotdot"),
+            pytest.param("https://www.ab.gr/eshop/bread/./white-loaf/p/1", id="literal-dot"),
+            pytest.param("https://www.ab.gr/en/eshop/%2e%2e/p/12345", id="encoded-dotdot"),
+            pytest.param("https://www.ab.gr/en/eshop/%2E%2E/p/12345", id="encoded-dotdot-upper"),
+            pytest.param("https://www.ab.gr/eshop/%2e/white-loaf/p/12345", id="encoded-dot"),
+            pytest.param("https://www.ab.gr/en/eshop/%2e./p/12345", id="mixed-dot-1"),
+            pytest.param("https://www.ab.gr/en/eshop/.%2e/p/12345", id="mixed-dot-2"),
+            pytest.param("https://www.ab.gr/en/eshop/%2E%2e/p/12345", id="mixed-dot-case"),
+            pytest.param("https://www.ab.gr/en/eshop/%2e%2e%2f/p/12345", id="encoded-dotdot-slash"),
+            pytest.param(
+                "https://www.ab.gr/eshop/white-loaf/p/12345%2e", id="trailing-encoded-dot"
+            ),
+            # Double encoding is never decoded twice; it fails rather than normalizing.
+            pytest.param(
+                "https://www.ab.gr/eshop/%252e%252e/white-loaf/p/12345", id="double-encoded-dotdot"
+            ),
+            pytest.param("https://www.ab.gr/eshop/white-loaf/p/%252e%252e12345", id="double-in-id"),
+            pytest.param(
+                "https://www.ab.gr/eshop/%252F/white-loaf/p/12345", id="double-encoded-slash"
+            ),
+            pytest.param("https://www.ab.gr/eshop/100%25/white-loaf/p/12345", id="encoded-percent"),
+            # Encoded separators and backslashes normalize to separators after decoding.
+            pytest.param("https://www.ab.gr/eshop/bread%2fwhite-loaf/p/12345", id="encoded-slash"),
+            pytest.param(
+                "https://www.ab.gr/eshop/bread%2Fwhite-loaf/p/12345", id="encoded-slash-upper"
+            ),
+            pytest.param(
+                "https://www.ab.gr/eshop/bread%5cwhite-loaf/p/12345", id="encoded-backslash"
+            ),
+            pytest.param(
+                "https://www.ab.gr/eshop/bread%5Cwhite-loaf/p/12345", id="encoded-backslash-upper"
+            ),
+            pytest.param("https://www.ab.gr/eshop/bread\\white-loaf/p/12345", id="raw-backslash"),
+            pytest.param("https://www.ab.gr/en/eshop/\\../p/12345", id="raw-backslash-dotdot"),
+            # Raw controls, DEL and format characters fail on the raw string
+            # (urlsplit strips tabs/newlines, so the parsed path would hide them).
+            pytest.param("https://www.ab.gr/eshop/bread\x00/white-loaf/p/12345", id="raw-nul"),
+            pytest.param("https://www.ab.gr/eshop/bread/white-loaf\n/p/12345", id="raw-newline"),
+            pytest.param("https://www.ab.gr/eshop/bread/white-loaf\tp/12345", id="raw-tab"),
+            pytest.param("https://www.ab.gr/eshop/bread\x7f/white-loaf/p/12345", id="raw-del"),
+            pytest.param("https://www.ab.gr/eshop/bread\u200b/white-loaf/p/12345", id="raw-zwsp"),
+            pytest.param("https://www.ab.gr/eshop/bread\u0085/white-loaf/p/12345", id="raw-nel"),
+            # Decoded controls (including C1) and spaces fail even from plain ASCII input.
+            pytest.param("https://www.ab.gr/eshop/bread%00/white-loaf/p/12345", id="encoded-nul"),
+            pytest.param("https://www.ab.gr/eshop/bread%0ap/12345", id="encoded-newline"),
+            pytest.param("https://www.ab.gr/eshop/bread%7f/white-loaf/p/12345", id="encoded-del"),
+            pytest.param(
+                "https://www.ab.gr/eshop/bread%c2%85/white-loaf/p/12345", id="encoded-nel"
+            ),
+            pytest.param("https://www.ab.gr/eshop/bread%20/white-loaf/p/12345", id="encoded-space"),
+            # Malformed or invalid-UTF-8 percent escapes fail closed.
+            pytest.param("https://www.ab.gr/eshop/bread%2g/white-loaf/p/12345", id="bad-hex-1"),
+            pytest.param("https://www.ab.gr/eshop/bread%zz/white-loaf/p/12345", id="bad-hex-2"),
+            pytest.param("https://www.ab.gr/eshop/bread%2/white-loaf/p/12345", id="short-escape"),
+            pytest.param("https://www.ab.gr/eshop/bread%/white-loaf/p/12345", id="bare-percent"),
+            pytest.param("https://www.ab.gr/eshop/bread%ce/p/12345", id="truncated-utf8"),
+            pytest.param("https://www.ab.gr/eshop/bread%ff%fe/p/12345", id="invalid-utf8"),
+            pytest.param(
+                "https://www.ab.gr/eshop/bread%ce%28/p/12345", id="invalid-utf8-continuation"
+            ),
+            # Route markers are raw ASCII: encoded forms never normalize into acceptance.
+            pytest.param(
+                "https://www.ab.gr/eshop/bread/white-loaf/%70/12345", id="encoded-p-marker"
+            ),
+            pytest.param("https://www.ab.gr/es%68op/bread/white-loaf/p/12345", id="encoded-eshop"),
+            pytest.param(
+                "https://www.ab.gr/%65n/eshop/bread/white-loaf/p/12345", id="encoded-locale"
+            ),
+            pytest.param(
+                "https://www.ab.gr/eshop/bread/white-loaf/p/12345%32", id="encoded-id-digit"
+            ),
+            pytest.param(
+                "https://www.ab.gr/eshop/bread/white-loaf/p/%312345", id="encoded-id-lead"
+            ),
+            # Authority must be exactly the canonical port-free host over https.
+            pytest.param(
+                "https://www.ab.gr%2e/eshop/bread/white-loaf/p/12345", id="encoded-authority"
+            ),
+            pytest.param("https://@www.ab.gr/eshop/bread/white-loaf/p/12345", id="empty-user-info"),
+            pytest.param(
+                "https://user:pw@www.ab.gr/eshop/bread/white-loaf/p/1234567", id="user-info"
+            ),
+            pytest.param("https://www.ab.gr:0/eshop/bread/white-loaf/p/12345", id="zero-port"),
+            pytest.param(
+                "https://www.ab.gr:443/eshop/bread/white-loaf/p/1234567", id="explicit-port"
+            ),
             pytest.param(
                 "https://www.ab.gr:443x/eshop/bread/white-loaf/p/12345", id="malformed-port"
             ),
-            pytest.param("https://example.com/eshop/bread/white-loaf/p/1234567", id="foreign-host"),
+            pytest.param("https://www.ab.gr:/eshop/bread/white-loaf/p/12345", id="empty-port"),
             pytest.param(
-                "http://www.ab.gr/eshop/bread/white-loaf/p/1234567", id="non-https-scheme"
+                "https://www.ab.gr:/en/eshop/bread/white-loaf/p/12345", id="empty-port-locale"
             ),
+            pytest.param("https://example.com/eshop/bread/white-loaf/p/1234567", id="foreign-host"),
+            pytest.param("http://www.ab.gr/eshop/bread/white-loaf/p/1234567", id="non-https"),
             pytest.param(
                 "https://www.ab.gr/fr/eshop/bread/white-loaf/p/1234567", id="unknown-locale"
             ),
-            pytest.param("https://www.ab.gr/eshop/bread/white-loaf/p/12a3", id="non-numeric-id"),
-            pytest.param("https://www.ab.gr/eshop/category/bread", id="non-product-category-route"),
+            pytest.param("https://www.ab.gr/eshop/bread/white-loaf/p/1234567?utm=1", id="query"),
+            pytest.param("https://www.ab.gr/eshop/bread/white-loaf/p/1234567#ref", id="fragment"),
         ],
     )
-    def test_rejects_invalid_product_route_or_authority(self, url: str) -> None:
+    def test_rejects_ambiguous_or_noncanonical_url(self, url: str) -> None:
         assert product_id_from_url(url) is None
-
-    def test_rejects_user_info_port_query_fragment(self) -> None:
-        base = "https://www.ab.gr/eshop/bread/white-loaf/p/1234567"
-        assert (
-            product_id_from_url("https://user:pw@www.ab.gr/eshop/bread/white-loaf/p/1234567")
-            is None
-        )
-        assert product_id_from_url("https://www.ab.gr:443/eshop/bread/white-loaf/p/1234567") is None
-        assert product_id_from_url(base + "?utm=1") is None
-        assert product_id_from_url(base + "#ref") is None
-
-    def test_rejects_missing_slug_before_identity(self) -> None:
-        assert product_id_from_url("https://www.ab.gr/eshop/p/1234567") is None
-        assert product_id_from_url("https://www.ab.gr/en/eshop/p/1234567") is None

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import stat
 from pathlib import Path
 
 import pytest
@@ -57,27 +58,17 @@ class TestMigrationDiscovery:
 
 
 class TestFreshInstall:
-    def test_fresh_install_applies_all_migrations(
+    def test_fresh_install_applies_all_migrations_with_backup_and_is_idempotent(
         self, grossy_home: GrossyPaths, current_schema_version: int
     ) -> None:
+        """Init migrates a new database to the current version after taking the
+        PRD 12.2.4 pre-migration backup; re-running migrations is a no-op."""
         do_init(grossy_home)
         assert get_schema_version(grossy_home.database_file) == current_schema_version
-
-    def test_fresh_install_no_pre_migration_backup_on_empty(
-        self, grossy_home: GrossyPaths, tmp_path: Path
-    ) -> None:
-        """A brand new empty database gets its pre-migration backup during init."""
-        do_init(grossy_home)
-        # The init process should have created a pre-migration backup.
-        backups = list(grossy_home.backups_dir.glob("pre-migration-*"))
-        assert len(backups) >= 1
-
-    def test_fresh_install_is_idempotent(self, grossy_home: GrossyPaths) -> None:
-        do_init(grossy_home)
-        # Running migrations again should be a no-op.
+        assert list(grossy_home.backups_dir.glob("pre-migration-*"))
         result = run_migrations(grossy_home.database_file, grossy_home.backups_dir)
         assert result.applied_versions == []
-        assert result.total_applied >= 1
+        assert result.total_applied == current_schema_version
 
 
 class TestMigrationChecksums:
@@ -103,11 +94,8 @@ class TestMigrationChecksums:
 
 
 class TestPreMigrationBackup:
-    def test_backup_created_before_first_pending(
-        self, grossy_home: GrossyPaths, tmp_path: Path
-    ) -> None:
-        """PRD 12.2.4: automatic backup before first pending migration."""
-        # Start with a fresh database (no migrations applied).
+    def test_private_backup_created_before_first_pending(self, tmp_path: Path) -> None:
+        """PRD 12.2.4: an automatic 0600 backup holds the pre-migration data."""
         db_path = tmp_path / "test.sqlite3"
         conn = sqlite3.connect(str(db_path))
         conn.execute("CREATE TABLE test_table (id INTEGER PRIMARY KEY)")
@@ -121,35 +109,21 @@ class TestPreMigrationBackup:
         result = run_migrations(db_path, backup_dir)
         assert result.backup_path is not None
         assert result.backup_path.exists()
-        # Verify the backup contains the pre-migration data.
+        assert stat.S_IMODE(result.backup_path.stat().st_mode) == 0o600
         backup_conn = sqlite3.connect(str(result.backup_path))
-        cursor = backup_conn.execute("SELECT id FROM test_table")
-        assert cursor.fetchone()[0] == 42
+        assert backup_conn.execute("SELECT id FROM test_table").fetchone()[0] == 42
         backup_conn.close()
-
-    def test_backup_has_0600_permissions(self, grossy_home: GrossyPaths, tmp_path: Path) -> None:
-        import os
-        import stat
-
-        db_path = tmp_path / "test.sqlite3"
-        conn = sqlite3.connect(str(db_path), isolation_level=None)
-        conn.execute("CREATE TABLE t (id INTEGER)")
-        conn.close()
-
-        backup_dir = tmp_path / "backups"
-        backup_dir.mkdir()
-        result = run_migrations(db_path, backup_dir)
-        assert result.backup_path is not None
-        mode = stat.S_IMODE(os.stat(result.backup_path).st_mode)
-        assert mode == 0o600
 
 
 class TestTransactionalApplication:
-    def test_failed_migration_rolls_back(self, tmp_path: Path) -> None:
-        """PRD 12.2.5: each migration must run transactionally.
+    def test_failed_migration_rolls_back_and_preserves_usable_database(
+        self, tmp_path: Path
+    ) -> None:
+        """PRD 12.2.5/12.2.7/12.2.8: each migration runs transactionally.
 
-        A migration that fails mid-way must leave the database in its
-        prior state (the failing migration's changes are rolled back).
+        A migration that fails mid-way leaves the database in its prior state
+        (earlier migrations stay applied, the failing one is rolled back) and
+        the database file remains usable; nothing is deleted or recreated.
         """
         db_path = tmp_path / "test.sqlite3"
         conn = sqlite3.connect(str(db_path))
@@ -160,48 +134,13 @@ class TestTransactionalApplication:
 
         migrations_dir = tmp_path / "migrations"
         migrations_dir.mkdir()
-        # Migration 001: valid
         (migrations_dir / "001_add_table.sql").write_text(
             "CREATE TABLE new_table (id INTEGER PRIMARY KEY);"
         )
-        # Migration 002: will fail (inserts into non-existent table)
         (migrations_dir / "002_fail.sql").write_text(
             "CREATE TABLE another_table (id INTEGER PRIMARY KEY);\n"
             "INSERT INTO nonexistent_table VALUES (1);\n"
         )
-
-        backup_dir = tmp_path / "backups"
-        backup_dir.mkdir()
-
-        with pytest.raises(sqlite3.OperationalError):
-            run_migrations(db_path, backup_dir, migrations_dir=migrations_dir)
-
-        # Verify migration 001 was applied (it succeeded).
-        conn = sqlite3.connect(str(db_path))
-        cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
-        tables = {row[0] for row in cursor.fetchall()}
-        assert "new_table" in tables  # 001 applied
-        assert "another_table" not in tables  # 002 rolled back
-        # Original data preserved.
-        cursor = conn.execute("SELECT val FROM existing WHERE id=1")
-        assert cursor.fetchone()[0] == "original"
-        conn.close()
-
-
-class TestNoDeletionOrRecreation:
-    def test_migration_failure_preserves_usable_database(self, tmp_path: Path) -> None:
-        """PRD 12.2.7/12.2.8: failed migration preserves the usable database."""
-        db_path = tmp_path / "test.sqlite3"
-        conn = sqlite3.connect(str(db_path))
-        conn.execute("CREATE TABLE persistent (id INTEGER PRIMARY KEY)")
-        conn.execute("INSERT INTO persistent VALUES (1)")
-        conn.execute("COMMIT")
-        conn.close()
-
-        migrations_dir = tmp_path / "migrations"
-        migrations_dir.mkdir()
-        (migrations_dir / "001_fail.sql").write_text("INVALID SQL;\n")
-
         backup_dir = tmp_path / "backups"
         backup_dir.mkdir()
 
@@ -211,7 +150,13 @@ class TestNoDeletionOrRecreation:
         assert db_path.exists()
         conn = open_connection(db_path)
         try:
-            assert conn.execute("SELECT id FROM persistent").fetchone()[0] == 1
+            tables = {
+                row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            }
+            assert "new_table" in tables  # 001 applied
+            assert "another_table" not in tables  # 002 rolled back
+            assert conn.execute("SELECT val FROM existing WHERE id=1").fetchone()[0] == "original"
+            assert get_schema_version(db_path) == 1
         finally:
             conn.close()
 
@@ -287,6 +232,30 @@ class TestRevisionBoundVariantUpgrade:
         run_migrations(db, tmp_path / "bk", migrations_dir=migs_dir)
         assert get_schema_version(db) == 5
         return db
+
+    @staticmethod
+    def _assert_v5_variant_state_intact(db: Path) -> None:
+        """A failed 006 leaves the old-schema table, its single row, clean foreign
+        keys and exactly migrations 1-5 recorded (atomic rollback, PRD 12.2.9)."""
+        conn = open_connection(db)
+        try:
+            tables = {
+                row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            }
+            assert "recipe_variants" in tables
+            assert "recipe_variants_old" not in tables
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(recipe_variants)")}
+            assert "recipe_id" in columns
+            assert "revision_id" not in columns
+            assert conn.execute(
+                "SELECT id, recipe_id, linked_recipe_id, variant_type FROM recipe_variants"
+            ).fetchone() == (1, 1, 2, "air_fryer")
+            assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+            assert sorted(
+                row[0] for row in conn.execute("SELECT version FROM schema_migrations")
+            ) == [1, 2, 3, 4, 5]
+        finally:
+            conn.close()
 
     def _seed_old_schema_variant_rows(self, db: Path) -> None:
         """Seed the pre-006 table exactly as the committed 001 schema allows."""
@@ -455,32 +424,7 @@ class TestRevisionBoundVariantUpgrade:
         with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
             run_migrations(db, tmp_path / "bk2")
 
-        # Verify prior state is fully preserved.
-        conn = open_connection(db)
-        try:
-            # The old table still exists (not renamed, not dropped).
-            tables = {
-                row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
-            }
-            assert "recipe_variants" in tables
-            assert "recipe_variants_old" not in tables
-
-            # The row values are intact.
-            row = conn.execute(
-                "SELECT id, recipe_id, linked_recipe_id, variant_type FROM recipe_variants"
-            ).fetchone()
-            assert row == (1, 1, 2, "air_fryer")
-
-            # Foreign key state is clean.
-            assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
-
-            # schema_migrations has versions 1-5 but NOT 6.
-            versions = sorted(
-                row[0] for row in conn.execute("SELECT version FROM schema_migrations")
-            )
-            assert versions == [1, 2, 3, 4, 5]
-        finally:
-            conn.close()
+        self._assert_v5_variant_state_intact(db)
 
     def test_upgrade_fails_when_current_revision_id_points_to_other_recipe_revision(
         self, tmp_path: Path
@@ -539,39 +483,13 @@ class TestRevisionBoundVariantUpgrade:
         with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
             run_migrations(db, tmp_path / "bk2")
 
-        # Verify prior state is fully preserved (atomic rollback).
+        self._assert_v5_variant_state_intact(db)
         conn = open_connection(db)
         try:
-            # The old table still exists with its original schema.
-            tables = {
-                row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
-            }
-            assert "recipe_variants" in tables
-            assert "recipe_variants_old" not in tables
-
-            # The original column is still recipe_id (not revision_id).
-            columns = {row[1] for row in conn.execute("PRAGMA table_info(recipe_variants)")}
-            assert "recipe_id" in columns
-            assert "revision_id" not in columns
-
-            # The row values are intact.
-            row = conn.execute(
-                "SELECT id, recipe_id, linked_recipe_id, variant_type FROM recipe_variants"
-            ).fetchone()
-            assert row == (1, 1, 2, "air_fryer")
-
             # Recipe A's current_revision_id is unchanged.
-            crid = conn.execute("SELECT current_revision_id FROM recipes WHERE id = 1").fetchone()
-            assert crid[0] == 1
-
-            # Foreign key state is clean.
-            assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
-
-            # schema_migrations has versions 1-5 but NOT 6.
-            versions = sorted(
-                row[0] for row in conn.execute("SELECT version FROM schema_migrations")
-            )
-            assert versions == [1, 2, 3, 4, 5]
+            assert conn.execute(
+                "SELECT current_revision_id FROM recipes WHERE id = 1"
+            ).fetchone() == (1,)
         finally:
             conn.close()
 
@@ -619,60 +537,38 @@ class TestPrimaryFieldConsistency:
         conn.close()
         return db
 
-    def test_upgrade_reconciles_mismatched_primary(
+    def test_upgrade_reconciles_mismatched_primary_and_enforces_derivation(
         self, tmp_path: Path, current_schema_version: int
     ) -> None:
-        """Upgrading from v1 to v2 fixes a mismatched primary_product_id."""
+        """Upgrading from v1 corrects a mismatched primary_product_id; afterwards the
+        field is only derivable from family_members (direct updates rejected,
+        member role changes still propagate)."""
         db = self._create_v1_db_with_mismatch(tmp_path)
-        # Verify the mismatch exists before upgrade.
         conn = open_connection(db)
-        row = conn.execute("SELECT primary_product_id FROM product_families WHERE id=1").fetchone()
-        assert row[0] == 2  # wrong: points to product 2
+        assert conn.execute(
+            "SELECT primary_product_id FROM product_families WHERE id=1"
+        ).fetchone() == (2,)
         conn.close()
 
-        # Upgrade (real migrations dir includes 001 through 004).
-        run_migrations(db, tmp_path / "bk2")
-        assert get_schema_version(db) == current_schema_version
-
-        # After upgrade, primary_product_id must match the actual primary member.
-        conn = open_connection(db)
-        row = conn.execute("SELECT primary_product_id FROM product_families WHERE id=1").fetchone()
-        assert row[0] == 1  # corrected to match family_members
-        conn.close()
-
-    def test_direct_update_of_primary_field_is_rejected(
-        self, tmp_path: Path, current_schema_version: int
-    ) -> None:
-        """A direct UPDATE of primary_product_id disagreeing with the member is rejected."""
-        db = self._create_v1_db_with_mismatch(tmp_path)
         run_migrations(db, tmp_path / "bk2")
         assert get_schema_version(db) == current_schema_version
 
         conn = open_connection(db)
         try:
+            primary = "SELECT primary_product_id FROM product_families WHERE id=1"
+            assert conn.execute(primary).fetchone() == (1,)  # corrected to match family_members
             with pytest.raises(sqlite3.IntegrityError, match="derived from family_members"):
                 conn.execute("UPDATE product_families SET primary_product_id = 999 WHERE id = 1")
+            conn.execute("UPDATE family_members SET role = 'alternative' WHERE id = 1")
+            conn.execute(
+                "INSERT INTO family_members (family_id, product_id, role, created_at) "
+                "VALUES (1, 2, 'primary', ?)",
+                ("2026-09-26T00:00:00.000000Z",),
+            )
+            conn.execute("COMMIT")
+            assert conn.execute(primary).fetchone() == (2,)  # follows the new primary member
         finally:
             conn.close()
-
-    def test_family_members_trigger_still_works_after_upgrade(self, tmp_path: Path) -> None:
-        """Adding a primary member still updates primary_product_id after v2."""
-        db = self._create_v1_db_with_mismatch(tmp_path)
-        run_migrations(db, tmp_path / "bk2")
-
-        conn = open_connection(db)
-        now = "2026-09-26T00:00:00.000000Z"
-        # Add another product and make it the new primary by changing the member role.
-        conn.execute("UPDATE family_members SET role = 'alternative' WHERE id = 1")
-        conn.execute(
-            "INSERT INTO family_members (family_id, product_id, role, created_at) "
-            "VALUES (1, 2, 'primary', ?)",
-            (now,),
-        )
-        conn.execute("COMMIT")
-        row = conn.execute("SELECT primary_product_id FROM product_families WHERE id=1").fetchone()
-        assert row[0] == 2  # updated to the new primary member
-        conn.close()
 
 
 def test_populated_v7_upgrade_preserves_history_and_run_with_verified_backup(

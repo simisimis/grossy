@@ -24,30 +24,23 @@ DOCUMENTED_PROMPT = "/skill:grossy weekly add run-1 recipe1"
 
 
 class TestDocumentedInterface:
-    def test_named_documented_form(self) -> None:
-        # The exact documented invocation: just weekly-add RUN_ID=run-1 RECIPES=recipe1
-        assert weekly_add_prompt("RUN_ID=run-1", "RECIPES=recipe1") == DOCUMENTED_PROMPT
-
-    def test_bare_positional_form(self) -> None:
-        assert weekly_add_prompt("run-1", "recipe1") == DOCUMENTED_PROMPT
-
-    def test_all(self) -> None:
-        assert weekly_add_prompt("RUN_ID=run-1", "RECIPES=all") == (
-            "/skill:grossy weekly add run-1 all"
-        )
-
-    def test_comma_separated_list(self) -> None:
-        assert weekly_add_prompt("RUN_ID=run-1", "RECIPES=recipe1,recipe2") == (
-            "/skill:grossy weekly add run-1 recipe1,recipe2"
-        )
-
-    def test_full_slot_list(self) -> None:
-        assert parse_recipe_list("recipe1,recipe2,recipe3,recipe4") == (
-            "recipe1",
-            "recipe2",
-            "recipe3",
-            "recipe4",
-        )
+    @pytest.mark.parametrize(
+        "run_id,recipes,prompt",
+        [
+            # The exact documented invocation: just weekly-add RUN_ID=run-1 RECIPES=recipe1
+            ("RUN_ID=run-1", "RECIPES=recipe1", DOCUMENTED_PROMPT),
+            ("run-1", "recipe1", DOCUMENTED_PROMPT),
+            ("RUN_ID=run-1", "RECIPES=all", "/skill:grossy weekly add run-1 all"),
+            (
+                "RUN_ID=run-1",
+                "RECIPES=recipe1,recipe2",
+                "/skill:grossy weekly add run-1 recipe1,recipe2",
+            ),
+        ],
+        ids=["named-form", "bare-positional-form", "all", "comma-list"],
+    )
+    def test_prompt_rendering(self, run_id: str, recipes: str, prompt: str) -> None:
+        assert weekly_add_prompt(run_id, recipes) == prompt
 
 
 class TestRunIdGrammar:
@@ -86,18 +79,17 @@ class TestRunIdGrammar:
 
 class TestRecipeListGrammar:
     @pytest.mark.parametrize(
-        "raw",
+        "raw,expected",
         [
-            "recipe1",
-            "recipe2",
-            "recipe3",
-            "recipe4",
-            "all",
-            "recipe1,recipe2",
+            ("recipe1", ("recipe1",)),
+            ("recipe4", ("recipe4",)),
+            ("all", ("all",)),
+            ("recipe1,recipe2", ("recipe1", "recipe2")),
+            ("recipe1,recipe2,recipe3,recipe4", ("recipe1", "recipe2", "recipe3", "recipe4")),
         ],
     )
-    def test_valid_lists(self, raw: str) -> None:
-        parse_recipe_list(raw)
+    def test_valid_lists(self, raw: str, expected: tuple[str, ...]) -> None:
+        assert parse_recipe_list(raw) == expected
 
     @pytest.mark.parametrize(
         "raw",

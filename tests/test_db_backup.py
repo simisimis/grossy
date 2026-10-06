@@ -11,7 +11,9 @@ import hashlib
 import json
 import sqlite3
 import stat
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -172,30 +174,31 @@ class TestRestore:
         assert info.target_schema_version == current_schema_version
         assert _product_name(populated_db) == "Changed Name"
 
-    def test_restore_with_confirmation_succeeds(
+    def test_confirmed_restore_replaces_drift_with_verified_pre_restore_backup(
         self,
         populated_db: Path,
         tmp_path: Path,
         grossy_home: GrossyPaths,
         current_schema_version: int,
     ) -> None:
+        """PRD 14.3.5: a confirmed restore first snapshots the live database, then
+        restores the backup; repeating the same restore succeeds again."""
         backup_path = tmp_path / "backup.sqlite3"
         db_backup(populated_db, backup_path)
-        # Modify the database to simulate drift.
         conn = open_connection(populated_db)
         conn.execute("UPDATE products SET name='Changed Name' WHERE id=1")
         conn.execute("COMMIT")
         conn.close()
+        pre_restore_before = set(populated_db.parent.glob("pre-restore-*"))
 
         info = db_restore(populated_db, backup_path, grossy_home.state_dir, confirm=True)
         assert info is not None
         assert info.source_schema_version == current_schema_version
+        assert _product_name(populated_db) == "Greek Yogurt"
+        assert len(set(populated_db.parent.glob("pre-restore-*"))) > len(pre_restore_before)
 
-        # Database should be restored to backup state.
-        conn = open_connection(populated_db)
-        cursor = conn.execute("SELECT name FROM products WHERE id=1")
-        assert cursor.fetchone()[0] == "Greek Yogurt"
-        conn.close()
+        db_restore(populated_db, backup_path, grossy_home.state_dir, confirm=True)
+        assert _product_name(populated_db) == "Greek Yogurt"
 
     def test_restore_refuses_when_active_run_exists(
         self, populated_db: Path, tmp_path: Path, grossy_home: GrossyPaths
@@ -249,40 +252,12 @@ class TestRestore:
         assert cursor.fetchone()[0] == "Greek Yogurt"
         conn.close()
 
-    def test_restore_creates_pre_restore_backup(
-        self, populated_db: Path, tmp_path: Path, grossy_home: GrossyPaths
-    ) -> None:
-        """PRD 14.3.5: create a verified backup of current database before restore."""
-        backup_path = tmp_path / "restore-source.sqlite3"
-        db_backup(populated_db, backup_path)
-
-        # Check that a pre-restore backup is created in the data directory.
-        data_dir = populated_db.parent
-        before = set(data_dir.glob("pre-restore-*"))
-        db_restore(populated_db, backup_path, grossy_home.state_dir, confirm=True)
-        after = set(data_dir.glob("pre-restore-*"))
-        assert len(after) > len(before)
-
     def test_restore_fails_on_missing_backup(
         self, populated_db: Path, tmp_path: Path, grossy_home: GrossyPaths
     ) -> None:
         missing = tmp_path / "nonexistent.sqlite3"
         with pytest.raises(RestoreError, match="not found"):
             db_restore(populated_db, missing, grossy_home.state_dir, confirm=True)
-
-    def test_restore_idempotent_after_success(
-        self, populated_db: Path, tmp_path: Path, grossy_home: GrossyPaths
-    ) -> None:
-        """Restoring the same backup twice should succeed both times."""
-        backup_path = tmp_path / "backup.sqlite3"
-        db_backup(populated_db, backup_path)
-        db_restore(populated_db, backup_path, grossy_home.state_dir, confirm=True)
-        db_restore(populated_db, backup_path, grossy_home.state_dir, confirm=True)
-        # Still intact.
-        conn = open_connection(populated_db)
-        cursor = conn.execute("SELECT name FROM products WHERE id=1")
-        assert cursor.fetchone()[0] == "Greek Yogurt"
-        conn.close()
 
 
 def _product_name(db: Path) -> str | None:
@@ -297,63 +272,39 @@ def _product_name(db: Path) -> str | None:
 class TestRestoreManifestValidation:
     """Review finding 1: restore requires a complete manifest with an exact checksum."""
 
-    def test_restore_rejects_backup_without_manifest(
-        self, populated_db: Path, tmp_path: Path, grossy_home: GrossyPaths
-    ) -> None:
-        backup_path = tmp_path / "backup.sqlite3"
-        db_backup(populated_db, backup_path)
-        backup_path.with_suffix(backup_path.suffix + ".manifest.json").unlink()
-        with pytest.raises(RestoreError, match="manifest not found"):
-            db_restore(populated_db, backup_path, grossy_home.state_dir, confirm=True)
-        assert _product_name(populated_db) == "Greek Yogurt"
-
-    def test_restore_rejects_empty_checksum(
-        self, populated_db: Path, tmp_path: Path, grossy_home: GrossyPaths
-    ) -> None:
-        backup_path = tmp_path / "backup.sqlite3"
-        db_backup(populated_db, backup_path)
-        manifest_path = backup_path.with_suffix(backup_path.suffix + ".manifest.json")
-        manifest = json.loads(manifest_path.read_text())
-        manifest["checksum_sha256"] = ""
-        manifest_path.write_text(json.dumps(manifest))
-        with pytest.raises(RestoreError, match="checksum"):
-            db_restore(populated_db, backup_path, grossy_home.state_dir, confirm=True)
-        assert _product_name(populated_db) == "Greek Yogurt"
-
-    def test_restore_rejects_missing_checksum_key(
-        self, populated_db: Path, tmp_path: Path, grossy_home: GrossyPaths
-    ) -> None:
-        backup_path = tmp_path / "backup.sqlite3"
-        db_backup(populated_db, backup_path)
-        manifest_path = backup_path.with_suffix(backup_path.suffix + ".manifest.json")
-        manifest = json.loads(manifest_path.read_text())
-        del manifest["checksum_sha256"]
-        manifest_path.write_text(json.dumps(manifest))
-        with pytest.raises(RestoreError, match="checksum"):
-            db_restore(populated_db, backup_path, grossy_home.state_dir, confirm=True)
-        assert _product_name(populated_db) == "Greek Yogurt"
-
-    def test_restore_rejects_malformed_manifest_json(
-        self, populated_db: Path, tmp_path: Path, grossy_home: GrossyPaths
+    @pytest.mark.parametrize(
+        "damage,match",
+        [
+            pytest.param(lambda m: None, "manifest not found", id="missing-manifest"),
+            pytest.param(lambda m: {**m, "checksum_sha256": ""}, "checksum", id="empty-checksum"),
+            pytest.param(
+                lambda m: {k: v for k, v in m.items() if k != "checksum_sha256"},
+                "checksum",
+                id="missing-checksum-key",
+            ),
+            pytest.param(lambda m: "{ this is not valid json", "not valid JSON", id="malformed"),
+            pytest.param(
+                lambda m: {**m, "schema_name": "something.else"}, "schema_name", id="wrong-schema"
+            ),
+        ],
+    )
+    def test_restore_rejects_damaged_manifest(
+        self,
+        populated_db: Path,
+        tmp_path: Path,
+        grossy_home: GrossyPaths,
+        damage: Callable[[dict[str, Any]], Any],
+        match: str,
     ) -> None:
         backup_path = tmp_path / "backup.sqlite3"
         db_backup(populated_db, backup_path)
         manifest_path = backup_path.with_suffix(backup_path.suffix + ".manifest.json")
-        manifest_path.write_text("{ this is not valid json")
-        with pytest.raises(RestoreError, match="not valid JSON"):
-            db_restore(populated_db, backup_path, grossy_home.state_dir, confirm=True)
-        assert _product_name(populated_db) == "Greek Yogurt"
-
-    def test_restore_rejects_wrong_schema_name(
-        self, populated_db: Path, tmp_path: Path, grossy_home: GrossyPaths
-    ) -> None:
-        backup_path = tmp_path / "backup.sqlite3"
-        db_backup(populated_db, backup_path)
-        manifest_path = backup_path.with_suffix(backup_path.suffix + ".manifest.json")
-        manifest = json.loads(manifest_path.read_text())
-        manifest["schema_name"] = "something.else"
-        manifest_path.write_text(json.dumps(manifest))
-        with pytest.raises(RestoreError, match="schema_name"):
+        damaged = damage(json.loads(manifest_path.read_text()))
+        if damaged is None:
+            manifest_path.unlink()
+        else:
+            manifest_path.write_text(damaged if isinstance(damaged, str) else json.dumps(damaged))
+        with pytest.raises(RestoreError, match=match):
             db_restore(populated_db, backup_path, grossy_home.state_dir, confirm=True)
         assert _product_name(populated_db) == "Greek Yogurt"
 
@@ -422,38 +373,6 @@ class TestExportFailureSafety:
         monkeypatch.setattr(backup_mod, "atomic_write", boom)
         with pytest.raises(OSError):
             db_export(populated_db, dest)
-        assert dest.read_bytes() == stale
-
-    def test_export_missing_required_table_fails(self, populated_db: Path, tmp_path: Path) -> None:
-        """A supported schema version missing a required table is damaged."""
-        # Remove a required table from a valid version-2 database to simulate
-        # corruption. The export must fail, not silently omit the data.
-        conn = sqlite3.connect(str(populated_db), isolation_level=None)
-        conn.execute("PRAGMA foreign_keys=OFF")
-        conn.execute("DROP TABLE source_orders")
-        conn.close()
-        dest = tmp_path / "export.json"
-        with pytest.raises(ExportError, match="source_orders"):
-            db_export(populated_db, dest)
-        # The export file must not have been created.
-        assert not dest.exists()
-
-    def test_export_missing_required_table_preserves_existing_dest(
-        self, populated_db: Path, tmp_path: Path
-    ) -> None:
-        """A damaged database must not replace an existing export."""
-        # First, create a valid export.
-        dest = tmp_path / "export.json"
-        db_export(populated_db, dest)
-        stale = dest.read_bytes()
-        # Now damage the database.
-        conn = sqlite3.connect(str(populated_db), isolation_level=None)
-        conn.execute("PRAGMA foreign_keys=OFF")
-        conn.execute("DROP TABLE source_orders")
-        conn.close()
-        with pytest.raises(ExportError, match="source_orders"):
-            db_export(populated_db, dest)
-        # Existing export must be preserved.
         assert dest.read_bytes() == stale
 
     def test_export_rejects_schema_version_zero(self, populated_db: Path, tmp_path: Path) -> None:
@@ -576,19 +495,24 @@ class TestRestoreSchemaVersionComparison:
         assert get_schema_version(current_db) == max_supported
 
 
-@pytest.mark.parametrize("table", ["run_recipe_plans", "run_recipe_seen"])
-def test_export_missing_schema9_recipe_table_preserves_destination(
+@pytest.mark.parametrize("table", ["source_orders", "run_recipe_plans", "run_recipe_seen"])
+def test_export_missing_required_table_fails_and_preserves_destination(
     populated_db: Path, tmp_path: Path, table: str
 ) -> None:
+    """A supported schema version missing a required table is damaged: the export
+    fails rather than silently omitting data, creates no new file and never
+    replaces an existing export."""
     dest = tmp_path / "export.json"
     db_export(populated_db, dest)
     before = dest.read_bytes()
-    conn = open_connection(populated_db)
-    try:
-        conn.execute(f"DROP TABLE {table}")
-        conn.commit()
-    finally:
-        conn.close()
+    conn = sqlite3.connect(str(populated_db), isolation_level=None)
+    conn.execute("PRAGMA foreign_keys=OFF")
+    conn.execute(f"DROP TABLE {table}")
+    conn.close()
+    fresh = tmp_path / "fresh-export.json"
+    with pytest.raises(ExportError, match=f"required table '{table}'"):
+        db_export(populated_db, fresh)
+    assert not fresh.exists()
     with pytest.raises(ExportError, match=f"required table '{table}'"):
         db_export(populated_db, dest)
     assert dest.read_bytes() == before

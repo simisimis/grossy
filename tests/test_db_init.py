@@ -41,64 +41,39 @@ class TestFreshInstall:
         do_init(paths)
         return paths
 
-    def test_creates_config_directory_with_0700(self, grossy_home: GrossyPaths) -> None:
-        mode = stat.S_IMODE(os.stat(grossy_home.config_dir).st_mode)
-        assert mode == 0o700
+    @pytest.mark.parametrize(
+        "directory",
+        ["config_dir", "data_dir", "backups_dir", "state_dir", "browser_profile_dir"],
+    )
+    def test_creates_private_directories_with_0700(
+        self, grossy_home: GrossyPaths, directory: str
+    ) -> None:
+        path = getattr(grossy_home, directory)
+        assert stat.S_IMODE(os.stat(path).st_mode) == 0o700
 
-    def test_creates_data_directory_with_0700(self, grossy_home: GrossyPaths) -> None:
-        mode = stat.S_IMODE(os.stat(grossy_home.data_dir).st_mode)
-        assert mode == 0o700
+    @pytest.mark.parametrize("file", ["config_file", "database_file"])
+    def test_writes_private_files_with_0600(self, grossy_home: GrossyPaths, file: str) -> None:
+        path = getattr(grossy_home, file)
+        assert path.exists()
+        assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
 
-    def test_creates_backups_directory_with_0700(self, grossy_home: GrossyPaths) -> None:
-        mode = stat.S_IMODE(os.stat(grossy_home.backups_dir).st_mode)
-        assert mode == 0o700
-
-    def test_creates_state_directory_with_0700(self, grossy_home: GrossyPaths) -> None:
-        mode = stat.S_IMODE(os.stat(grossy_home.state_dir).st_mode)
-        assert mode == 0o700
-
-    def test_creates_browser_profile_directory_with_0700(self, grossy_home: GrossyPaths) -> None:
-        mode = stat.S_IMODE(os.stat(grossy_home.browser_profile_dir).st_mode)
-        assert mode == 0o700
-
-    def test_writes_sample_config_with_0600(self, grossy_home: GrossyPaths) -> None:
-        assert grossy_home.config_file.exists()
-        mode = stat.S_IMODE(os.stat(grossy_home.config_file).st_mode)
-        assert mode == 0o600
+    def test_sample_config_is_schema_version_1_for_ab(self, grossy_home: GrossyPaths) -> None:
         content = grossy_home.config_file.read_text()
         assert "schema_version: 1" in content
         assert "retailer: ab" in content
 
-    def test_creates_database_with_0600(self, grossy_home: GrossyPaths) -> None:
-        assert grossy_home.database_file.exists()
-        mode = stat.S_IMODE(os.stat(grossy_home.database_file).st_mode)
-        assert mode == 0o600
-
-    def test_database_has_schema_migrations(self, grossy_home: GrossyPaths) -> None:
+    def test_database_records_migrations_with_wal_and_foreign_keys(
+        self, grossy_home: GrossyPaths
+    ) -> None:
         conn = open_connection(grossy_home.database_file)
         try:
-            cursor = conn.execute(
+            rows = conn.execute(
                 "SELECT version, filename, checksum FROM schema_migrations ORDER BY version"
-            )
-            rows = cursor.fetchall()
+            ).fetchall()
             assert len(rows) >= 1
             assert rows[0][0] == 1
-        finally:
-            conn.close()
-
-    def test_database_has_wal_mode(self, grossy_home: GrossyPaths) -> None:
-        conn = open_connection(grossy_home.database_file)
-        try:
-            cursor = conn.execute("PRAGMA journal_mode")
-            assert cursor.fetchone()[0] == "wal"
-        finally:
-            conn.close()
-
-    def test_database_has_foreign_keys_enabled(self, grossy_home: GrossyPaths) -> None:
-        conn = open_connection(grossy_home.database_file)
-        try:
-            cursor = conn.execute("PRAGMA foreign_keys")
-            assert cursor.fetchone()[0] == 1
+            assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+            assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
         finally:
             conn.close()
 
@@ -284,8 +259,6 @@ class TestNonOverwrite:
 class TestSchemaConstraints:
     def test_one_active_run_enforced(self, grossy_home: GrossyPaths) -> None:
         """PRD 12.1.8: at most one active weekly run."""
-        import sqlite3
-
         do_init(grossy_home)
         conn = open_connection(grossy_home.database_file)
         try:
@@ -313,8 +286,6 @@ class TestSchemaConstraints:
         Uses the correct flow: create family with NULL primary, then add the
         primary member (the trigger sets primary_product_id).
         """
-        import sqlite3
-
         do_init(grossy_home)
         conn = open_connection(grossy_home.database_file)
         try:
@@ -360,8 +331,6 @@ class TestSchemaConstraints:
     def test_product_families_rejects_direct_primary_insert(self, grossy_home: GrossyPaths) -> None:
         """PRD 12.1.7: primary_product_id is derived from family_members; a
         direct INSERT with non-NULL primary_product_id is rejected."""
-        import sqlite3
-
         do_init(grossy_home)
         conn = open_connection(grossy_home.database_file)
         try:
@@ -386,8 +355,6 @@ class TestSchemaConstraints:
 
     def test_product_unique_by_retailer_and_id(self, grossy_home: GrossyPaths) -> None:
         """PRD 12.1.5: product identity unique by retailer and product ID."""
-        import sqlite3
-
         do_init(grossy_home)
         conn = open_connection(grossy_home.database_file)
         try:
@@ -412,8 +379,6 @@ class TestSchemaConstraints:
 
     def test_source_order_unique_by_retailer_and_id(self, grossy_home: GrossyPaths) -> None:
         """PRD 12.1.3: source order unique by retailer and source order ID."""
-        import sqlite3
-
         do_init(grossy_home)
         conn = open_connection(grossy_home.database_file)
         try:
@@ -457,8 +422,6 @@ class TestSchemaConstraints:
 
     def test_quantities_must_be_positive(self, grossy_home: GrossyPaths) -> None:
         """PRD 12.1.9: quantities must be positive."""
-        import sqlite3
-
         do_init(grossy_home)
         conn = open_connection(grossy_home.database_file)
         try:
@@ -477,8 +440,6 @@ class TestSchemaConstraints:
 
     def test_foreign_key_violation_detected(self, grossy_home: GrossyPaths) -> None:
         """PRD 12.1.1: foreign keys enabled, violations detected."""
-        import sqlite3
-
         do_init(grossy_home)
         conn = open_connection(grossy_home.database_file)
         try:

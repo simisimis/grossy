@@ -37,7 +37,7 @@ class TestFakeAdapterDefaults:
         assert result.visible is True
         assert "fake" in result.detail
 
-    def test_default_cart_valid(self) -> None:
+    def test_default_cart_valid_and_repeatable(self) -> None:
         adapter = FakeBrowserAdapter()
         cart = adapter.read_cart()
         assert isinstance(cart, CartObservation)
@@ -46,15 +46,19 @@ class TestFakeAdapterDefaults:
         assert len(cart.lines) == 1
         assert cart.lines[0].product_id == "1234567"
         assert cart.lines[0].quantity == 1
+        assert adapter.read_cart() == cart
 
 
 class TestFakeAdapterCustom:
+    """Configured results are returned verbatim on every call."""
+
     def test_custom_auth_unauthenticated(self) -> None:
         auth = AuthCheckResult(False, "session expired")
         adapter = FakeBrowserAdapter(auth=auth)
         result = adapter.check_authentication()
         assert result.authenticated is False
         assert result.detail == "session expired"
+        assert adapter.check_authentication() == auth
 
     def test_custom_history_not_visible(self) -> None:
         history = HistoryControlsResult(False, "UI changed")
@@ -62,6 +66,7 @@ class TestFakeAdapterCustom:
         result = adapter.check_history_controls()
         assert result.visible is False
         assert result.detail == "UI changed"
+        assert adapter.check_history_controls() == history
 
     def test_custom_cart_empty(self) -> None:
         cart = CartObservation(
@@ -99,25 +104,3 @@ class TestFakeAdapterCustom:
         assert len(result.lines) == 2
         assert result.lines[0].product_id == "111"
         assert result.lines[1].product_id == "222"
-
-
-class TestFakeAdapterRepeatedResults:
-    """Repeated calls return the configured fake observations and checks."""
-
-    def test_repeated_cart_reads_return_equal_observations(self) -> None:
-        adapter = FakeBrowserAdapter()
-        first = adapter.read_cart()
-        second = adapter.read_cart()
-        assert first == second
-
-    def test_repeated_auth_checks_return_configured_result(self) -> None:
-        auth = AuthCheckResult(True, "ok")
-        adapter = FakeBrowserAdapter(auth=auth)
-        assert adapter.check_authentication() == auth
-        assert adapter.check_authentication() == auth
-
-    def test_repeated_history_checks_return_configured_result(self) -> None:
-        history = HistoryControlsResult(True, "ok")
-        adapter = FakeBrowserAdapter(history=history)
-        assert adapter.check_history_controls() == history
-        assert adapter.check_history_controls() == history

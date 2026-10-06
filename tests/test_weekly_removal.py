@@ -37,21 +37,13 @@ def added(paths: GrossyPaths) -> str:
     fake = FakeAdditiveCart(paths, {"111": 1, "999": 8})
     assert apply_recurring(paths, run_id, fake, lambda _: True)["status"] == "success"
     # Complete Stage1 with an empty established-recipe proposal through public phase.
-    from grossy.recipes.proposal import proposal_checksum
+    from test_weekly_recipes import proposal as empty_recipe_options
+
+    from grossy.weekly.mutation import run_advance
     from grossy.weekly.recipes import run_recipes_apply
 
-    body = {
-        "schema_name": "grossy.weekly.recipe-options.v1",
-        "schema_version": 1,
-        "generated_at": observation({})["generated_at"],
-        "run_id": run_id,
-        "matches": [],
-    }
-    body["checksum"] = proposal_checksum(body)
-    from grossy.weekly.mutation import run_advance
-
     run_advance(paths, run_id, observation(fake.quantities))
-    run_recipes_apply(paths, run_id, body)
+    run_recipes_apply(paths, run_id, empty_recipe_options(run_id))
     return run_id
 
 

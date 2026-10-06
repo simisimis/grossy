@@ -13,7 +13,9 @@ These required tests fail outside the project Nix development shell.
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -58,61 +60,35 @@ def _nix_shell_guard():
     _require_nix_shell()
 
 
-class TestToolProvenance:
-    """Verify tools resolve to Nix store paths."""
+@pytest.mark.parametrize("tool", ["python3", "ruff", "mypy", "grossy"])
+def test_tool_is_store_backed(tool: str) -> None:
+    path = shutil.which(tool)
+    assert path is not None, f"{tool} not found on PATH"
+    assert _is_store_path(path), f"{tool} not in Nix store: {path}"
 
-    def test_python3_is_store_backed(self) -> None:
-        python_path = shutil.which("python3")
-        assert python_path is not None, "python3 not found on PATH"
-        assert _is_store_path(python_path), f"python3 not in Nix store: {python_path}"
 
-    def test_ruff_is_store_backed(self) -> None:
-        ruff_path = shutil.which("ruff")
-        assert ruff_path is not None, "ruff not found on PATH"
-        assert _is_store_path(ruff_path), f"ruff not in Nix store: {ruff_path}"
-
-    def test_mypy_is_store_backed(self) -> None:
-        mypy_path = shutil.which("mypy")
-        assert mypy_path is not None, "mypy not found on PATH"
-        assert _is_store_path(mypy_path), f"mypy not in Nix store: {mypy_path}"
-
-    def test_pytest_is_store_backed(self) -> None:
-        # pytest is a Python module, check its location
-        import pytest as p
-
-        pytest_path = p.__file__
-        assert _is_store_path(pytest_path), f"pytest not in Nix store: {pytest_path}"
-
-    def test_grossy_executable_exists(self) -> None:
-        grossy_path = shutil.which("grossy")
-        assert grossy_path is not None, "grossy executable not found on PATH"
-        assert _is_store_path(grossy_path), f"grossy not in Nix store: {grossy_path}"
+def test_pytest_module_is_store_backed() -> None:
+    assert _is_store_path(pytest.__file__), f"pytest not in Nix store: {pytest.__file__}"
 
 
 class TestEnvironmentIsolation:
     """Verify no ambient Python environment leaks into the shell."""
 
-    def test_no_virtual_env(self) -> None:
-        assert not os.environ.get("VIRTUAL_ENV"), (
-            f"VIRTUAL_ENV is set: {os.environ.get('VIRTUAL_ENV')}"
-        )
-
-    def test_no_pythonhome(self) -> None:
-        assert not os.environ.get("PYTHONHOME"), (
-            f"PYTHONHOME is set: {os.environ.get('PYTHONHOME')}"
-        )
-
-    def test_no_pyvenv_launcher(self) -> None:
-        assert not os.environ.get("__PYVENV_LAUNCHER__"), "__PYVENV_LAUNCHER__ is set"
+    @pytest.mark.parametrize("variable", ["VIRTUAL_ENV", "PYTHONHOME", "__PYVENV_LAUNCHER__"])
+    def test_ambient_python_variable_absent(self, variable: str) -> None:
+        assert not os.environ.get(variable), f"{variable} is set: {os.environ.get(variable)}"
 
     def test_pythonnousersite_set(self) -> None:
         val = os.environ.get("PYTHONNOUSERSITE")
         assert val in ("1", "true"), f"PYTHONNOUSERSITE not set to disable user site: {val!r}"
 
-    def test_no_venv_in_sys_path(self) -> None:
-        """No .venv paths should appear in sys.path."""
+    def test_no_venv_in_path_or_interpreter(self) -> None:
+        """No .venv path may appear in PATH, sys.path or the running interpreter."""
+        for entry in os.environ.get("PATH", "").split(os.pathsep):
+            assert ".venv" not in entry, f".venv path found in PATH: {entry}"
         for path in sys.path:
             assert ".venv" not in path, f".venv path in sys.path: {path}"
+        assert ".venv" not in sys.executable, f"Python is from .venv: {sys.executable}"
 
     def test_no_user_site_in_sys_path(self) -> None:
         """No user-site-packages in sys.path."""
@@ -131,362 +107,152 @@ def _get_grossy_store_path() -> Path:
     """
     grossy_path = Path(shutil.which("grossy") or "")
     assert grossy_path.exists(), "grossy executable not found"
-    real_path = grossy_path.resolve()
-    content = real_path.read_text()
+    content = grossy_path.resolve().read_text()
     # The wrapper contains the store path like:
     # /nix/store/xxx-grossy-0.1.0/bin/.grossy-wrapped
-    import re as _re
-
-    match = _re.search(r"(/nix/store/[^']+grossy-[\d.]+)/bin/\.grossy-wrapped", content)
-    assert match, f"Could not find grossy store path in wrapper: {real_path}"
+    match = re.search(r"(/nix/store/[^']+grossy-[\d.]+)/bin/\.grossy-wrapped", content)
+    assert match, f"Could not find grossy store path in wrapper: {grossy_path}"
     return Path(match.group(1))
 
 
-def _get_installed_grossy_path() -> Path:
-    """Find the installed grossy module __init__.py in the Nix store."""
-    store_path = _get_grossy_store_path()
-    # The Python package is in lib/python3.12/site-packages/grossy/
-    grossy_init = store_path / "lib" / "python3.12" / "site-packages" / "grossy" / "__init__.py"
-    assert grossy_init.exists(), f"Installed grossy __init__.py not found: {grossy_init}"
-    return grossy_init
-
-
 def _get_installed_grossy_dir() -> Path:
-    """Find the directory containing the installed grossy module."""
-    return _get_installed_grossy_path().parent
+    """Find the directory of the installed grossy package in the Nix store."""
+    grossy_dir = _get_grossy_store_path() / "lib" / "python3.12" / "site-packages" / "grossy"
+    assert (grossy_dir / "__init__.py").exists(), f"Installed grossy not found: {grossy_dir}"
+    return grossy_dir
+
+
+def _installed_env(tmp_path: Path) -> dict[str, str]:
+    """Private HOME/XDG roots for the installed CLI; the source path never leaks in."""
+    env = {
+        **os.environ,
+        "HOME": str(tmp_path / "home"),
+        "XDG_CACHE_HOME": str(tmp_path / "cache"),
+        "XDG_CONFIG_HOME": str(tmp_path / "config"),
+        "XDG_DATA_HOME": str(tmp_path / "data"),
+        "XDG_STATE_HOME": str(tmp_path / "state"),
+    }
+    env.pop("PYTHONPATH", None)
+    return env
+
+
+def _run_installed(args: list[str], env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    """Run the store-built grossy from an unrelated cwd and log the sanitized outcome."""
+    result = subprocess.run(
+        ["grossy", *args], capture_output=True, text=True, timeout=30, cwd="/tmp", env=env
+    )
+    print("Installed operation:", result.args, "exit", result.returncode, result.stderr)
+    return result
+
+
+def _installed_init(tmp_path: Path) -> dict[str, str]:
+    env = _installed_env(tmp_path)
+    result = _run_installed(["init"], env)
+    assert result.returncode == 0, f"grossy init with isolated XDG failed: {result.stderr}"
+    return env
 
 
 class TestStoreBackedGrossy:
     """Verify the store-built grossy executable is truly store-backed."""
 
-    def test_grossy_help_exits_zero(self) -> None:
-        result = subprocess.run(
-            ["grossy", "--help"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        assert result.returncode == 0, f"grossy --help failed: {result.stderr}"
-        assert "history" in result.stdout
-        assert "recipes" in result.stdout
-        assert "weekly" in result.stdout
-
     def test_grossy_help_from_unrelated_cwd(self) -> None:
         """grossy works from any directory (store-backed, not cwd-dependent)."""
         result = subprocess.run(
-            ["grossy", "--help"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            cwd="/tmp",
+            ["grossy", "--help"], capture_output=True, text=True, timeout=30, cwd="/tmp"
         )
         assert result.returncode == 0, f"grossy --help from /tmp failed: {result.stderr}"
-
-    def test_grossy_module_path_is_store(self) -> None:
-        """The installed grossy module is in /nix/store/."""
-        grossy_file = _get_installed_grossy_path()
-        assert "/nix/store/" in str(grossy_file), (
-            f"Installed grossy module not in Nix store: {grossy_file}"
-        )
-
-    def test_grossy_store_path_is_store(self) -> None:
-        """The grossy package store path is in /nix/store/."""
-        store_path = _get_grossy_store_path()
-        assert "/nix/store/" in str(store_path), f"grossy store path not in Nix store: {store_path}"
+        for group in ("history", "recipes", "weekly"):
+            assert group in result.stdout
 
     def test_installed_grossy_is_separate_from_source(self) -> None:
         """The store-built grossy is at a different path than the source tree."""
         installed_dir = _get_installed_grossy_dir()
-        source = REPO_ROOT / "src" / "grossy"
-        assert installed_dir != source.resolve(), (
+        assert installed_dir != (REPO_ROOT / "src" / "grossy").resolve(), (
             f"Installed grossy resolves to source tree: {installed_dir}"
         )
-
-    def test_grossy_doctor_command_exists(self) -> None:
-        result = subprocess.run(
-            ["grossy", "doctor", "--help"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        assert result.returncode == 0
 
 
 class TestPackageResources:
     """Verify installed package resources (migrations, seeds) match source."""
 
-    def test_migrations_directory_exists_in_package(self) -> None:
-        installed_grossy_dir = _get_installed_grossy_dir()
-        """The installed grossy package must contain the migrations directory."""
-        migrations_dir = installed_grossy_dir / "migrations"
-        assert migrations_dir.is_dir(), (
-            f"Migrations directory not found in installed package: {migrations_dir}"
-        )
-
-    def test_all_migrations_present(self) -> None:
-        """All SQL migrations must be present in the installed package."""
-        installed_grossy_dir = _get_installed_grossy_dir()
-        migrations_dir = installed_grossy_dir / "migrations"
-        sql_files = sorted(migrations_dir.glob("*.sql"))
+    def test_all_migrations_present_and_byte_identical_to_source(self) -> None:
+        installed_migrations = _get_installed_grossy_dir() / "migrations"
+        source_migrations = REPO_ROOT / "src" / "grossy" / "migrations"
+        sql_files = sorted(installed_migrations.glob("*.sql"))
         assert len(sql_files) == 10, (
             f"Expected 10 migrations, found {len(sql_files)}: {[f.name for f in sql_files]}"
         )
-        # Verify naming convention
         for i, f in enumerate(sql_files, 1):
-            assert f.name.startswith(f"{i:03d}_"), (
-                f"Unexpected migration name: {f.name} (expected {i:03d}_*)"
-            )
-
-    def test_seed_fixtures_present(self) -> None:
-        """The installed grossy package must contain seed fixtures."""
-        installed_grossy_dir = _get_installed_grossy_dir()
-        seeds_dir = installed_grossy_dir / "recipes" / "seed_fixtures" / "seeds"
-        assert seeds_dir.is_dir(), f"Seed fixtures directory not found: {seeds_dir}"
-        # The spicy-bean-burgers seed must be present
-        seed_files = list(seeds_dir.glob("*.json"))
-        seed_names = [f.name for f in seed_files]
-        assert "spicy-bean-burgers.json" in seed_names, (
-            f"spicy-bean-burgers.json not found in seeds: {seed_names}"
-        )
-
-    def test_migrations_match_source_bytes(self) -> None:
-        """Installed migrations must match the source tree byte-for-byte."""
-        installed_grossy_dir = _get_installed_grossy_dir()
-        installed_migrations = installed_grossy_dir / "migrations"
-        source_migrations = REPO_ROOT / "src" / "grossy" / "migrations"
-
+            assert f.name.startswith(f"{i:03d}_"), f"Unexpected migration name: {f.name}"
         for source_file in sorted(source_migrations.glob("*.sql")):
             installed_file = installed_migrations / source_file.name
-            assert installed_file.exists(), (
-                f"Migration missing from installed package: {source_file.name}"
-            )
+            assert installed_file.exists(), f"Migration missing from package: {source_file.name}"
             assert source_file.read_bytes() == installed_file.read_bytes(), (
                 f"Migration content mismatch: {source_file.name}"
             )
 
-    def test_isolated_installed_init_behavior(self) -> None:
+    def test_seed_fixtures_present(self) -> None:
+        """The installed grossy package must contain the bundled seed fixture."""
+        seeds_dir = _get_installed_grossy_dir() / "recipes" / "seed_fixtures" / "seeds"
+        assert seeds_dir.is_dir(), f"Seed fixtures directory not found: {seeds_dir}"
+        seed_names = [f.name for f in seeds_dir.glob("*.json")]
+        assert "spicy-bean-burgers.json" in seed_names, f"bundled seed missing: {seed_names}"
+
+    def test_isolated_installed_init_behavior(self, tmp_path: Path) -> None:
         """The store-built grossy can execute isolated init from arbitrary cwd."""
-        import shutil as _shutil
-        import tempfile
+        result = _run_installed(["init"], _installed_env(tmp_path))
+        assert result.returncode == 0, f"grossy init with isolated XDG failed: {result.stderr}"
+        data = json.loads(result.stdout)
+        assert data["status"] == "success"
+        assert data["database_schema_version"] == 10
+        assert data["migrations_applied"] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        assert data["recipe_seeds"]["imported_count"] == 1
+        db_path = Path(data["database_path"])
+        assert db_path.exists(), f"Database not created: {db_path}"
+        assert db_path.is_relative_to(tmp_path / "data")
 
-        tmpdir = Path(tempfile.mkdtemp())
-        try:
-            env = {
-                **os.environ,
-                "HOME": str(tmpdir / "home"),
-                "XDG_CACHE_HOME": str(tmpdir / "cache"),
-                "XDG_CONFIG_HOME": str(tmpdir / "config"),
-                "XDG_DATA_HOME": str(tmpdir / "data"),
-                "XDG_STATE_HOME": str(tmpdir / "state"),
-            }
-            env.pop("PYTHONPATH", None)
-            result = subprocess.run(
-                ["grossy", "init"],
-                capture_output=True,
-                text=True,
-                timeout=30,
-                cwd="/tmp",
-                env=env,
-            )
-            assert result.returncode == 0, (
-                f"grossy init from /tmp with isolated XDG failed: {result.stderr}"
-            )
-            import json as _json
-
-            print(
-                "Installed operation:",
-                result.args,
-                "exit",
-                result.returncode,
-                result.stdout,
-                result.stderr,
-            )
-            data = _json.loads(result.stdout)
-            assert data["status"] == "success"
-            assert data["database_schema_version"] == 10
-            assert data["migrations_applied"] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-            assert data["recipe_seeds"]["imported_count"] == 1
-            # Database file must exist at the XDG data path
-            db_path = Path(data["database_path"])
-            assert db_path.exists(), f"Database not created: {db_path}"
-        finally:
-            _shutil.rmtree(tmpdir, ignore_errors=True)
-
-    def test_isolated_installed_doctor_behavior(self) -> None:
+    def test_isolated_installed_doctor_behavior(self, tmp_path: Path) -> None:
         """The store-built grossy doctor validates local state (may warn on host tools)."""
-        import json as _json
-        import shutil as _shutil
-        import tempfile
+        result = _run_installed(["doctor"], _installed_init(tmp_path))
+        # doctor exits 1 on fail or 2 on warn; 0 only on all-pass. Host tools
+        # (agent-browser version) may legitimately fail here; a crash may not.
+        assert result.returncode in (0, 1, 2), (
+            f"grossy doctor unexpected exit {result.returncode}: {result.stderr}"
+        )
+        data = json.loads(result.stdout)
+        assert data["schema_name"] == "grossy.doctor.result"
+        assert data["schema_version"] == 1
+        statuses = {c["name"]: c["status"] for c in data["checks"]}
+        for name in ("config", "database", "migrations", "permissions"):
+            assert statuses[name] == "pass", f"doctor check {name!r}: {statuses[name]}"
 
-        tmpdir = Path(tempfile.mkdtemp())
-        try:
-            env = {
-                **os.environ,
-                "HOME": str(tmpdir / "home"),
-                "XDG_CACHE_HOME": str(tmpdir / "cache"),
-                "XDG_CONFIG_HOME": str(tmpdir / "config"),
-                "XDG_DATA_HOME": str(tmpdir / "data"),
-                "XDG_STATE_HOME": str(tmpdir / "state"),
-            }
-            env.pop("PYTHONPATH", None)
-            # init first
-            subprocess.run(
-                ["grossy", "init"],
-                capture_output=True,
-                text=True,
-                timeout=30,
-                cwd="/tmp",
-                env=env,
-            )
-            result = subprocess.run(
-                ["grossy", "doctor"],
-                capture_output=True,
-                text=True,
-                timeout=30,
-                cwd="/tmp",
-                env=env,
-            )
-            # doctor exits 1 on fail or 2 on warn; 0 only on all-pass.
-            # In the test shell, agent-browser may not match the expected
-            # version, so we accept exit 0, 1, or 2 (not a crash).
-            assert result.returncode in (0, 1, 2), (
-                f"grossy doctor unexpected exit {result.returncode}: {result.stderr}"
-            )
-            print(
-                "Installed operation:",
-                result.args,
-                "exit",
-                result.returncode,
-                result.stdout,
-                result.stderr,
-            )
-            data = _json.loads(result.stdout)
-            assert data["schema_name"] == "grossy.doctor.result"
-            assert data["schema_version"] == 1
-            # Core checks must be present
-            check_names = {c["name"] for c in data["checks"]}
-            assert "config" in check_names
-            assert "database" in check_names
-            assert "migrations" in check_names
-            assert "permissions" in check_names
-            # The database and config checks must pass (we just init'd)
-            for check in data["checks"]:
-                if check["name"] in ("config", "database", "migrations", "permissions"):
-                    assert check["status"] == "pass", (
-                        f"doctor check '{check['name']}' failed: {check}"
-                    )
-        finally:
-            _shutil.rmtree(tmpdir, ignore_errors=True)
-
-    def test_isolated_installed_db_backup_behavior(self) -> None:
+    def test_isolated_installed_db_backup_behavior(self, tmp_path: Path) -> None:
         """The store-built grossy db backup creates a valid snapshot."""
-        import json as _json
-        import shutil as _shutil
-        import tempfile
+        env = _installed_init(tmp_path)
+        backup_dir = tmp_path / "backups"
+        backup_dir.mkdir()
+        os.chmod(backup_dir, 0o700)
+        backup_path = backup_dir / "snapshot.sqlite3"
+        result = _run_installed(["db", "backup", str(backup_path)], env)
+        assert result.returncode == 0, f"grossy db backup failed: {result.stderr}"
+        data = json.loads(result.stdout)
+        assert data["status"] == "success"
+        assert backup_path.exists(), "Backup file not created"
+        assert backup_path.stat().st_size > 0, "Backup file is empty"
+        assert Path(data["manifest_path"]).exists(), (
+            f"Manifest not created: {data['manifest_path']}"
+        )
 
-        tmpdir = Path(tempfile.mkdtemp())
-        try:
-            env = {
-                **os.environ,
-                "HOME": str(tmpdir / "home"),
-                "XDG_CACHE_HOME": str(tmpdir / "cache"),
-                "XDG_CONFIG_HOME": str(tmpdir / "config"),
-                "XDG_DATA_HOME": str(tmpdir / "data"),
-                "XDG_STATE_HOME": str(tmpdir / "state"),
-            }
-            env.pop("PYTHONPATH", None)
-            # init first
-            subprocess.run(
-                ["grossy", "init"],
-                capture_output=True,
-                text=True,
-                timeout=30,
-                cwd="/tmp",
-                env=env,
-            )
-            backup_dir = tmpdir / "backups"
-            backup_dir.mkdir()
-            os.chmod(backup_dir, 0o700)
-            backup_path = backup_dir / "snapshot.sqlite3"
-            result = subprocess.run(
-                ["grossy", "db", "backup", str(backup_path)],
-                capture_output=True,
-                text=True,
-                timeout=30,
-                cwd="/tmp",
-                env=env,
-            )
-            assert result.returncode == 0, f"grossy db backup failed: {result.stderr}"
-            print(
-                "Installed operation:",
-                result.args,
-                "exit",
-                result.returncode,
-                result.stdout,
-                result.stderr,
-            )
-            data = _json.loads(result.stdout)
-            assert data["status"] == "success"
-            assert backup_path.exists(), "Backup file not created"
-            assert backup_path.stat().st_size > 0, "Backup file is empty"
-            # Manifest must exist
-            manifest = Path(data["manifest_path"])
-            assert manifest.exists(), f"Manifest not created: {manifest}"
-        finally:
-            _shutil.rmtree(tmpdir, ignore_errors=True)
-
-    def test_isolated_installed_db_export_behavior(self) -> None:
+    def test_isolated_installed_db_export_behavior(self, tmp_path: Path) -> None:
         """The store-built grossy db export writes a versioned JSON export."""
-        import json as _json
-        import shutil as _shutil
-        import tempfile
-
-        tmpdir = Path(tempfile.mkdtemp())
-        try:
-            env = {
-                **os.environ,
-                "HOME": str(tmpdir / "home"),
-                "XDG_CACHE_HOME": str(tmpdir / "cache"),
-                "XDG_CONFIG_HOME": str(tmpdir / "config"),
-                "XDG_DATA_HOME": str(tmpdir / "data"),
-                "XDG_STATE_HOME": str(tmpdir / "state"),
-            }
-            env.pop("PYTHONPATH", None)
-            # init first
-            subprocess.run(
-                ["grossy", "init"],
-                capture_output=True,
-                text=True,
-                timeout=30,
-                cwd="/tmp",
-                env=env,
-            )
-            export_path = tmpdir / "export.json"
-            result = subprocess.run(
-                ["grossy", "db", "export", str(export_path)],
-                capture_output=True,
-                text=True,
-                timeout=30,
-                cwd="/tmp",
-                env=env,
-            )
-            assert result.returncode == 0, f"grossy db export failed: {result.stderr}"
-            print(
-                "Installed operation:",
-                result.args,
-                "exit",
-                result.returncode,
-                result.stdout,
-                result.stderr,
-            )
-            data = _json.loads(result.stdout)
-            assert data["status"] == "success"
-            assert export_path.exists(), "Export file not created"
-            # Verify it's valid JSON
-            export_data = _json.loads(export_path.read_text(encoding="utf-8"))
-            assert "schema_version" in export_data or "schema_name" in export_data
-        finally:
-            _shutil.rmtree(tmpdir, ignore_errors=True)
+        env = _installed_init(tmp_path)
+        export_path = tmp_path / "export.json"
+        result = _run_installed(["db", "export", str(export_path)], env)
+        assert result.returncode == 0, f"grossy db export failed: {result.stderr}"
+        assert json.loads(result.stdout)["status"] == "success"
+        export_data = json.loads(export_path.read_text(encoding="utf-8"))
+        assert export_data["schema_name"] == "grossy.db.export"
+        assert export_data["schema_version"] == 1
 
 
 class TestSourceTreeImports:
@@ -526,9 +292,6 @@ class TestHostileEnvironment:
     """One bounded actual shell entry with effective hostile incoming fixtures."""
 
     def test_hostile_project_shell_entry(self, tmp_path: Path) -> None:
-        import json
-        import re
-
         import pydantic
         import typer
         import yaml
@@ -718,19 +481,3 @@ print(json.dumps({'tools': expected, 'modules': modules,
         assert (
             "HOSTILE_EXECUTABLE" not in result.stdout and "HOSTILE_CLI_MODULE" not in result.stdout
         )
-
-
-class TestNoVenvUsage:
-    """Prove no .venv is used even when one exists."""
-
-    def test_existing_venv_not_in_path(self) -> None:
-        """Even if .venv exists in the repo, it must not be in PATH."""
-        venv_bin = REPO_ROOT / ".venv" / "bin"
-        if venv_bin.exists():
-            path_dirs = os.environ.get("PATH", "").split(os.pathsep)
-            for p in path_dirs:
-                assert ".venv" not in p, f".venv path found in PATH: {p}"
-
-    def test_no_venv_python_in_sys(self) -> None:
-        """The running Python must not be from a .venv."""
-        assert ".venv" not in sys.executable, f"Python is from .venv: {sys.executable}"

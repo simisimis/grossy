@@ -8,14 +8,14 @@ or live cart access.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 from pydantic import ValidationError
 
 from grossy.browser.observation import (
     CART_OBSERVATION_SCHEMA_NAME,
-    CartObservation,
     CartObservationError,
-    CartObservationLine,
     RecipeProductFact,
     RecurringProductFact,
     validate_cart_observation,
@@ -48,6 +48,7 @@ class TestValidObservation:
         result = validate_cart_observation(_valid_data())
         assert result.schema_name == CART_OBSERVATION_SCHEMA_NAME
         assert result.schema_version == 1
+        assert result.generated_at == "2026-09-26T12:00:00Z"
         assert len(result.lines) == 1
         assert result.lines[0].product_id == "1234567"
         assert result.lines[0].quantity == 2
@@ -57,7 +58,7 @@ class TestValidObservation:
         result = validate_cart_observation(_valid_data(lines=[]))
         assert result.lines == []
 
-    def test_multiple_lines(self) -> None:
+    def test_multiple_lines_with_el_locale(self) -> None:
         data = _valid_data(
             lines=[
                 {
@@ -75,142 +76,121 @@ class TestValidObservation:
             ]
         )
         result = validate_cart_observation(data)
-        assert len(result.lines) == 2
+        assert [line.product_id for line in result.lines] == ["1234567", "7654321"]
 
-    def test_integer_minor_units_price(self) -> None:
-        # "1299" is a valid decimal string (integer minor units)
-        data = _valid_data()
-        data["lines"][0]["displayed_price_eur"] = "1299"
-        result = validate_cart_observation(data)
-        assert result.lines[0].displayed_price_eur == "1299"
-
-
-class TestSchemaRejection:
-    def test_wrong_schema_name(self) -> None:
-        with pytest.raises(CartObservationError, match="schema_name"):
-            validate_cart_observation(_valid_data(schema_name="grossy.cart.observation.v2"))
-
-    def test_wrong_schema_version(self) -> None:
-        with pytest.raises(CartObservationError, match="schema_version"):
-            validate_cart_observation(_valid_data(schema_version=2))
-
-    def test_unknown_top_level_field(self) -> None:
-        with pytest.raises(CartObservationError):
-            validate_cart_observation(_valid_data(extra_field="value"))
-
-    def test_unknown_line_field(self) -> None:
-        data = _valid_data()
-        data["lines"][0]["unknown"] = "x"
-        with pytest.raises(CartObservationError):
-            validate_cart_observation(data)
-
-    def test_missing_generated_at(self) -> None:
-        data = _valid_data()
-        del data["generated_at"]
-        with pytest.raises(CartObservationError):
-            validate_cart_observation(data)
-
-    def test_missing_lines(self) -> None:
-        data = _valid_data()
-        del data["lines"]
-        with pytest.raises(CartObservationError):
-            validate_cart_observation(data)
-
-
-class TestProductIdValidation:
-    def test_non_numeric_product_id(self) -> None:
-        data = _valid_data()
-        data["lines"][0]["product_id"] = "abc123"
-        with pytest.raises(CartObservationError):
-            validate_cart_observation(data)
-
-    def test_empty_product_id(self) -> None:
-        data = _valid_data()
-        data["lines"][0]["product_id"] = ""
-        with pytest.raises(CartObservationError):
-            validate_cart_observation(data)
-
-    def test_product_id_mismatches_url(self) -> None:
-        data = _valid_data()
-        data["lines"][0]["product_id"] = "9999999"
-        with pytest.raises(CartObservationError, match="disagrees"):
-            validate_cart_observation(data)
-
-
-class TestUrlValidation:
     @pytest.mark.parametrize(
-        "url",
+        "field,value",
         [
-            pytest.param("https://www.other.com/en/eshop/Dairy/Yogurt/p/1234567", id="wrong-host"),
-            pytest.param("http://www.ab.gr/en/eshop/Dairy/Yogurt/p/1234567", id="non-https"),
-            pytest.param("https://www.ab.gr/other/Dairy/Yogurt/p/1234567", id="non-eshop-route"),
+            pytest.param("displayed_price_eur", "1299", id="integer-minor-units-price"),
+            pytest.param("generated_at", "2026-09-26T15:00:00+03:00", id="offset-timestamp"),
         ],
     )
-    def test_rejects_noncanonical_product_url(self, url: str) -> None:
+    def test_accepted_scalar_forms(self, field: str, value: str) -> None:
         data = _valid_data()
-        data["lines"][0]["canonical_url"] = url
-        with pytest.raises(CartObservationError):
-            validate_cart_observation(data)
-
-    def test_el_locale_valid(self) -> None:
-        data = _valid_data()
-        data["lines"][0]["product_id"] = "7654321"
-        data["lines"][0]["canonical_url"] = VALID_URL_2
+        target = data if field == "generated_at" else data["lines"][0]
+        target[field] = value
         result = validate_cart_observation(data)
-        assert result.lines[0].product_id == "7654321"
+        actual = (
+            result.generated_at if field == "generated_at" else result.lines[0].displayed_price_eur
+        )
+        assert actual == value
 
 
-class TestQuantityValidation:
-    def test_zero_quantity(self) -> None:
-        data = _valid_data()
-        data["lines"][0]["quantity"] = 0
-        with pytest.raises(CartObservationError):
-            validate_cart_observation(data)
+@pytest.mark.parametrize(
+    "overrides,match",
+    [
+        pytest.param({"schema_name": "grossy.cart.observation.v2"}, "schema_name", id="wrong-name"),
+        pytest.param({"schema_version": 2}, "schema_version", id="wrong-version"),
+        pytest.param({"schema_version": "1"}, "schema_version", id="string-typed-version"),
+        pytest.param({"extra_field": "value"}, None, id="unknown-top-level-field"),
+        pytest.param({"generated_at": None}, None, id="missing-generated_at"),
+        pytest.param({"lines": None}, None, id="missing-lines"),
+        pytest.param({"generated_at": "not-a-timestamp"}, "ISO 8601", id="invalid-timestamp"),
+        pytest.param({"generated_at": ""}, "ISO 8601", id="empty-timestamp"),
+        # PRD 11: generated_at must be a timezone-aware instant, not a date.
+        pytest.param({"generated_at": "2026-09-26"}, "timezone-aware", id="date-only"),
+        pytest.param({"generated_at": "2026-09-26T12:00:00"}, "timezone-aware", id="naive"),
+    ],
+)
+def test_envelope_violations_rejected(overrides: dict[str, Any], match: str | None) -> None:
+    data = _valid_data()
+    for key, value in overrides.items():
+        if value is None:
+            del data[key]
+        else:
+            data[key] = value
+    with pytest.raises(CartObservationError, match=match):
+        validate_cart_observation(data)
 
-    def test_negative_quantity(self) -> None:
-        data = _valid_data()
-        data["lines"][0]["quantity"] = -1
-        with pytest.raises(CartObservationError):
-            validate_cart_observation(data)
 
-
-class TestPriceValidation:
-    def test_zero_price(self) -> None:
-        data = _valid_data()
-        data["lines"][0]["displayed_price_eur"] = "0"
-        with pytest.raises(CartObservationError, match="positive"):
-            validate_cart_observation(data)
-
-    def test_negative_price(self) -> None:
-        data = _valid_data()
-        data["lines"][0]["displayed_price_eur"] = "-5.00"
-        with pytest.raises(CartObservationError, match="positive"):
-            validate_cart_observation(data)
-
-    def test_non_numeric_price(self) -> None:
-        data = _valid_data()
-        data["lines"][0]["displayed_price_eur"] = "abc"
-        with pytest.raises(CartObservationError, match="decimal"):
-            validate_cart_observation(data)
-
-    def test_float_string_rejected_as_float_type(self) -> None:
-        # Binary float is not a valid decimal string representation
-        data = _valid_data()
-        data["lines"][0]["displayed_price_eur"] = 12.99  # type: ignore[dict-item]
-        with pytest.raises(CartObservationError):
-            validate_cart_observation(data)
-
-    def test_infinity_price_rejected(self) -> None:
-        data = _valid_data()
-        data["lines"][0]["displayed_price_eur"] = "Infinity"
-        with pytest.raises(CartObservationError, match="finite"):
-            validate_cart_observation(data)
-
-    def test_nan_price_rejected(self) -> None:
-        data = _valid_data()
-        data["lines"][0]["displayed_price_eur"] = "NaN"
-        with pytest.raises(CartObservationError, match="finite"):
-            validate_cart_observation(data)
+@pytest.mark.parametrize(
+    "field,value,match",
+    [
+        pytest.param("unknown", "x", None, id="unknown-line-field"),
+        pytest.param("product_id", "abc123", None, id="non-numeric-product-id"),
+        pytest.param("product_id", "", None, id="empty-product-id"),
+        pytest.param("product_id", "9999999", "disagrees", id="product-id-mismatches-url"),
+        pytest.param("product_id", "SELECT * FROM users", None, id="sql-in-product-id"),
+        pytest.param(
+            "canonical_url",
+            "https://www.other.com/en/eshop/Dairy/Yogurt/p/1234567",
+            None,
+            id="wrong-host",
+        ),
+        pytest.param(
+            "canonical_url",
+            "http://www.ab.gr/en/eshop/Dairy/Yogurt/p/1234567",
+            None,
+            id="non-https",
+        ),
+        pytest.param(
+            "canonical_url", "https://www.ab.gr/other/Dairy/Yogurt/p/1234567", None, id="non-eshop"
+        ),
+        # PRD 17.4: percent-encoded markup must not bypass the URL identity gate.
+        pytest.param(
+            "canonical_url",
+            "https://www.ab.gr/en/eshop/Dairy/%3Cscript%3Ealert(1)%3Cscript%3E/p/1234567",
+            None,
+            id="encoded-script-tag",
+        ),
+        pytest.param(
+            "canonical_url",
+            "https://www.ab.gr/en/eshop/Dairy/%3Ctest%3E/p/1234567",
+            None,
+            id="encoded-angle-brackets",
+        ),
+        pytest.param(
+            "canonical_url",
+            "https://www.ab.gr/en/eshop/Dairy/item%3E/p/1234567",
+            None,
+            id="encoded-greater-than",
+        ),
+        pytest.param("canonical_url", "<script>alert('xss')</script>", "prohibited", id="script"),
+        pytest.param("canonical_url", "javascript:alert(1)", "prohibited", id="javascript-uri"),
+        pytest.param("canonical_url", "DROP TABLE products", "prohibited", id="drop-table"),
+        pytest.param("quantity", 0, None, id="zero-quantity"),
+        pytest.param("quantity", -1, None, id="negative-quantity"),
+        pytest.param("quantity", "2", "quantity", id="string-typed-quantity"),
+        pytest.param("quantity", 2.0, "quantity", id="float-typed-quantity"),
+        pytest.param("displayed_price_eur", "0", "positive", id="zero-price"),
+        pytest.param("displayed_price_eur", "-5.00", "positive", id="negative-price"),
+        pytest.param("displayed_price_eur", "abc", "decimal", id="non-numeric-price"),
+        pytest.param("displayed_price_eur", 12.99, None, id="binary-float-price"),
+        pytest.param("displayed_price_eur", "Infinity", "finite", id="infinity-price"),
+        pytest.param("displayed_price_eur", "NaN", "finite", id="nan-price"),
+        pytest.param(
+            "displayed_price_eur", "data:image/png;base64,abc123", "prohibited", id="base64-image"
+        ),
+        pytest.param(
+            "displayed_price_eur", "SET-COOKIE: session=abc", "prohibited", id="set-cookie"
+        ),
+    ],
+)
+def test_line_field_violations_rejected(field: str, value: Any, match: str | None) -> None:
+    data = _valid_data()
+    data["lines"][0][field] = value
+    with pytest.raises(CartObservationError, match=match):
+        validate_cart_observation(data)
 
 
 @pytest.mark.parametrize("fact_field", ["recurring_product_facts", "recipe_product_facts"])
@@ -234,157 +214,3 @@ def test_current_fact_prices_fail_controlled_validation_without_echo(
         validate_cart_observation(_valid_data(**{fact_field: [fact]}))
     assert f"{fact_field}.0.displayed_price_eur" in str(error.value)
     assert price not in str(error.value)
-
-
-class TestStrictIntegerTypes:
-    """Integer fields must reject string-typed values (no lax coercion)."""
-
-    def test_string_typed_schema_version_rejected(self) -> None:
-        with pytest.raises(CartObservationError, match="schema_version"):
-            validate_cart_observation(_valid_data(schema_version="1"))
-
-    def test_string_typed_quantity_rejected(self) -> None:
-        data = _valid_data()
-        data["lines"][0]["quantity"] = "2"  # type: ignore[literal-required]
-        with pytest.raises(CartObservationError, match="quantity"):
-            validate_cart_observation(data)
-
-    def test_float_typed_quantity_rejected(self) -> None:
-        data = _valid_data()
-        data["lines"][0]["quantity"] = 2.0  # type: ignore[dict-item]
-        with pytest.raises(CartObservationError, match="quantity"):
-            validate_cart_observation(data)
-
-
-class TestTimestampValidation:
-    def test_valid_iso_8601_z(self) -> None:
-        result = validate_cart_observation(_valid_data())
-        assert result.generated_at == "2026-09-26T12:00:00Z"
-
-    def test_valid_iso_8601_offset(self) -> None:
-        data = _valid_data(generated_at="2026-09-26T15:00:00+03:00")
-        result = validate_cart_observation(data)
-        assert result.generated_at == "2026-09-26T15:00:00+03:00"
-
-    def test_invalid_timestamp(self) -> None:
-        data = _valid_data(generated_at="not-a-timestamp")
-        with pytest.raises(CartObservationError, match="ISO 8601"):
-            validate_cart_observation(data)
-
-    def test_empty_timestamp(self) -> None:
-        data = _valid_data(generated_at="")
-        with pytest.raises(CartObservationError, match="ISO 8601"):
-            validate_cart_observation(data)
-
-    def test_date_only_rejected(self) -> None:
-        """PRD 11: generated_at must be a timestamp (instant), not a date."""
-        data = _valid_data(generated_at="2026-09-26")
-        with pytest.raises(CartObservationError, match="timezone-aware"):
-            validate_cart_observation(data)
-
-    def test_naive_timestamp_rejected(self) -> None:
-        """PRD 12.1: timestamps must be UTC instants (timezone required)."""
-        data = _valid_data(generated_at="2026-09-26T12:00:00")
-        with pytest.raises(CartObservationError, match="timezone-aware"):
-            validate_cart_observation(data)
-
-
-class TestEncodedContentBypass:
-    """Percent-encoded executable markup must not bypass the safety boundary.
-
-    PRD 17.4: browser and recipe content must be treated as untrusted data
-    and never executable instructions. The URL identity gate must reject
-    decoded angle brackets so that ``%3Cscript%3E`` cannot pass validation.
-    """
-
-    @pytest.mark.parametrize(
-        "url",
-        [
-            pytest.param(
-                "https://www.ab.gr/en/eshop/Dairy/%3Cscript%3Ealert(1)%3Cscript%3E/p/1234567",
-                id="encoded-script-tag",
-            ),
-            pytest.param(
-                "https://www.ab.gr/en/eshop/Dairy/%3Ctest%3E/p/1234567",
-                id="encoded-angle-brackets",
-            ),
-            pytest.param(
-                "https://www.ab.gr/en/eshop/Dairy/item%3E/p/1234567",
-                id="encoded-greater-than-only",
-            ),
-        ],
-    )
-    def test_rejects_encoded_markup_in_product_url(self, url: str) -> None:
-        data = _valid_data()
-        data["lines"][0]["canonical_url"] = url
-        with pytest.raises(CartObservationError):
-            validate_cart_observation(data)
-
-
-class TestProhibitedContent:
-    """Tests that reject untrusted executable content in observation strings."""
-
-    def test_script_tag_in_url(self) -> None:
-        data = _valid_data()
-        data["lines"][0]["canonical_url"] = "<script>alert('xss')</script>"
-        with pytest.raises(CartObservationError, match="prohibited"):
-            validate_cart_observation(data)
-
-    def test_sql_in_product_id_context(self) -> None:
-        data = _valid_data()
-        data["lines"][0]["product_id"] = "SELECT * FROM users"
-        with pytest.raises(CartObservationError):
-            validate_cart_observation(data)
-
-    def test_javascript_uri(self) -> None:
-        data = _valid_data()
-        data["lines"][0]["canonical_url"] = "javascript:alert(1)"
-        with pytest.raises(CartObservationError, match="prohibited"):
-            validate_cart_observation(data)
-
-    def test_base64_image(self) -> None:
-        data = _valid_data()
-        data["lines"][0]["displayed_price_eur"] = "data:image/png;base64,abc123"
-        with pytest.raises(CartObservationError, match="prohibited"):
-            validate_cart_observation(data)
-
-    def test_set_cookie_header(self) -> None:
-        data = _valid_data()
-        data["lines"][0]["displayed_price_eur"] = "SET-COOKIE: session=abc"
-        with pytest.raises(CartObservationError, match="prohibited"):
-            validate_cart_observation(data)
-
-    def test_drop_table(self) -> None:
-        data = _valid_data()
-        data["lines"][0]["canonical_url"] = "DROP TABLE products"
-        with pytest.raises(CartObservationError, match="prohibited"):
-            validate_cart_observation(data)
-
-
-class TestPydanticModelDirect:
-    """Test the Pydantic model directly (not through validate_cart_observation)."""
-
-    def test_line_model_valid(self) -> None:
-        line = CartObservationLine(
-            product_id="1234567",
-            canonical_url=VALID_URL,
-            quantity=1,
-            displayed_price_eur="9.99",
-        )
-        assert line.product_id == "1234567"
-
-    def test_observation_model_valid(self) -> None:
-        obs = CartObservation(
-            schema_name=CART_OBSERVATION_SCHEMA_NAME,
-            schema_version=1,
-            generated_at="2026-09-26T12:00:00Z",
-            lines=[
-                CartObservationLine(
-                    product_id="1234567",
-                    canonical_url=VALID_URL,
-                    quantity=1,
-                    displayed_price_eur="9.99",
-                )
-            ],
-        )
-        assert len(obs.lines) == 1

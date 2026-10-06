@@ -194,22 +194,23 @@ def test_unknown_recipe_fails_without_event(env: tuple[Path, GrossyPaths]) -> No
         conn.close()
 
 
-def test_nonpositive_weight_fails_state_unchanged(env: tuple[Path, GrossyPaths]) -> None:
+@pytest.mark.parametrize(
+    "bad,error",
+    [
+        (0.0, "positive decimal"),
+        (float("inf"), "finite decimal"),
+        (float("-inf"), "finite decimal"),
+        (float("nan"), "finite decimal"),
+    ],
+    ids=["zero", "inf", "-inf", "nan"],
+)
+def test_invalid_weight_fails_state_unchanged(
+    env: tuple[Path, GrossyPaths], bad: float, error: str
+) -> None:
     _tmp, paths = env
     _seed(paths, "r-1")
-    with pytest.raises(RecipeMaintenanceError, match="positive decimal"):
-        run_recipe_weight(paths, "r-1", 0.0)
-    assert _state(paths, "r-1") == (1.0, 0, 1, 1)
-    assert _events(paths, "r-1") == []
-
-
-def test_nonfinite_weight_fails_state_unchanged(env: tuple[Path, GrossyPaths]) -> None:
-    """inf and nan are rejected without changing state or recording an event."""
-    _tmp, paths = env
-    _seed(paths, "r-1")
-    for bad in (float("inf"), float("-inf"), float("nan")):
-        with pytest.raises(RecipeMaintenanceError, match="finite decimal"):
-            run_recipe_weight(paths, "r-1", bad)
+    with pytest.raises(RecipeMaintenanceError, match=error):
+        run_recipe_weight(paths, "r-1", bad)
     assert _state(paths, "r-1") == (1.0, 0, 1, 1)
     assert _events(paths, "r-1") == []
 

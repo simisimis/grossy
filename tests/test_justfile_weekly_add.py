@@ -59,37 +59,29 @@ def _run_just(tmp_path: Path, *args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def test_documented_invocation_renders_exact_prompt(tmp_path: Path) -> None:
-    result = _run_just(tmp_path, "RUN_ID=run-1", "RECIPES=recipe1")
+@pytest.mark.parametrize(
+    "recipes,prompt",
+    [
+        ("recipe1", "/skill:grossy weekly add run-1 recipe1"),
+        ("recipe1,recipe2", "/skill:grossy weekly add run-1 recipe1,recipe2"),
+    ],
+    ids=["single-recipe", "comma-list"],
+)
+def test_documented_invocation_renders_exact_prompt(
+    tmp_path: Path, recipes: str, prompt: str
+) -> None:
+    result = _run_just(tmp_path, "RUN_ID=run-1", f"RECIPES={recipes}")
     assert result.returncode == 0, result.stderr
-    log = tmp_path / "pi-args.log"
-    assert log.read_text().splitlines() == [
-        "-p",
-        "/skill:grossy weekly add run-1 recipe1",
-    ]
+    assert (tmp_path / "pi-args.log").read_text().splitlines() == ["-p", prompt]
 
 
-def test_comma_list_invocation_renders_prompt(tmp_path: Path) -> None:
-    result = _run_just(tmp_path, "RUN_ID=run-1", "RECIPES=recipe1,recipe2")
-    assert result.returncode == 0, result.stderr
-    log = tmp_path / "pi-args.log"
-    assert log.read_text().splitlines() == [
-        "-p",
-        "/skill:grossy weekly add run-1 recipe1,recipe2",
-    ]
-
-
-def test_hostile_argument_never_reaches_pi(tmp_path: Path) -> None:
-    result = _run_just(tmp_path, "RUN_ID=$(printf INJECTED)", "RECIPES=all")
-    assert result.returncode != 0
-    assert (
-        not (tmp_path / "pi-args.log").exists()
-        or not (tmp_path / "pi-args.log").read_text().strip()
-    )
-
-
-def test_hostile_recipe_list_never_reaches_pi(tmp_path: Path) -> None:
-    result = _run_just(tmp_path, "RUN_ID=run-1", "RECIPES=recipe1;reboot")
+@pytest.mark.parametrize(
+    "run_id,recipes",
+    [("$(printf INJECTED)", "all"), ("run-1", "recipe1;reboot")],
+    ids=["hostile-run-id", "hostile-recipe-list"],
+)
+def test_hostile_argument_never_reaches_pi(tmp_path: Path, run_id: str, recipes: str) -> None:
+    result = _run_just(tmp_path, f"RUN_ID={run_id}", f"RECIPES={recipes}")
     assert result.returncode != 0
     assert (
         not (tmp_path / "pi-args.log").exists()

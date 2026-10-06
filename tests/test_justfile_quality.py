@@ -125,86 +125,49 @@ def test_check_runs_all_quality_steps_in_order(tmp_path: Path) -> None:
     project = _make_project(tmp_path)
     result = _run_just(project, tmp_path, "check")
     assert result.returncode == 0, result.stderr
-    invocations = _tool_invocations(tmp_path / "tool-args.log")
-    # ruff format --check
-    assert invocations[0] == ("ruff", ["format", "--check", "src", "tests"])
-    # ruff check
-    assert invocations[1] == ("ruff", ["check", "src", "tests"])
-    # mypy
-    assert invocations[2] == ("mypy", [])
-    # python3 -m pytest
-    assert invocations[3] == ("python3", ["-m", "pytest"])
-    # No uv, pip, or installer invocations
-    for tool, _ in invocations:
-        assert tool not in ("uv", "pip"), f"installer {tool} was invoked"
+    assert _tool_invocations(tmp_path / "tool-args.log") == [
+        ("ruff", ["format", "--check", "src", "tests"]),
+        ("ruff", ["check", "src", "tests"]),
+        ("mypy", []),
+        ("python3", ["-m", "pytest"]),
+    ]
 
 
-def test_check_stops_on_format_failure(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "fail_tool,invocations_before_stop",
+    [("ruff", 1), ("mypy", 3)],
+    ids=["format-failure", "mypy-failure"],
+)
+def test_check_short_circuits_on_first_failure(
+    tmp_path: Path, fail_tool: str, invocations_before_stop: int
+) -> None:
     project = _make_project(tmp_path)
-    result = _run_just(project, tmp_path, "check", fail_tool="ruff")
+    result = _run_just(project, tmp_path, "check", fail_tool=fail_tool)
     assert result.returncode != 0
     invocations = _tool_invocations(tmp_path / "tool-args.log")
-    # Only the format check ran before failure
-    assert len(invocations) == 1
-    assert invocations[0][0] == "ruff"
+    assert len(invocations) == invocations_before_stop
+    assert invocations[-1][0] == fail_tool
 
 
-def test_check_stops_on_mypy_failure(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "target,expected",
+    [
+        (
+            "format",
+            [("ruff", ["format", "src", "tests"]), ("ruff", ["check", "--fix", "src", "tests"])],
+        ),
+        ("lint", [("ruff", ["check", "src", "tests"])]),
+        ("typecheck", [("mypy", [])]),
+        ("test", [("python3", ["-m", "pytest"])]),
+    ],
+)
+def test_single_target_invokes_exactly_its_tools(
+    tmp_path: Path, target: str, expected: list[tuple[str, list[str]]]
+) -> None:
     project = _make_project(tmp_path)
-    result = _run_just(project, tmp_path, "check", fail_tool="mypy")
-    assert result.returncode != 0
-    invocations = _tool_invocations(tmp_path / "tool-args.log")
-    # ruff format, ruff check ran; mypy failed; pytest did not run
-    assert len(invocations) == 3
-    assert invocations[2][0] == "mypy"
-
-
-def test_format_target_runs_ruff(tmp_path: Path) -> None:
-    project = _make_project(tmp_path)
-    result = _run_just(project, tmp_path, "format")
+    result = _run_just(project, tmp_path, target)
     assert result.returncode == 0, result.stderr
-    invocations = _tool_invocations(tmp_path / "tool-args.log")
-    assert invocations[0] == ("ruff", ["format", "src", "tests"])
-    assert invocations[1] == ("ruff", ["check", "--fix", "src", "tests"])
-
-
-def test_lint_target_runs_ruff_check(tmp_path: Path) -> None:
-    project = _make_project(tmp_path)
-    result = _run_just(project, tmp_path, "lint")
-    assert result.returncode == 0, result.stderr
-    invocations = _tool_invocations(tmp_path / "tool-args.log")
-    assert invocations == [("ruff", ["check", "src", "tests"])]
-
-
-def test_typecheck_target_runs_mypy(tmp_path: Path) -> None:
-    project = _make_project(tmp_path)
-    result = _run_just(project, tmp_path, "typecheck")
-    assert result.returncode == 0, result.stderr
-    invocations = _tool_invocations(tmp_path / "tool-args.log")
-    assert invocations == [("mypy", [])]
-
-
-def test_test_target_runs_pytest(tmp_path: Path) -> None:
-    project = _make_project(tmp_path)
-    result = _run_just(project, tmp_path, "test")
-    assert result.returncode == 0, result.stderr
-    invocations = _tool_invocations(tmp_path / "tool-args.log")
-    # python3 -m pytest
-    assert any(
-        tool == "python3" and "-m" in args and "pytest" in args for tool, args in invocations
-    )
-
-
-def test_setup_fails_with_non_store_tools(tmp_path: Path) -> None:
-    """setup must reject fake (non-store) tools via the provenance guard."""
-    project = _make_project(tmp_path, ordering_harness=False)
-    result = _run_just(project, tmp_path, "setup")
-    assert result.returncode != 0, (
-        f"setup should fail when tools are not Nix store paths; got: {result.stdout}"
-    )
-    assert "not a Nix store path" in result.stdout or "not a Nix store path" in result.stderr, (
-        f"Expected provenance error, got: {result.stdout} {result.stderr}"
-    )
+    assert _tool_invocations(tmp_path / "tool-args.log") == expected
 
 
 def test_setup_rejects_venv_in_path(tmp_path: Path) -> None:
@@ -229,29 +192,10 @@ def test_setup_rejects_venv_in_path(tmp_path: Path) -> None:
     assert ".venv" in result.stdout or ".venv" in result.stderr
 
 
-def test_setup_rejects_virtual_env_var(tmp_path: Path) -> None:
-    """setup must reject when VIRTUAL_ENV is set."""
-    project = _make_project(tmp_path, ordering_harness=False)
-    env = dict(os.environ)
-    env.pop("PYTHONPATH", None)
-    env["PATH"] = f"{tmp_path / 'bin'}{os.pathsep}{env.get('PATH', '')}"
-    env["FAKE_TOOL_LOG"] = str(tmp_path / "tool-args.log")
-    env["VIRTUAL_ENV"] = "/fake/venv"
-    result = subprocess.run(
-        ["just", "setup"],
-        cwd=project,
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
-    assert result.returncode != 0, f"setup should fail with VIRTUAL_ENV set: {result.stdout}"
-    assert "VIRTUAL_ENV" in result.stdout or "VIRTUAL_ENV" in result.stderr
-
-
 @pytest.mark.parametrize(
     "recipe,args",
     [
+        ("setup", []),
         ("check", []),
         ("test", []),
         ("format", []),

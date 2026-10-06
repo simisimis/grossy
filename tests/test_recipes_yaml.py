@@ -106,91 +106,67 @@ def test_valid_yaml_parses() -> None:
     assert recipe.reference_url is None
 
 
-def test_unknown_top_level_field_rejected() -> None:
-    text = "junk: true\n" + BASE_YAML.format(recipe_id="mama-sunday-roast")
-    with pytest.raises(RecipeYamlError, match="unknown field"):
+VALID_YAML = BASE_YAML.format(recipe_id="mama-sunday-roast")
+
+
+@pytest.mark.parametrize(
+    "text,match",
+    [
+        pytest.param("junk: true\n" + VALID_YAML, "unknown field", id="unknown-top-level-field"),
+        pytest.param(
+            VALID_YAML.replace("  protein_class: meat\n", "  protein_class: meat\n  mystery: 1\n"),
+            "recipe file validation failed",
+            id="unknown-nested-field",
+        ),
+        pytest.param(
+            VALID_YAML.replace("grossy.recipe.yaml.v1", "grossy.recipe.yaml.v2"),
+            "schema_name must be",
+            id="wrong-schema-name",
+        ),
+        pytest.param(
+            VALID_YAML.replace("schema_version: 1", "schema_version: 2"),
+            "schema_version must be 1",
+            id="wrong-schema-version",
+        ),
+        pytest.param(
+            VALID_YAML.replace(
+                '  title: "Mama\'s Sunday roast"\n',
+                '  title: "Mama\'s Sunday roast"\n  title: "Another"\n',
+            ),
+            "duplicate",
+            id="duplicate-key",
+        ),
+        pytest.param(
+            VALID_YAML.replace("protein_class: meat", "protein_class: insect"),
+            "protein_class must be one of",
+            id="invalid-protein-class",
+        ),
+        pytest.param(
+            VALID_YAML.replace("amount: 1.2", "amount: 0"), "greater than 0", id="zero-amount"
+        ),
+        pytest.param(
+            VALID_YAML + "  is_favorite: true\n  is_regular: true\n",
+            "mutually exclusive",
+            id="favorite-and-regular",
+        ),
+        pytest.param("recipe: [unclosed", "invalid YAML", id="invalid-yaml"),
+        pytest.param("", "empty", id="empty-file"),
+        pytest.param(
+            VALID_YAML + "  reference_url: http://family.example.com/sunday-roast\n",
+            "must be an https URL",
+            id="http-url",
+        ),
+    ],
+)
+def test_invalid_yaml_rejected(text: str, match: str) -> None:
+    with pytest.raises(RecipeYamlError, match=match):
         load_recipe_yaml(text)
-
-
-def test_unknown_nested_field_rejected() -> None:
-    text = BASE_YAML.format(recipe_id="mama-sunday-roast").replace(
-        "  protein_class: meat\n", "  protein_class: meat\n  mystery: 1\n"
-    )
-    with pytest.raises(RecipeYamlError, match="recipe file validation failed"):
-        load_recipe_yaml(text)
-
-
-def test_wrong_schema_name_rejected() -> None:
-    text = BASE_YAML.format(recipe_id="mama-sunday-roast").replace(
-        "grossy.recipe.yaml.v1", "grossy.recipe.yaml.v2"
-    )
-    with pytest.raises(RecipeYamlError, match="schema_name must be"):
-        load_recipe_yaml(text)
-
-
-def test_wrong_schema_version_rejected() -> None:
-    text = BASE_YAML.format(recipe_id="mama-sunday-roast").replace(
-        "schema_version: 1", "schema_version: 2"
-    )
-    with pytest.raises(RecipeYamlError, match="schema_version must be 1"):
-        load_recipe_yaml(text)
-
-
-def test_duplicate_yaml_key_rejected() -> None:
-    text = BASE_YAML.format(recipe_id="mama-sunday-roast").replace(
-        '  title: "Mama\'s Sunday roast"\n',
-        '  title: "Mama\'s Sunday roast"\n  title: "Another"\n',
-    )
-    with pytest.raises(RecipeYamlError, match="duplicate"):
-        load_recipe_yaml(text)
-
-
-def test_invalid_protein_class_rejected() -> None:
-    text = BASE_YAML.format(recipe_id="mama-sunday-roast").replace(
-        "protein_class: meat", "protein_class: insect"
-    )
-    with pytest.raises(RecipeYamlError, match="protein_class must be one of"):
-        load_recipe_yaml(text)
-
-
-def test_non_positive_amount_rejected() -> None:
-    text = BASE_YAML.format(recipe_id="mama-sunday-roast").replace("amount: 1.2", "amount: 0")
-    with pytest.raises(RecipeYamlError, match="greater than 0"):
-        load_recipe_yaml(text)
-
-
-def test_favorite_and_regular_conflict_rejected() -> None:
-    text = BASE_YAML.format(recipe_id="mama-sunday-roast") + (
-        "  is_favorite: true\n  is_regular: true\n"
-    )
-    with pytest.raises(RecipeYamlError, match="mutually exclusive"):
-        load_recipe_yaml(text)
-
-
-def test_invalid_yaml_rejected() -> None:
-    with pytest.raises(RecipeYamlError, match="invalid YAML"):
-        load_recipe_yaml("recipe: [unclosed")
-
-
-def test_empty_file_rejected() -> None:
-    with pytest.raises(RecipeYamlError, match="empty"):
-        load_recipe_yaml("")
 
 
 def test_optional_url_validated_when_present() -> None:
-    text = BASE_YAML.format(recipe_id="mama-sunday-roast") + (
-        "  reference_url: https://family.example.com/sunday-roast\n"
-    )
+    text = VALID_YAML + "  reference_url: https://family.example.com/sunday-roast\n"
     recipe = load_recipe_yaml(text)
     assert recipe.reference_url == "https://family.example.com/sunday-roast"
-
-
-def test_http_url_rejected() -> None:
-    text = BASE_YAML.format(recipe_id="mama-sunday-roast") + (
-        "  reference_url: http://family.example.com/sunday-roast\n"
-    )
-    with pytest.raises(RecipeYamlError, match="must be an https URL"):
-        load_recipe_yaml(text)
 
 
 def test_control_character_rejected() -> None:
