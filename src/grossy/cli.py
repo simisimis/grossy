@@ -469,6 +469,18 @@ def recipes_add_file(
     typer.echo(json.dumps(result.to_dict(), sort_keys=True))
 
 
+@recipes_app.command("list")
+def recipes_list() -> None:
+    """List all stored recipes read-only (no migration or write)."""
+    from grossy.recipes.listing import run_recipes_list
+
+    try:
+        result = run_recipes_list(resolve_paths())
+    except (RecipeMaintenanceError, sqlite3.Error, OSError) as exc:
+        emit_recipe_error("recipes list", exc)
+    typer.echo(json.dumps(result, sort_keys=True))
+
+
 @recipes_app.command("favorite")
 def recipes_favorite(
     recipe_id: str,
@@ -1094,6 +1106,57 @@ def weekly_recurring_observe(
         sqlite3.Error,
     ) as exc:
         emit_weekly_error("weekly recurring-observe", exc)
+    typer.echo(json.dumps(result, sort_keys=True))
+    if result.get("status") == "error":
+        raise typer.Exit(code=1)
+
+
+@weekly_app.command("matching-prepare")
+def weekly_matching_prepare(run_id: str) -> None:
+    """Read shown ingredients and history-ranked catalogue candidates; never browse."""
+    from grossy.db.migrations import MigrationChecksumError
+    from grossy.db.snapshot import SnapshotError
+    from grossy.weekly.matching import run_matching_prepare
+    from grossy.weekly.plan import WeeklyPlanError
+
+    try:
+        result = run_matching_prepare(resolve_paths(), run_id)
+    except (
+        WeeklyPlanError,
+        LockHeldError,
+        MigrationChecksumError,
+        SnapshotError,
+        OSError,
+        sqlite3.Error,
+        ValueError,
+    ) as exc:
+        emit_weekly_error(f"weekly matching-prepare {run_id}", exc)
+    typer.echo(json.dumps(result, sort_keys=True))
+
+
+@weekly_app.command("matches-apply")
+def weekly_matches_apply(
+    run_id: str,
+    recipe_proposal: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
+) -> None:
+    """Accept reviewed ingredient mappings before selection without changing slots."""
+    from grossy.db.migrations import MigrationChecksumError
+    from grossy.db.snapshot import SnapshotError
+    from grossy.weekly.matching import run_matches_apply
+    from grossy.weekly.plan import WeeklyPlanError
+
+    try:
+        result = run_matches_apply(resolve_paths(), run_id, json.loads(recipe_proposal.read_text()))
+    except (
+        WeeklyPlanError,
+        LockHeldError,
+        MigrationChecksumError,
+        SnapshotError,
+        OSError,
+        sqlite3.Error,
+        ValueError,
+    ) as exc:
+        emit_weekly_error(f"weekly matches-apply {run_id}", exc)
     typer.echo(json.dumps(result, sort_keys=True))
     if result.get("status") == "error":
         raise typer.Exit(code=1)

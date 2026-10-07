@@ -20,6 +20,7 @@ from grossy.weekly.preview import (
     package_amount,
     pantry_covers,
     product_identity_valid,
+    retail_size,
 )
 
 
@@ -29,7 +30,9 @@ def selected_candidates(conn: sqlite3.Connection, rid: int) -> list[dict[str, An
     ).fetchone()
     if row is None:
         raise WeeklyPlanError("persisted recipe plan required")
-    candidates = {c["revision_id"]: c for c in json.loads(row[0])}
+    from grossy.weekly.matching import mapped_candidates
+
+    candidates = {c["revision_id"]: c for c in mapped_candidates(conn, rid, json.loads(row[0]))}
     result = []
     for slot, dinner, revision in conn.execute(
         "SELECT s.slot_name,s.dinner_label,o.recipe_revision_id FROM run_recipe_selections s "
@@ -215,7 +218,9 @@ def recipe_plan(
             if exact is None or unit.casefold() not in _UNITS:
                 decision["reasons"].append(f"{name}: unresolved preview match or unit")
                 continue
-            products = {p["product_id"]: p for p in local_products(conn, name)}
+            semantic_ids = preview.get("semantic_compatible_product_ids")
+            coverage = preview.get("retail_unit_coverage", {})
+            products = {p["product_id"]: p for p in local_products(conn, name, semantic_ids)}
             preferred = products.get(exact["product_id"])
             if preferred is None or preferred["canonical_url"] != exact["canonical_url"]:
                 decision["reasons"].append(f"{name}: stale preview identity")
@@ -235,9 +240,13 @@ def recipe_plan(
                     or product_gate(conn, pid).is_blocked
                 ):
                     continue
-                if pid != exact["product_id"] and (
-                    not preferred["family_row_id"]
-                    or product["family_row_id"] != preferred["family_row_id"]
+                if (
+                    pid != exact["product_id"]
+                    and not semantic_ids
+                    and (
+                        not preferred["family_row_id"]
+                        or product["family_row_id"] != preferred["family_row_id"]
+                    )
                 ):
                     continue
                 # YAML explicit substitution restrictions also constrain a previewed fallback.
@@ -249,7 +258,17 @@ def recipe_plan(
                 fact = facts.get(pid)
                 if fact is None or fact.canonical_url != product["canonical_url"]:
                     continue
-                size = package_amount(fact.model_dump(), unit)
+                if any(
+                    v is None
+                    for v in (
+                        fact.package_amount,
+                        fact.package_unit,
+                        fact.package_count,
+                        fact.sale_kind,
+                    )
+                ):
+                    continue
+                size = retail_size(fact.model_dump(), unit, coverage)
                 if size is None:
                     continue
                 allowed.append((pid, size))
@@ -273,7 +292,9 @@ def recipe_plan(
                 )
                 continue
             pid, size = selected
-            price = Decimal(facts[pid].displayed_price_eur)
+            observed_price = facts[pid].displayed_price_eur
+            assert observed_price is not None  # Available facts require a real price.
+            price = Decimal(observed_price)
             if any(
                 s.max_product_price_eur is not None and price > s.max_product_price_eur
                 for s in [*_limits(config, pid), *_limits(config, exact["product_id"])]
@@ -293,14 +314,22 @@ def recipe_plan(
                 base_size=str(size * factor),
                 compatible={p: str(q * factor) for p, q in allowed},
             )
+            estimated = package_amount(facts[pid].model_dump(), unit) is None
             item["assumptions"].append(
                 f"one adapter unit supplies {size} {unit}; "
                 + (
-                    "rendered weighed increment"
+                    "explicit agent estimate, observed package unit not comparable"
+                    if estimated
+                    else "rendered weighed increment"
                     if facts[pid].sale_kind == "weighed"
                     else "whole package amount times count"
                 )
                 + "; rounded upward, never knowingly undersupplied"
+            )
+            if estimated:
+                item["estimated_coverage"] = True
+            item["estimated_credit_product_ids"] = sorted(
+                p for p, _ in allowed if package_amount(facts[p].model_dump(), unit) is None
             )
         if decision["reasons"]:
             decision["status"] = "blocked"
@@ -346,6 +375,15 @@ def recipe_plan(
                 ),
                 Decimal(0),
             )
+            est_pids = set(sample.get("estimated_credit_product_ids", []))
+            if est_pids and any(
+                line.product_id in est_pids for line in obs.lines if line.product_id in compatible
+            ):
+                for _, i in contributions:
+                    i["assumptions"].append(
+                        "cart credit includes explicit agent estimates for non-comparable "
+                        "package units; not an observed package fact"
+                    )
             missing = max(Decimal(0), target - credit)
             quantity = int(
                 (missing / Decimal(sample["base_size"])).to_integral_value(rounding=ROUND_CEILING)

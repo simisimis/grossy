@@ -101,6 +101,18 @@ six dated history controls and a whole-cart read. Record these separately from
 CLI doctor output. No worker/reviewer runs even a read-only live browser check.
 See [smoke-test.md](smoke-test.md).
 
+Live-readiness findings (2026-10-07): document load completion alone is not cart
+readiness. Wait for settled purchase/quantity controls or an explicit empty-basket
+message, using bounded boolean predicates. Known in-cart product pages displayed
+stale zero quantities after navigation; a read-only hard reload restored the
+observed quantities. Reload known in-cart pages before identity-bound readback,
+then still require whole-cart consistency; never guess quantities or replay an
+addition. Record the task tab's stable target ID privately, explicitly select it
+before each command with `--pin-tab`, and verify the expected route. Missing tabs,
+failed readiness or inconsistent readback stop writes; only separately approved
+read-only reconciliation may follow. See the skill's Observation Protocol for
+exact controls and guards. These findings do not expand smoke/cart-write scope.
+
 ## Manual workflows and exact boundaries
 
 Invoke agent-dependent operations in Pi, not as fictitious `grossy weekly plan`
@@ -177,6 +189,47 @@ availability/price projections are unverified until fresh rendered preflight.
 `recipes-apply` owns eligibility, deterministic weights/slots and immutable
 snapshots. Reroll changes suggestions, never the cart. Empty classes remain empty;
 no live source fetching or guessed matches during weekly recipe planning.
+
+For unresolved ingredient names, `grossy weekly matching-prepare <run-id>` reads
+shown recipes and local catalogue history through a read-only database connection
+(no migration/browser). The coordinator reviews culinary compatibility, treats
+recipe qualifiers as flexible, and prefers suitable products occurring most often
+in recorded orders. It must not equate nut spreads with dairy butter or condensed
+milk with ordinary milk. Hard household diet/dislikes/blacklists/limits remain.
+CLI ranking is within the explicitly reviewed compatible set; agent reasoning,
+not a substring heuristic, supplies compatibility and complete candidate coverage.
+
+`grossy weekly matches-apply <run-id> <recipe-options.json>` accepts mappings only
+before selection/recipe intent. Semantic records use `evidence: agent_semantic_review`,
+`compatible_product_ids` covering chosen/fallback identities, and a bounded review
+rationale. Recipe/revision/ingredient/run bindings and history ranking are checked.
+Separately approved read-only store discovery may supply `catalogue_products`:
+exact numeric ID, canonical URL, rendered title/optional brand and fresh
+`observed_at`. New identities have zero purchases and do not alter families or
+existing metadata. These are ingredient mapping approvals, not browser-write consent.
+
+Schema 11 appends immutable `run_recipe_mappings`; original plans, recipes,
+slots/rerolls, basket advance and mutation truth are preserved. Existing mapped
+ingredients must be included in a refreshed recipe. Selection blocks changes;
+no silent abandonment/reprepare. Backup before applying to older real state:
+write phases migrate transactionally with the normal pre-migration snapshot.
+Export/backup/restore include the mapping evidence. No migration is performed by
+read-only matching preparation.
+
+Live unavailable/unknown product facts may have null prices/package values;
+available facts still require real positive prices and complete package facts.
+Nulls never authorize purchases or invented conversions. Recipe `pc` is a count
+alias. Count-to-mass conversion is never implicit: a reviewed match may declare
+`retail_unit_coverage` (recipe units one retail unit supplies, per chosen or
+fallback product). It applies only when observed package units are not directly
+comparable, is reported as an explicit estimate and is rounded upward.
+
+Weekly recipe targets scale linearly to `household.recipe_servings` (sample
+default 3). The run snapshots the whole config: changing servings blocks matching
+and rerolls of an existing run; apply it before planning a new run.
+
+`grossy recipes list` prints every stored recipe read-only (versioned JSON with
+current revision, servings, class, enabled/favorite state and ingredient count).
 
 Stage2 selection-apply persists one to three unique nonempty slots in argument
 order, with recipeN→dinnerN mapping, and grants durable run-scoped recipe stage

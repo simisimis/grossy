@@ -404,6 +404,7 @@ def _plan(
         if fact is None or fact.availability != "available":
             decisions.append({"product_id": pid, "status": "skipped-unknown-or-unavailable"})
             continue
+        assert fact.displayed_price_eur is not None  # Available facts require a real price.
         price = Decimal(fact.displayed_price_eur)
         if any(
             (s.max_product_price_eur is not None and price > s.max_product_price_eur)

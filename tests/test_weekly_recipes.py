@@ -68,6 +68,8 @@ def add_recipe(
     variants: list[dict[str, Any]] | None = None,
     weight: float = 1,
     tier: str = "user",
+    unit: str = "g",
+    amount: float = 100,
 ) -> int:
     conn = open_connection(paths.database_file)
     try:
@@ -83,7 +85,9 @@ def add_recipe(
             total_time_minutes=time,
             servings=2,
             steps=["Secret preparation step never shown before selection"],
-            ingredients=[RecipeIngredient(name=n, amount=100, unit="g") for n in names or ["rice"]],
+            ingredients=[
+                RecipeIngredient(name=n, amount=amount, unit=unit) for n in names or ["rice"]
+            ],
             appliances=[ApplianceRequirement.model_validate(v) for v in appliances or []],
             variants=[RecipeVariantLink.model_validate(v) for v in variants or []],
             base_weight=weight,

@@ -91,6 +91,7 @@ EXPECTED_COMMANDS = frozenset(
         "history scan-validate",
         "history sync-apply",
         "recipes add-file",
+        "recipes list",
         "recipes favorite",
         "recipes regular",
         "recipes weight",
@@ -110,6 +111,8 @@ EXPECTED_COMMANDS = frozenset(
         "weekly recurring-intent",
         "weekly recurring-observe",
         "weekly recipes-apply",
+        "weekly matching-prepare",
+        "weekly matches-apply",
         "weekly reroll-apply",
         "weekly selection-apply",
         "weekly recipe-preflight",
@@ -205,6 +208,7 @@ def test_closure_fails_closed_without_database(args: list[str], isolated_home: G
         ["recipes", "weight", "r-1", "1.5"],
         ["recipes", "enable", "r-1"],
         ["recipes", "disable", "r-1"],
+        ["recipes", "list"],
     ],
 )
 def test_maintenance_commands_fail_closed_without_database(
@@ -229,6 +233,30 @@ def test_maintenance_commands_fail_closed_without_database(
     assert not isolated_home.database_file.exists()
     # And the writer lock must not have been acquired for a missing database.
     assert not (isolated_home.state_dir / "writer.lock").exists()
+
+
+def test_recipes_list_is_read_only_versioned_json(initialized_home: GrossyPaths) -> None:
+    """Lists stored recipes without migrating, locking or changing the database."""
+    import hashlib
+
+    def digest() -> str:
+        return hashlib.sha256(initialized_home.database_file.read_bytes()).hexdigest()
+
+    lock = initialized_home.state_dir / "writer.lock"
+    before, lock_before = digest(), lock.exists()
+    result = RUNNER.invoke(app, ["recipes", "list"])
+    assert result.exit_code == 0
+    data = json.loads(result.stdout)
+    assert (data["schema_name"], data["schema_version"], data["status"]) == (
+        "grossy.recipes.list.v1",
+        1,
+        "success",
+    )
+    assert data["recipe_count"] == len(data["recipes"]) >= 1
+    burger = next(r for r in data["recipes"] if r["recipe_id"] == "spicy-bean-burgers")
+    assert burger["current_revision_number"] == 1 and burger["ingredient_count"] > 0
+    assert burger["enabled"] is True and burger["protein_class"] == "vegetarian"
+    assert (digest(), lock.exists()) == (before, lock_before)
 
 
 def test_nonnumeric_weeks_rejected_by_parser(isolated_home: GrossyPaths) -> None:

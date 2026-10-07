@@ -168,11 +168,15 @@ Start Stage1: history sync, whole-cart baseline, owner-confirmed recurring addit
    exact stored `ingredient_name`, numeric string `product_id`, unique bounded
    `fallback_product_ids`, `availability` (`available|unavailable|unknown`),
    `price_eur` (two-place positive decimal string or null), `evidence`
-   (`exact_product_identity|exact_family_identity`), and bounded `rationale`.
+   (`exact_product_identity|exact_family_identity|agent_semantic_review`), and
+   bounded `rationale`. Semantic reviews also require unique numeric
+   `compatible_product_ids` covering the chosen product and all fallbacks.
    Use accepted local recipe revisions and local product facts only; never fetch
    recipe sources or look up live products during this phase. Purchase approval
    or family membership does not prove compatibility: require exact normalized
-   ingredient/product-or-family identity. Leave unsupported matches unresolved;
+   ingredient/product-or-family identity for exact evidence, or an explicit
+   culinary compatibility review for semantic evidence. Never label semantic
+   choices as exact name matches. Leave unsupported matches unresolved;
    never guess ambiguous matches or invent availability/price. Proposal facts
    remain explicitly unverified offline projections.
 9. `grossy weekly recipes-apply <run-id> <recipe-proposal.json>`
@@ -184,13 +188,61 @@ Start Stage1: history sync, whole-cart baseline, owner-confirmed recurring addit
     Identical recipes-apply retries regenerate stored reports, never replan.
     Stop on non-zero exit; SQLite retains report recovery truth after I/O failure.
 
+#### Recipe ingredient matching before selection
+
+1. For an unresolved shown recipe, run `grossy weekly matching-prepare <run-id>`.
+   It returns shown immutable ingredients and local products ranked by recorded
+   order-presence frequency. It never browses. Interpret culinary meaning, not
+   catalogue string equality: dairy butter is not peanut/hazelnut spread, and
+   condensed milk is not ordinary milk. Recipe qualifiers (such as unsalted) are
+   flexible; household dislikes/diet, blacklists and hard limits remain mandatory.
+2. Review all suitable local candidates. Prefer the most frequently purchased
+   allowed compatible product; frequency counts order presence, not purchased
+   quantities. Set `evidence: agent_semantic_review`, explain compatibility and
+   flexible qualifiers in `rationale`, and list the complete reviewed compatible
+   set in `compatible_product_ids`. CLI checks ranking within that declared set;
+   the agent is responsible for semantic suitability and candidate-set completeness.
+   Never use word-overlap alone or exclude a more popular suitable product merely
+   to prefer a new one. No additional per-ingredient naming approval is required.
+3. If no suitable local candidate exists, or to review an unavailable preferred
+   product's alternatives, perform separately approved read-only AB.gr catalogue
+   discovery through the task-owned browser. This is a separate matching phase,
+   not recipe-source fetching or the offline options phase. Keep only actual
+   rendered identity/title/brand and canonical product URL; no invented metadata.
+   Optional `catalogue_products` records in the closed recipe-options proposal
+   contain `product_id`, `canonical_url`, `title`, optional `brand`, and fresh
+   aware `observed_at`. Every record must belong to a semantic compatible set.
+   Acceptance creates a non-purchase identity with zero historical purchases;
+   existing purchase metadata/family policy is preserved. It is not cart consent.
+4. Run `grossy weekly matches-apply <run-id> <proposal.json>` before selection.
+   Use exact shown recipe/revision/ingredient names. Include previously mapped
+   ingredients of any updated recipe; unmapped ingredients remain unresolved.
+   The CLI appends run-bound previews without rewriting the frozen plan, slots,
+   seen history, recipe revisions, basket advance or consent. Show the resulting
+   rationale/targets/credits/unknown costs. Selection or attempted recipe/removal
+   mutation blocks further mapping changes; no silent reprepare or abandonment.
+   Counted recipe units (1 onion, 2 garlic cloves, 1 bread slice) may not be
+   comparable with mass/volume-sold packages. A match may then carry
+   `retail_unit_coverage`: product ID (chosen/fallback only) → positive decimal
+   recipe units one retail unit supplies (e.g. onion pack → "5"). It is an
+   explicit, conservative agent estimate shown in previews/manifests, used only
+   when observed package units cannot convert natively; never present it as an
+   observed package fact. Underestimate rather than risk undersupply.
+5. Only explicit dinner selection and fresh recipe/package preflight may authorize
+   later ingredients. Recheck all current stock, prices and actual package units;
+   reviewed compatibility and history frequency do not prove live availability.
+   Unavailable/unknown facts may have null price/package fields; available facts
+   must have observed positive price and complete package facts. Never fabricate
+   facts just to represent an unavailable primary or force a fallback.
+
 #### Recurring additions (deterministic, fail-closed)
 
 1. Read the entire current cart and rendered current product facts without a
    write. Emit `grossy.cart.observation.v1`; optional
    `recurring_product_facts` is a list of closed records containing only
    `product_id`, `canonical_url`, `displayed_price_eur` (positive two-place
-   decimal string), and `availability` (`available|unavailable|unknown`).
+   decimal string, or null for unavailable/unknown stock), and `availability`
+   (`available|unavailable|unknown`).
    Overlapping cart/fact prices must agree; contradictory prices fail closed.
    Use stable numeric IDs agreeing with canonical AB.gr URLs. Facts must be
    freshly observed (within five minutes); never infer stock/price from history
@@ -299,7 +351,8 @@ Add ingredients for selected recipes (Stage 2).
 2. Read the entire current cart and fresh rendered recipe product facts without
    writes. Emit `grossy.cart.observation.v1` with optional closed
    `recipe_product_facts` records: `product_id`, `canonical_url`,
-   `displayed_price_eur` (positive two-place decimal string), `availability`
+   `displayed_price_eur` (positive two-place decimal string, or null for
+   unavailable/unknown stock), `availability`
    (`available|unavailable|unknown`), `package_amount` (positive decimal string),
    `package_unit` (`g|kg|ml|l|piece|pieces|count`), `package_count` (positive integer),
    and `sale_kind` (`packaged|weighed`). One positive adapter quantity unit supplies
@@ -449,6 +502,8 @@ resume and further writes remain blocked pending coordinator review.
 
 **Recipe maintenance:**
 
+- `grossy recipes list` — read-only JSON list of every stored recipe and its
+  current revision summary; no migration, lock or write.
 - `grossy recipes add-file <recipe.yaml>` — import a local recipe file.
 - `grossy recipes favorite <recipe-id>` / `grossy recipes regular <recipe-id>`.
 - `grossy recipes weight <recipe-id> <decimal>` — set selection weight.
@@ -658,6 +713,33 @@ reading back; allow a bounded wait (tens of seconds) within the five-minute
 freshness window. If they still disagree, record `incomplete` honestly. A
 later fresh identity-bound `readback` bound to the same outstanding manifest
 may then reconcile the result; never click again to force agreement.
+
+Readiness/readback findings (2026-10-07): `document.readyState === "complete"`
+and a rendered title/price panel can precede populated quantity controls. Checkout
+can also show a transient empty/partial list during loading: wait for line count,
+empty state and badge to agree with fresh identity-bound product-page evidence,
+not merely the first empty message or first rendered line. Wait for
+an explicit complete empty-basket state or settled product purchase controls:
+one enabled main Add control with no quantity input, or one positive integer
+quantity input agreeing with its `data-quantity` and no main Add control. For
+known in-cart lines, require the expected quantity before accepting the read.
+During supervised verification, a known in-cart product showed quantity zero
+persistently after navigation while the basket badge showed the correct total;
+a read-only hard reload restored its actual quantity. Hard-reload known in-cart
+product pages before fresh identity-bound readback; never substitute the expected
+quantity for observed evidence or repeat an addition to repair a stale display.
+Use bounded boolean-only readiness predicates; returning an element can fail CDP
+serialization. Exact expected quantities apply to mutation readback, not to the
+basket-review advance: there, observe actual post-edit quantities and prices,
+including removed lines, then verify checkout consistency. Never require the old
+13-line basket (or any old cart) to reappear before accepting manual edits. If readiness or full-cart consistency still fails, stop writes and
+retain the outstanding intent for separately approved read-only reconciliation.
+
+Record the task tab's stable target ID privately and select that exact target
+before each browser command, retaining `--pin-tab`. A session name/sticky pin
+alone did not reliably establish the expected route during this verification.
+Verify the canonical route before extraction or action; missing targets must fail,
+never fall back to another tab. Other user tabs are not shopping authorization.
 
 CAPTCHA handling: AB.gr pages carry a small persistent captcha-related badge
 (one node on product pages, several on `/checkout`). A badge is not a challenge.

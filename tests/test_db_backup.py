@@ -495,7 +495,9 @@ class TestRestoreSchemaVersionComparison:
         assert get_schema_version(current_db) == max_supported
 
 
-@pytest.mark.parametrize("table", ["source_orders", "run_recipe_plans", "run_recipe_seen"])
+@pytest.mark.parametrize(
+    "table", ["source_orders", "run_recipe_plans", "run_recipe_seen", "run_recipe_mappings"]
+)
 def test_export_missing_required_table_fails_and_preserves_destination(
     populated_db: Path, tmp_path: Path, table: str
 ) -> None:
@@ -518,8 +520,8 @@ def test_export_missing_required_table_fails_and_preserves_destination(
     assert dest.read_bytes() == before
 
 
-@pytest.mark.parametrize("version", range(1, 9), ids=lambda version: f"schema{version}")
-def test_export_prior_schema_does_not_require_recipe_planning_tables(
+@pytest.mark.parametrize("version", range(1, 11), ids=lambda version: f"schema{version}")
+def test_export_prior_schema_retains_empty_optional_planning_evidence(
     tmp_path: Path, version: int
 ) -> None:
     migrations_dir = tmp_path / "migrations"
@@ -535,6 +537,7 @@ def test_export_prior_schema_does_not_require_recipe_planning_tables(
     assert data["database_schema_version"] == version
     assert data["data"]["run_recipe_plans"] == []
     assert data["data"]["run_recipe_seen"] == []
+    assert data["data"]["run_recipe_mappings"] == []
     assert "run_recipe_slots" in data["data"]
 
 

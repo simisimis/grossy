@@ -299,7 +299,9 @@ def _save_reports(
         "FROM run_recipe_plans WHERE run_id=?",
         (row_id,),
     ).fetchone()
-    candidates = json.loads(plan[1])
+    from grossy.weekly.matching import mapped_candidates
+
+    candidates = mapped_candidates(conn, row_id, json.loads(plan[1]))
     by_revision = {c["revision_id"]: c for c in candidates}
     slots = []
     for name, protein, revision, reason, seed in conn.execute(
@@ -526,6 +528,15 @@ def run_recipes_apply(paths: GrossyPaths, run_id: str, data: dict[str, Any]) -> 
                 (row_id, row_id),
             ).fetchone():
                 raise WeeklyPlanError("recurring additions/readback must complete before recipes")
+            from grossy.weekly.matching import (
+                register_catalogue_products,
+                require_history_preference,
+            )
+
+            register_catalogue_products(conn, proposal)
+            for match in proposal.matches:
+                if match.evidence == "agent_semantic_review":
+                    require_history_preference(conn, match)
             candidates, exclusions = _candidate_snapshots(conn, row_id, config, proposal)
             now, seed = _now_utc(), derive_seed(run_id)
             conn.execute(

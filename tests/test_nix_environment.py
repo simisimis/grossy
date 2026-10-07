@@ -179,8 +179,8 @@ class TestPackageResources:
         installed_migrations = _get_installed_grossy_dir() / "migrations"
         source_migrations = REPO_ROOT / "src" / "grossy" / "migrations"
         sql_files = sorted(installed_migrations.glob("*.sql"))
-        assert len(sql_files) == 10, (
-            f"Expected 10 migrations, found {len(sql_files)}: {[f.name for f in sql_files]}"
+        assert len(sql_files) == 11, (
+            f"Expected 11 migrations, found {len(sql_files)}: {[f.name for f in sql_files]}"
         )
         for i, f in enumerate(sql_files, 1):
             assert f.name.startswith(f"{i:03d}_"), f"Unexpected migration name: {f.name}"
@@ -204,8 +204,8 @@ class TestPackageResources:
         assert result.returncode == 0, f"grossy init with isolated XDG failed: {result.stderr}"
         data = json.loads(result.stdout)
         assert data["status"] == "success"
-        assert data["database_schema_version"] == 10
-        assert data["migrations_applied"] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        assert data["database_schema_version"] == 11
+        assert data["migrations_applied"] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
         assert data["recipe_seeds"]["imported_count"] == 1
         db_path = Path(data["database_path"])
         assert db_path.exists(), f"Database not created: {db_path}"

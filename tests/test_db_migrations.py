@@ -309,7 +309,7 @@ class TestRevisionBoundVariantUpgrade:
         self._seed_old_schema_variant_rows(db)
 
         result = run_migrations(db, tmp_path / "bk2")
-        assert result.applied_versions == [6, 7, 8, 9, 10]
+        assert result.applied_versions == [6, 7, 8, 9, 10, 11]
         assert get_schema_version(db) == current_schema_version
 
         conn = open_connection(db)
@@ -632,11 +632,11 @@ def test_populated_v7_upgrade_preserves_history_and_run_with_verified_backup(
         conn.close()
 
     result = run_migrations(db, tmp_path / "upgrade-backups")
-    assert result.applied_versions == [8, 9, 10]
+    assert result.applied_versions == [8, 9, 10, 11]
     assert result.backup_path is not None
     assert result.backup_path.stat().st_mode & 0o777 == 0o600
     assert verify_sqlite_snapshot(result.backup_path)[1] == 7
-    assert verify_sqlite_snapshot(db)[1] == 10
+    assert verify_sqlite_snapshot(db)[1] == 11
     for path in (db, result.backup_path):
         conn = open_connection(path)
         try:
@@ -663,7 +663,7 @@ def test_populated_v7_upgrade_preserves_history_and_run_with_verified_backup(
         conn.close()
 
 
-@pytest.mark.parametrize("prior_version", range(1, 10), ids=lambda v: f"v{v}-to-v10")
+@pytest.mark.parametrize("prior_version", range(1, 11), ids=lambda v: f"v{v}-to-v11")
 def test_recipe_planning_upgrade_preserves_supported_schema(
     tmp_path: Path,
     prior_version: int,
@@ -709,15 +709,21 @@ def test_recipe_planning_upgrade_preserves_supported_schema(
                 "INSERT INTO run_recipe_seen (run_id,recipe_id,first_shown_at) VALUES (1,1,'old')"
             )
             tables += ["run_recipe_plans", "run_recipe_seen"]
+        if prior_version >= 10:
+            conn.execute(
+                "INSERT INTO run_stage_consent (run_id,stage,status,granted_at,revoked_at) "
+                "VALUES (1,'recurring','revoked','old','later')"
+            )
+            tables.append("run_stage_consent")
         conn.commit()
         expected = {table: conn.execute(f"SELECT * FROM {table}").fetchall() for table in tables}
     finally:
         conn.close()
     result = run_migrations(db, tmp_path / "after")
-    assert result.applied_versions == list(range(prior_version + 1, 11))
+    assert result.applied_versions == list(range(prior_version + 1, 12))
     assert result.backup_path is not None
     assert verify_sqlite_snapshot(result.backup_path)[1] == prior_version
-    assert verify_sqlite_snapshot(db)[1] == 10
+    assert verify_sqlite_snapshot(db)[1] == 11
     conn = open_connection(db)
     try:
         for table, rows in expected.items():

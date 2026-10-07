@@ -77,33 +77,45 @@ class RecurringProductFact(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     product_id: str = Field(pattern=NUMERIC_ID_PATTERN)
     canonical_url: str
-    displayed_price_eur: str
+    displayed_price_eur: str | None
     availability: Literal["available", "unavailable", "unknown"]
 
     @field_validator("displayed_price_eur")
     @classmethod
-    def _check_price(cls, value: str) -> str:
-        # Validate before the observation's cross-fact Decimal comparisons.
-        return CartObservationLine._check_price(value)
+    def _check_price(cls, value: str | None) -> str | None:
+        return CartObservationLine._check_price(value) if value is not None else None
+
+    @model_validator(mode="after")
+    def _available_price(self) -> RecurringProductFact:
+        if self.availability == "available" and self.displayed_price_eur is None:
+            raise ValueError("available product requires an observed price")
+        return self
 
 
 class RecipeProductFact(RecurringProductFact):
     """One adapter unit supplies amount * count; weighed amount is a rendered increment."""
 
-    package_amount: str
-    package_unit: Literal["g", "kg", "ml", "l", "piece", "pieces", "count"]
-    package_count: StrictInt = Field(gt=0)
-    sale_kind: Literal["packaged", "weighed"]
+    package_amount: str | None
+    package_unit: Literal["g", "kg", "ml", "l", "piece", "pieces", "count"] | None
+    package_count: StrictInt | None = Field(gt=0)
+    sale_kind: Literal["packaged", "weighed"] | None
 
     @field_validator("package_amount")
     @classmethod
-    def _amount(cls, value: str) -> str:
-        if not re.fullmatch(r"(?:0|[1-9][0-9]*)(?:\.[0-9]+)?", value) or Decimal(value) <= 0:
+    def _amount(cls, value: str | None) -> str | None:
+        if value is not None and (
+            not re.fullmatch(r"(?:0|[1-9][0-9]*)(?:\.[0-9]+)?", value) or Decimal(value) <= 0
+        ):
             raise ValueError("package amount must be a positive exact decimal string")
         return value
 
     @model_validator(mode="after")
     def _weighed_count(self) -> RecipeProductFact:
+        if self.availability == "available" and any(
+            v is None
+            for v in (self.package_amount, self.package_unit, self.package_count, self.sale_kind)
+        ):
+            raise ValueError("available recipe product requires observed package facts")
         if self.sale_kind == "weighed" and self.package_count != 1:
             raise ValueError("weighed increment count must be one")
         return self
@@ -147,6 +159,8 @@ class CartObservation(BaseModel):
             if fact.product_id in identities and identities[fact.product_id] != fact.canonical_url:
                 raise ValueError("contradictory current product identity")
             identities[fact.product_id] = fact.canonical_url
+            if fact.displayed_price_eur is None:
+                continue
             if fact.product_id in prices and prices[fact.product_id] != Decimal(
                 fact.displayed_price_eur
             ):
@@ -157,6 +171,11 @@ class CartObservation(BaseModel):
     @field_validator("recurring_product_facts", "recipe_product_facts")
     @classmethod
     def _check_facts(cls, value: list[RecurringProductFact]) -> list[RecurringProductFact]:
+        if len({f.product_id for f in value}) != len(value):
+            raise ValueError("duplicate current product identity")
+        for fact in value:
+            if product_id_from_url(fact.canonical_url) != fact.product_id:
+                raise ValueError("current product URL and identity disagree")
         cls._check_lines(
             [
                 CartObservationLine.model_validate(
@@ -168,10 +187,13 @@ class CartObservation(BaseModel):
                     }
                 )
                 for fact in value
+                if fact.displayed_price_eur is not None
             ]
         )
         for fact in value:
-            if not re.fullmatch(r"(?:0|[1-9][0-9]*)\.[0-9]{2}", fact.displayed_price_eur):
+            if fact.displayed_price_eur is not None and not re.fullmatch(
+                r"(?:0|[1-9][0-9]*)\.[0-9]{2}", fact.displayed_price_eur
+            ):
                 raise ValueError("current product price must have exactly two decimal places")
         return value
 

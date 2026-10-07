@@ -40,8 +40,11 @@ def ingredient_family_blacklisted(conn: sqlite3.Connection, name: str) -> bool:
     )
 
 
-def local_products(conn: sqlite3.Connection, name: str) -> list[dict[str, Any]]:
+def local_products(
+    conn: sqlite3.Connection, name: str, semantic_ids: list[str] | None = None
+) -> list[dict[str, Any]]:
     identity = ingredient_identity(name)
+    reviewed = set(semantic_ids or [])
     rows = conn.execute(
         "SELECT p.id, p.retailer_product_id, p.canonical_url, p.name, p.package_amount, "
         "p.package_unit, p.package_count, p.observation_state, p.purchase_order_count, "
@@ -59,7 +62,8 @@ def local_products(conn: sqlite3.Connection, name: str) -> list[dict[str, Any]]:
             package_unit=r[5],
             package_count=r[6],
             retired=r[7] == "retired",
-            approved=r[8] > 0 or r[11] == "approved",
+            approved=r[8] > 0 or r[11] == "approved" or r[1] in reviewed,
+            purchase_order_count=r[8],
             family_row_id=r[9],
             family_name=r[10],
             primary=r[0] == r[12],
@@ -67,7 +71,8 @@ def local_products(conn: sqlite3.Connection, name: str) -> list[dict[str, Any]]:
             exact_family=r[10] is not None and ingredient_identity(r[10]) == identity,
         )
         for r in rows
-        if ingredient_identity(r[3]) == identity
+        if r[1] in reviewed
+        or ingredient_identity(r[3]) == identity
         or (r[10] is not None and ingredient_identity(r[10]) == identity)
     ]
 
@@ -78,6 +83,7 @@ _UNITS = {
     "kg": ("mass", Decimal(1000)),
     "ml": ("volume", Decimal(1)),
     "l": ("volume", Decimal(1000)),
+    "pc": ("count", Decimal(1)),
     "piece": ("count", Decimal(1)),
     "pieces": ("count", Decimal(1)),
     "count": ("count", Decimal(1)),
@@ -89,6 +95,13 @@ def product_identity_valid(product: dict[str, Any]) -> bool:
         return bool(product_id_from_url(product["canonical_url"]) == product["product_id"])
     except ValueError:
         return False
+
+
+def retail_size(product: dict[str, Any], unit: str, coverage: dict[str, str]) -> Decimal | None:
+    """Observed comparable package amount, else the explicit reviewed coverage estimate."""
+    native = package_amount(product, unit)
+    estimate = coverage.get(product["product_id"])
+    return native if native is not None or estimate is None else Decimal(estimate)
 
 
 def package_amount(product: dict[str, Any], unit: str) -> Decimal | None:
@@ -110,10 +123,19 @@ def _match_product(
     name: str,
     observation: IngredientMatch | None,
 ) -> tuple[dict[str, Any] | None, list[dict[str, Any]], str, str]:
-    products = local_products(conn, name)
+    semantic = observation is not None and observation.evidence == "agent_semantic_review"
+    products = local_products(
+        conn, name, observation.compatible_product_ids if semantic and observation else None
+    )
+    if semantic and observation:
+        from grossy.weekly.matching import require_history_preference
+
+        require_history_preference(conn, observation)
     if observation is not None:
         preferred = next((p for p in products if p["product_id"] == observation.product_id), None)
-        if preferred is None or not preferred[observation.evidence.removesuffix("_identity")]:
+        if preferred is None or (
+            not semantic and not preferred[observation.evidence.removesuffix("_identity")]
+        ):
             # Explicit observations cannot establish compatibility by assertion.
             return (
                 None,
@@ -126,8 +148,13 @@ def _match_product(
             fallback = next((p for p in products if p["product_id"] == pid), None)
             if (
                 fallback is None
-                or not preferred["family_row_id"]
-                or fallback["family_row_id"] != preferred["family_row_id"]
+                or (
+                    not semantic
+                    and (
+                        not preferred["family_row_id"]
+                        or fallback["family_row_id"] != preferred["family_row_id"]
+                    )
+                )
                 or not fallback["approved"]
             ):
                 raise WeeklyPlanError(
@@ -202,12 +229,11 @@ def _match_product(
             "unavailable",
             "offline unavailable observation; fallback availability is unknown",
         )
-    return (
-        preferred,
-        fallbacks,
-        "matched",
-        "exact normalized local identity; availability/price remain unverified",
-    )
+    if semantic:
+        reason = "agent-reviewed semantic identity; availability/price remain unverified"
+    else:
+        reason = "exact normalized local identity; availability/price remain unverified"
+    return preferred, fallbacks, "matched", reason
 
 
 def build_recipe_preview(
@@ -254,13 +280,16 @@ def build_recipe_preview(
                 for line in cart_observation.lines
             }
     remaining = {pid: qty for pid, (qty, _) in baseline.items()}
+    servings = config.household.recipe_servings
     ingredients = []
     total = Decimal(0)
     cost_known = True
     for ingredient in snapshot["ingredients"]:
         name, unit = ingredient["name"], ingredient["unit"]
         linear = (
-            Decimal(str(ingredient["amount"])) * Decimal(3) / Decimal(str(snapshot["servings"]))
+            Decimal(str(ingredient["amount"]))
+            * Decimal(servings)
+            / Decimal(str(snapshot["servings"]))
         )
         target = (
             linear.to_integral_value(rounding=ROUND_CEILING)
@@ -287,7 +316,7 @@ def build_recipe_preview(
             "incremental_cost_eur": None,
             "availability": "unknown",
             "assumptions": [
-                "linear scaling to three full servings",
+                f"linear scaling to {servings} full servings",
                 "indivisible target rounded upward"
                 if ingredient["indivisible"]
                 else "divisible culinary target retained exactly",
@@ -328,6 +357,12 @@ def build_recipe_preview(
             item["availability"] = observation.availability
             item["evidence"] = observation.evidence
             item["rationale"] = observation.rationale
+            if observation.evidence == "agent_semantic_review":
+                item["semantic_compatible_product_ids"] = observation.compatible_product_ids
+                item["assumptions"].append(
+                    "agent-reviewed culinary compatibility; recipe qualifiers flexible; "
+                    "history-ranked choice, not literal name equality or verified live facts"
+                )
         if product is None:
             cost_known = False
             ingredients.append(item)
@@ -336,7 +371,15 @@ def build_recipe_preview(
             "product_id": product["product_id"],
             "canonical_url": product["canonical_url"],
         }
-        size = package_amount(product, unit)
+        coverage = observation.retail_unit_coverage if observation else {}
+        if coverage:
+            item["retail_unit_coverage"] = coverage
+        size = retail_size(product, unit, coverage)
+        if size is not None and package_amount(product, unit) is None:
+            item["assumptions"].append(
+                f"explicit agent estimate: one retail unit supplies {size} {unit}; "
+                "not an observed package fact"
+            )
         if size is None:
             item["assumptions"].append(
                 "unknown or incompatible retail package unit; no conversion or package guess"
@@ -350,8 +393,13 @@ def build_recipe_preview(
         credit = Decimal(0)
         for compatible in [product, *fallbacks]:
             pid = compatible["product_id"]
-            compatible_size = package_amount(compatible, unit)
+            compatible_size = retail_size(compatible, unit, coverage)
             if compatible_size is not None and pid in remaining:
+                if pid != product["product_id"] and package_amount(compatible, unit) is None:
+                    item["assumptions"].append(
+                        f"explicit agent estimate for cart credit: one unit of {pid} "
+                        f"supplies {compatible_size} {unit}; not an observed package fact"
+                    )
                 consumed = min(remaining[pid], max(Decimal(0), target - credit) / compatible_size)
                 credit += consumed * compatible_size
                 remaining[pid] -= consumed
@@ -401,11 +449,11 @@ def build_recipe_preview(
         "accepted_revision": snapshot["revision_number"],
         "source_servings": str(snapshot["servings"]),
         "offline_observation_generated_at": snapshot["match_observation_generated_at"],
-        "target_servings": 3,
+        "target_servings": servings,
         "title": snapshot["title"],
         "protein_class": snapshot["protein_class"],
         "source": snapshot["source"],
-        "summary": f"{snapshot['total_time_minutes']} minutes; three full "
+        "summary": f"{snapshot['total_time_minutes']} minutes; {servings} full "
         "servings; accepted offline revision",
         "appliances": snapshot["appliances"],
         "appliance_configuration": config.appliances.model_dump(mode="json"),

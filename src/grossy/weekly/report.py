@@ -197,7 +197,7 @@ def build_markdown_report(data: dict[str, Any]) -> str:
 
     # Read-only recipe options; never expose unselected preparation steps.
     if "recipe_slots" in data:
-        lines.append("## Recipe Options (three full servings; read-only)")
+        lines.append("## Recipe Options (configured full servings; read-only)")
         lines.append(f"- Recipe plan persisted: {data['recipe_planned_at']}")
         lines.append(f"- Offline proposal timestamp: {data['recipe_observation_generated_at']}")
         for slot in data["recipe_slots"]:

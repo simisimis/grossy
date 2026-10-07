@@ -181,7 +181,7 @@ accepts them rather than treating them as drift.
 
 **Operation:** approve local recipes-apply with closed recipe-options proposal from
 accepted offline revisions/product facts only. No live recipe source fetch or
-catalogue search. Review four stable slots, empty reasons, three-serving targets,
+catalogue search. Review four stable slots, empty reasons, configured-serving targets,
 pantry/cart credits, matches, package assumptions and projected costs.
 
 **Effect/evidence:** awaiting-recipe-selection, available slot/revision summary;

@@ -66,7 +66,8 @@ Python/PATH settings; do not use ambient host/venv fallbacks.
 - `tests/`: offline regressions, runtime command/skill parity and Nix provenance.
 
 Paths in the source map are relative to `src/grossy/` unless stated otherwise.
-Three servings means portions per recipe; it does not change the four option slots.
+`household.recipe_servings` (default 3) sets portions per recipe; it does not change
+the four option slots.
 
 ## State and safety
 

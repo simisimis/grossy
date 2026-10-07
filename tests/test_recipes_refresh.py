@@ -873,6 +873,7 @@ def _simulate_schema_v6(paths: GrossyPaths) -> None:
         conn.execute("ALTER TABLE recipe_revisions DROP COLUMN title")
         conn.execute("ALTER TABLE recipe_revisions DROP COLUMN source_tier")
         conn.execute("ALTER TABLE recipe_revisions DROP COLUMN protein_class")
+        conn.execute("DROP TABLE run_recipe_mappings")
         conn.execute("DROP TABLE run_recipe_seen")
         conn.execute("DROP TABLE run_recipe_plans")
         conn.execute("DELETE FROM schema_migrations WHERE version > 6")
