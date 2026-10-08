@@ -1,11 +1,13 @@
 # Bounded supervised smoke runbook — awaiting user verification
 
 **Not executed by workers/reviewers.** Only the user/coordinator may perform these
-live checks after offline review, with explicit authorization of each step. Until
-the owner accepts Task 16, this runbook keeps explicit exact-action approval for
-every live addition (steps 5 and 7) and separate confirmation for removals. Task 16
-stage consent (no per-action prompts) is pending normal-workflow behavior, not a
-smoke allowance; its consent records and `weekly action-check` still apply. Do not
+live checks after offline review. **Owner decision 2026-10-07:** additions are not
+approved one by one. Stage consent (weekly invocation for recurring, dinner
+selection for recipes) authorizes prefill; the owner reviews the basket in the
+browser and removes what they don't want. Consent records, `weekly action-check`,
+intent and identity-bound readback still apply; removals keep separate
+confirmation. Where steps 5 and 7 below say "exact-action approval", this
+decision supersedes it. Do not
 run unrestricted `just weekly-plan`, `weekly-add all`, or the skill's
 repeat-until-complete loops here. Use the phase commands in [operations.md]
 (operations.md) and the skill contract, pausing at the boundaries below. No

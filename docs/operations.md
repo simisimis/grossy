@@ -94,7 +94,9 @@ AB.gr links its full cart to `https://www.ab.gr/checkout`. The owner has approve
 an exception for coordinator read-only cart-list inspection there. Read only
 product identity, quantity and price; avoid account/address/payment/fulfilment
 sections, checkout-stage controls and cart changes. Any later cart mutation
-requires its own exact-action approval; checkout progression remains prohibited.
+is covered by stage consent (owner prefers additions without prompts and reviews
+the basket in the browser); removals need confirmation; checkout progression
+remains prohibited.
 
 The coordinator must separately supervise rendered checks of authentication,
 six dated history controls and a whole-cart read. Record these separately from
@@ -221,8 +223,10 @@ available facts still require real positive prices and complete package facts.
 Nulls never authorize purchases or invented conversions. Recipe `pc` is a count
 alias. Count-to-mass conversion is never implicit: a reviewed match may declare
 `retail_unit_coverage` (recipe units one retail unit supplies, per chosen or
-fallback product). It applies only when observed package units are not directly
-comparable, is reported as an explicit estimate and is rounded upward.
+fallback product). It applies when observed package units are not directly
+comparable, and for counted recipe units it overrides the retail piece count
+(cloves per garlic net, slices per loaf). It is reported as an explicit estimate
+and rounded upward.
 
 Weekly recipe targets scale linearly to `household.recipe_servings` (sample
 default 3). The run snapshots the whole config: changing servings blocks matching

@@ -98,10 +98,26 @@ def product_identity_valid(product: dict[str, Any]) -> bool:
 
 
 def retail_size(product: dict[str, Any], unit: str, coverage: dict[str, str]) -> Decimal | None:
-    """Observed comparable package amount, else the explicit reviewed coverage estimate."""
+    """Observed comparable package amount, else the explicit reviewed coverage estimate.
+
+    Counted recipe units (clove, slice) need not share the retail counting unit
+    (net, loaf), so a declared estimate takes precedence for count targets.
+    """
     native = package_amount(product, unit)
     estimate = coverage.get(product["product_id"])
-    return native if native is not None or estimate is None else Decimal(estimate)
+    if estimate is not None and (native is None or is_count_unit(unit)):
+        return Decimal(estimate)
+    return native
+
+
+def is_count_unit(unit: str) -> bool:
+    return _UNITS.get(unit.casefold(), ("", Decimal(0)))[0] == "count"
+
+
+def uses_estimate(product: dict[str, Any], unit: str, coverage: dict[str, str]) -> bool:
+    return product["product_id"] in coverage and (
+        package_amount(product, unit) is None or is_count_unit(unit)
+    )
 
 
 def package_amount(product: dict[str, Any], unit: str) -> Decimal | None:
@@ -375,7 +391,7 @@ def build_recipe_preview(
         if coverage:
             item["retail_unit_coverage"] = coverage
         size = retail_size(product, unit, coverage)
-        if size is not None and package_amount(product, unit) is None:
+        if size is not None and uses_estimate(product, unit, coverage):
             item["assumptions"].append(
                 f"explicit agent estimate: one retail unit supplies {size} {unit}; "
                 "not an observed package fact"
@@ -395,7 +411,7 @@ def build_recipe_preview(
             pid = compatible["product_id"]
             compatible_size = retail_size(compatible, unit, coverage)
             if compatible_size is not None and pid in remaining:
-                if pid != product["product_id"] and package_amount(compatible, unit) is None:
+                if pid != product["product_id"] and uses_estimate(compatible, unit, coverage):
                     item["assumptions"].append(
                         f"explicit agent estimate for cart credit: one unit of {pid} "
                         f"supplies {compatible_size} {unit}; not an observed package fact"

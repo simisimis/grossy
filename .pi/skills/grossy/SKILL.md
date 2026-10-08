@@ -8,11 +8,16 @@ description: Safely run Grossy grocery-history, recipe-planning, and weekly-shop
 ## Operator guidance and bounded verification
 
 See [operations](../../../docs/operations.md) and
-[supervised smoke](../../../docs/smoke-test.md). Smoke is coordinator-owned;
-workers/reviewers must not execute any live browser operation. During smoke,
-stop after ONE recurring action and ONE selected-recipe action; the normal
-repeat-until-complete sequences below do not grant further approval. If another
-positive delta remains, stop before further additions absent new approval.
+[supervised smoke](../../../docs/smoke-test.md). Live work is coordinator-owned;
+workers/reviewers must not execute any live browser operation.
+
+**Owner preference (2026-10-07): add, don't ask.** Prefill the basket directly.
+Do not request batch or per-item approval for recurring or selected-recipe
+additions: the weekly invocation (recurring) and dinner selection (recipe) are
+the consent. Show what was added afterwards; the owner reviews in the browser and
+removes anything unwanted. Internal safety stays mandatory: fresh facts,
+preflight, durable intent, single-use `action-check`, one click, identity-bound
+readback. Removals still need explicit confirmation.
 Never replay an outstanding intent after interruption; reread and reconcile.
 
 ## Invocation
@@ -225,9 +230,12 @@ Start Stage1: history sync, whole-cart baseline, owner-confirmed recurring addit
    comparable with mass/volume-sold packages. A match may then carry
    `retail_unit_coverage`: product ID (chosen/fallback only) → positive decimal
    recipe units one retail unit supplies (e.g. onion pack → "5"). It is an
-   explicit, conservative agent estimate shown in previews/manifests, used only
-   when observed package units cannot convert natively; never present it as an
-   observed package fact. Underestimate rather than risk undersupply.
+   explicit, conservative agent estimate shown in previews/manifests. It is used
+   when observed package units cannot convert natively, and for counted recipe
+   units it takes precedence over a retail piece count (a garlic net sold as
+   "1 piece" holds many cloves). Omit it when retail pieces equal recipe pieces
+   (eggs). Never present it as an observed package fact; underestimate rather
+   than risk undersupply.
 5. Only explicit dinner selection and fresh recipe/package preflight may authorize
    later ingredients. Recheck all current stock, prices and actual package units;
    reviewed compatibility and history frequency do not prove live availability.
@@ -272,8 +280,6 @@ Start Stage1: history sync, whole-cart baseline, owner-confirmed recurring addit
    warning) for transparency but does NOT wait for confirmation. Consent
    revocation (`grossy weekly consent-revoke <run-id> recurring`) stops all
    further writes immediately; readback of a pending intent remains possible.
-   Until owner acceptance of Task 16, the bounded smoke runbook still requires
-   its exact-action approval for each live addition.
 4. Immediately re-read cart/facts and rerun recurring-preflight. If the proposed
    delta or facts changed, stop for review (the consent does not authorize a
    changed manifest). Use only the newly accepted exact manifest (one addition
@@ -369,8 +375,7 @@ Add ingredients for selected recipes (Stage 2).
    recipe stage consent. No per-action user prompt. The agent presents manifest
    details (identity, delta, price, conversion, decisions, budget warning) for
    transparency. Consent revocation stops all further writes; readback of a
-   pending intent remains possible. Until owner acceptance of Task 16, the
-   bounded smoke runbook still requires exact-action approval for live additions.
+   pending intent remains possible.
 5. Immediately re-read the entire cart/facts and repeat recipe-preflight. Compare
    complete cart lines by stable identity, including quantities and prices, not only
    selected ingredient deltas. Unexplained cart drift stops for attention/reconciliation;
@@ -734,6 +739,38 @@ basket-review advance: there, observe actual post-edit quantities and prices,
 including removed lines, then verify checkout consistency. Never require the old
 13-line basket (or any old cart) to reappear before accepting manual edits. If readiness or full-cart consistency still fails, stop writes and
 retain the outstanding intent for separately approved read-only reconciliation.
+
+Keep browser activity calm; the owner may watch it. Do not reread every expected
+product page around each action. Per addition: read the target product page once
+before intent; scroll the main Add control into view and pause about one second
+(immediate clicks were silently ignored; see waits below); after the single click, poll that page (no reload) up to 15 s for
+the in-cart stepper, then one hard reload to confirm the quantity, then read the
+checkout list. Other lines are bound to identities read on their own product
+pages within the last four minutes and must match checkout name/brand/quantity/
+price, line count and badge. Refresh only readings older than four minutes; the
+observation `generated_at` is the oldest reading used (must stay within five).
+
+Checkout rows show the line total (unit price × quantity) for quantities above
+one; bind them by unit price or line total. Weighed products render an
+approximate price (`~€`) per increment (e.g. `~1 Kg`). Some products (loose
+bananas, smoked salmon) ignore clicks made before the page finishes wiring the
+control. The header badge can lag the product stepper; confirm with reload and
+checkout.
+
+Click with incremental backoff, never by re-clicking. Before each click wait for
+`agent-browser wait --load networkidle` (a timeout is tolerated), then wait the
+attempt's delay, scroll the single main control into view, pause 1 s, click
+once and poll up to 15 s for the in-cart stepper. Delays are 1 s, 2 s and 5 s
+for attempts one to three, and every attempt is its own intent:
+1. If the stepper never shows the expected quantity, hard-reload the product
+   page. A late registration (expected quantity present) continues to normal
+   readback. An unchanged quantity means not applied.
+2. Close a not-applied intent with a fresh complete reread via
+   `weekly resume-prepare` (records nothing verified), then run a fresh
+   preflight, intent and `action-check` for the next attempt.
+3. Check the attempt count before persisting an intent. After three
+   not-applied attempts for one product, stop and tell the owner.
+Any other quantity is unexplained drift: stop.
 
 Record the task tab's stable target ID privately and select that exact target
 before each browser command, retaining `--pin-tab`. A session name/sticky pin

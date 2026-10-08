@@ -17,10 +17,10 @@ from grossy.weekly.preview import (
     _UNITS,
     ingredient_family_blacklisted,
     local_products,
-    package_amount,
     pantry_covers,
     product_identity_valid,
     retail_size,
+    uses_estimate,
 )
 
 
@@ -314,11 +314,11 @@ def recipe_plan(
                 base_size=str(size * factor),
                 compatible={p: str(q * factor) for p, q in allowed},
             )
-            estimated = package_amount(facts[pid].model_dump(), unit) is None
+            estimated = uses_estimate(facts[pid].model_dump(), unit, coverage)
             item["assumptions"].append(
                 f"one adapter unit supplies {size} {unit}; "
                 + (
-                    "explicit agent estimate, observed package unit not comparable"
+                    "explicit agent estimate, not an observed package fact"
                     if estimated
                     else "rendered weighed increment"
                     if facts[pid].sale_kind == "weighed"
@@ -329,7 +329,7 @@ def recipe_plan(
             if estimated:
                 item["estimated_coverage"] = True
             item["estimated_credit_product_ids"] = sorted(
-                p for p, _ in allowed if package_amount(facts[p].model_dump(), unit) is None
+                p for p, _ in allowed if uses_estimate(facts[p].model_dump(), unit, coverage)
             )
         if decision["reasons"]:
             decision["status"] = "blocked"

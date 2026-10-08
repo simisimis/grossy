@@ -360,8 +360,15 @@ def counted_onion(
         ),
         ("no-estimate-blocks", None, {"package_unit": "kg", "package_amount": "1"}, None, False),
         (
-            "native-count-wins",
+            "declared-estimate-wins-for-counts",
             {"111": "5"},
+            {"package_unit": "pieces", "package_amount": "2"},
+            1,
+            True,
+        ),
+        (
+            "native-count-without-estimate",
+            None,
             {"package_unit": "pieces", "package_amount": "2"},
             2,
             False,
@@ -369,7 +376,7 @@ def counted_onion(
     ],
     ids=lambda x: x if isinstance(x, str) else None,
 )
-def test_counted_ingredients_use_explicit_coverage_only_when_units_incomparable(
+def test_counted_ingredients_use_declared_coverage_or_native_counts(
     home: GrossyPaths,
     case: str,
     coverage: dict[str, str] | None,
