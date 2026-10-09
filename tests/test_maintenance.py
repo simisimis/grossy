@@ -50,6 +50,7 @@ from grossy.history.maintenance import (
     run_category_rename,
     run_disable,
     run_enable,
+    run_family_create,
     run_family_link,
     run_family_merge,
     run_family_unlink,
@@ -1837,3 +1838,84 @@ def test_product_register_writer_lock_and_atomic_audit(tmp_env, monkeypatch):
         assert c.execute("SELECT COUNT(*) FROM manual_overrides").fetchone()[0] == 0
     finally:
         c.close()
+
+
+def test_family_create_groups_nonpurchase_products_with_primary_and_alternative(tmp_env):
+    """Owner-created ingredient family: approved primary, linked alternative, no recurrence."""
+    _, paths = tmp_env
+    run_product_register(paths, _product_url("300"))
+    run_product_register(paths, _product_url("400"))
+    result = run_family_create(paths, "fam-veggie-patties", "300", "frozen veggie burger patties")
+    assert result["changed"] is True
+    run_family_link(paths, "400", "fam-veggie-patties")
+    c = open_connection(paths.database_file)
+    try:
+        fam = c.execute(
+            "SELECT f.name, p.retailer_product_id, f.recurrence_weeks, f.enabled, "
+            "f.blacklist_state "
+            "FROM product_families f JOIN products p ON p.id=f.primary_product_id "
+            "WHERE f.family_id='fam-veggie-patties'"
+        ).fetchone()
+        roles = c.execute(
+            "SELECT p.retailer_product_id, fm.role, fm.approval_state FROM family_members fm "
+            "JOIN products p ON p.id=fm.product_id JOIN product_families f ON f.id=fm.family_id "
+            "WHERE f.family_id='fam-veggie-patties' ORDER BY p.retailer_product_id"
+        ).fetchall()
+    finally:
+        c.close()
+    assert fam == ("frozen veggie burger patties", "300", None, 1, "active")
+    assert roles == [("300", "primary", "approved"), ("400", "alternative", "approved")]
+
+
+@pytest.mark.parametrize(
+    "case,error",
+    [
+        ("duplicate", "already exists"),
+        ("member-elsewhere", "already belongs to a family"),
+        ("unknown-product", "unknown product"),
+        ("bad-id", "family id must look like"),
+        ("bad-name", "family name must be"),
+        ("blacklisted", "blacklisted or retired"),
+    ],
+    ids=lambda x: x,
+)
+def test_family_create_rejections_leave_state_unchanged(tmp_env, case, error):
+    _, paths = tmp_env
+    run_product_register(paths, _product_url("300"))
+    args = ["fam-new", "300", "frozen patties"]
+    if case == "duplicate":
+        run_family_create(paths, "fam-new", "300", "frozen patties")
+        run_product_register(paths, _product_url("400"))
+        args = ["fam-new", "400", "other"]
+    if case == "member-elsewhere":
+        args = ["fam-new", "100", "frozen patties"]  # 100 is in a learned family
+    if case == "unknown-product":
+        args = ["fam-new", "999", "frozen patties"]
+    if case == "bad-id":
+        args = ["Fam New", "300", "frozen patties"]
+    if case == "bad-name":
+        args = ["fam-new", "300", "line\nbreak"]
+    if case == "blacklisted":
+        run_blacklist_product(paths, "300")
+    before = _maintenance_state(paths)
+    with pytest.raises(MaintenanceError, match=error):
+        run_family_create(paths, *args)
+    assert _maintenance_state(paths) == before
+
+
+@pytest.mark.parametrize("how", ["unlinked", "merged"])
+def test_family_create_never_revives_archival_identity(tmp_env, how):
+    """Retired or merged family ids stay archival; recreation is refused unchanged."""
+    _, paths = tmp_env
+    for pid in ("300", "400", "500"):
+        run_product_register(paths, _product_url(pid))
+    run_family_create(paths, "fam-old", "300", "old patties")
+    if how == "unlinked":
+        run_family_unlink(paths, "300")
+    else:
+        run_family_create(paths, "fam-target", "400", "target patties")
+        run_family_merge(paths, "fam-old", "fam-target")
+    before = _maintenance_state(paths)
+    with pytest.raises(MaintenanceError, match="archival"):
+        run_family_create(paths, "fam-old", "500", "new patties")
+    assert _maintenance_state(paths) == before

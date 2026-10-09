@@ -708,6 +708,72 @@ def run_family_link(
     return _run_maintenance(paths, f"family link {product_id} {family_id}", _do)
 
 
+def run_family_create(
+    paths: GrossyPaths,
+    family_id: str,
+    primary_product_id: str,
+    name: str,
+    rationale: str | None = None,
+) -> dict[str, object]:
+    """Create an explicit, non-recurring family with an approved primary (FR-69).
+
+    Families are otherwise learned from purchase history; this lets the owner
+    group never-purchased catalogue products (e.g. recipe ingredients) under an
+    ingredient name. Alternatives are added afterwards with ``family link``.
+    """
+    effective_rationale = rationale or f"manual correction: create {family_id}"
+    if not re.fullmatch(r"fam-[a-z0-9][a-z0-9-]{0,62}", family_id):
+        raise MaintenanceError("family id must look like fam-<lowercase-letters-digits-dashes>")
+    clean = " ".join(name.split())
+    if not clean or len(clean) > 100 or any(not c.isprintable() for c in name.strip()):
+        raise MaintenanceError("family name must be 1-100 printable characters on one line")
+
+    def _do(conn: sqlite3.Connection, now: str) -> dict[str, object]:
+        if conn.execute(
+            "SELECT 1 FROM product_families WHERE family_id = ?", (family_id,)
+        ).fetchone():
+            raise MaintenanceError(f"family {family_id!r} already exists")
+        # Retired/merged identities stay archival; never revive them under a new primary.
+        if (
+            _active_value(conn, "family", family_id, "retired") is not None
+            or _active_value(conn, "family", family_id, "merged_into") is not None
+        ):
+            raise MaintenanceError(
+                f"family id {family_id!r} is archival (retired or merged); choose a new id"
+            )
+        product_row_id = _get_product_row_id(conn, primary_product_id)
+        state = conn.execute(
+            "SELECT blacklist_state, observation_state FROM products WHERE id = ?",
+            (product_row_id,),
+        ).fetchone()
+        if state[0] == "blacklisted" or state[1] == "retired":
+            raise MaintenanceError(f"product {primary_product_id!r} is blacklisted or retired")
+        if conn.execute(
+            "SELECT 1 FROM family_members WHERE product_id = ?", (product_row_id,)
+        ).fetchone():
+            raise MaintenanceError(
+                f"product {primary_product_id!r} already belongs to a family; unlink it first"
+            )
+        cur = conn.execute(
+            "INSERT INTO product_families (family_id, name, enabled, blacklist_state, "
+            "confidence, rationale, created_at, updated_at) "
+            "VALUES (?, ?, 1, 'active', 'high', ?, ?, ?)",
+            (family_id, clean, effective_rationale, now, now),
+        )
+        conn.execute(
+            "INSERT INTO family_members (family_id, product_id, role, approval_state, "
+            "provenance, confidence, created_at) VALUES (?, ?, 'primary', 'approved', "
+            "'manual-create', 'high', ?)",
+            (cast(int, cur.lastrowid), product_row_id, now),
+        )
+        _record_override(
+            conn, "family", family_id, "created", primary_product_id, effective_rationale, now
+        )
+        return {"family_id": family_id, "primary_product_id": primary_product_id, "changed": True}
+
+    return _run_maintenance(paths, f"family create {family_id}", _do)
+
+
 def run_family_unlink(
     paths: GrossyPaths, product_id: str, rationale: str | None = None
 ) -> dict[str, object]:

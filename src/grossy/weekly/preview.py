@@ -416,9 +416,11 @@ def build_recipe_preview(
                         f"explicit agent estimate for cart credit: one unit of {pid} "
                         f"supplies {compatible_size} {unit}; not an observed package fact"
                     )
-                consumed = min(remaining[pid], max(Decimal(0), target - credit) / compatible_size)
-                credit += consumed * compatible_size
-                remaining[pid] -= consumed
+                # Credit exact amounts; dividing first (e.g. by 900) leaves a repeating
+                # remainder that would otherwise buy a whole extra package.
+                take = min(max(Decimal(0), target - credit), remaining[pid] * compatible_size)
+                credit += take
+                remaining[pid] -= take / compatible_size
         missing = max(Decimal(0), target - credit)
         packages = (missing / size).to_integral_value(rounding=ROUND_CEILING)
         item.update(

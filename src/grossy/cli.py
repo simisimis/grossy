@@ -37,6 +37,7 @@ from grossy.history.maintenance import (
     run_category_rename,
     run_disable,
     run_enable,
+    run_family_create,
     run_family_link,
     run_family_merge,
     run_family_unlink,
@@ -379,6 +380,24 @@ def history_unblacklist_family(
         result = run_unblacklist_family(paths, family_id, rationale)
     except (MaintenanceError, LockHeldError) as exc:
         emit_maintenance_error(f"history unblacklist family {family_id}", exc)
+    typer.echo(json.dumps(result, sort_keys=True))
+
+
+@family_app.command("create")
+def history_family_create(
+    family_id: str,
+    primary_product_id: str,
+    name: Annotated[str, typer.Option("--name", help="Ingredient-style family name")],
+    rationale: Annotated[str | None, typer.Option("--rationale")] = None,
+) -> None:
+    """Create a non-recurring family with an approved primary product."""
+    try:
+        paths = resolve_paths()
+        result = run_family_create(paths, family_id, primary_product_id, name, rationale)
+    except (MaintenanceError, LockHeldError) as exc:
+        emit_maintenance_error(
+            f"history family create {family_id} {primary_product_id} --name {name}", exc
+        )
     typer.echo(json.dumps(result, sort_keys=True))
 
 

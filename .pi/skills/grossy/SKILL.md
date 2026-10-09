@@ -18,6 +18,9 @@ the consent. Show what was added afterwards; the owner reviews in the browser an
 removes anything unwanted. Internal safety stays mandatory: fresh facts,
 preflight, durable intent, single-use `action-check`, one click, identity-bound
 readback. Removals still need explicit confirmation.
+Dinner selection is always the owner's choice: present the options (even a single
+one) with matched ingredients and projected cost, then wait for the owner to pick.
+Never run `weekly selection-apply` on the owner's behalf.
 Never replay an outstanding intent after interruption; reread and reconcile.
 
 ## Invocation
@@ -234,8 +237,10 @@ Start Stage1: history sync, whole-cart baseline, owner-confirmed recurring addit
    when observed package units cannot convert natively, and for counted recipe
    units it takes precedence over a retail piece count (a garlic net sold as
    "1 piece" holds many cloves). Omit it when retail pieces equal recipe pieces
-   (eggs). Never present it as an observed package fact; underestimate rather
-   than risk undersupply.
+   (eggs). Culinary units Grossy cannot measure (tsp, tbsp, sprig, bunch) are
+   blocked unless an estimate is declared (e.g. stock paste jar → "20" tsp).
+   Never present it as an observed package fact; underestimate rather than risk
+   undersupply.
 5. Only explicit dinner selection and fresh recipe/package preflight may authorize
    later ingredients. Recheck all current stock, prices and actual package units;
    reviewed compatibility and history frequency do not prove live availability.
@@ -484,6 +489,10 @@ execute them for local state corrections, blacklists, and database recovery.
 
 **Family and category maintenance:**
 
+- `grossy history family create <family-id> <primary-product-id> --name <ingredient>`
+  — owner-created, non-recurring family for never-purchased products (e.g. a recipe
+  ingredient). Name it exactly like the recipe ingredient so matching picks the
+  primary and falls back to linked alternatives. Register products first.
 - `grossy history family link <product-id> <family-id>`.
 - `grossy history family unlink <product-id>`.
 - `grossy history family merge <source-family-id> <target-family-id>`.

@@ -225,8 +225,10 @@ alias. Count-to-mass conversion is never implicit: a reviewed match may declare
 `retail_unit_coverage` (recipe units one retail unit supplies, per chosen or
 fallback product). It applies when observed package units are not directly
 comparable, and for counted recipe units it overrides the retail piece count
-(cloves per garlic net, slices per loaf). It is reported as an explicit estimate
-and rounded upward.
+(cloves per garlic net, slices per loaf). Culinary units without a measurable
+basis (tsp, tbsp, sprig, bunch) are blocked unless such an estimate is declared;
+they never mix with mass/volume/count credit. It is reported as an explicit
+estimate and rounded upward.
 
 Weekly recipe targets scale linearly to `household.recipe_servings` (sample
 default 3). The run snapshots the whole config: changing servings blocks matching
@@ -278,6 +280,7 @@ grossy history set-quantity <product-or-family-id> <positive-integer>
 grossy history disable <family-id> / enable <family-id>
 grossy history blacklist product <product-id> / family <family-id>
 grossy history unblacklist product <product-id> / family <family-id>
+grossy history family create <family-id> <primary-product-id> --name <ingredient>
 grossy history family link <product-id> <family-id>
 grossy history family unlink <product-id>
 grossy history family merge <source-family-id> <target-family-id>

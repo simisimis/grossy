@@ -215,11 +215,12 @@ def recipe_plan(
                 item.update(status="pantry", pantry_credit=preview["target"])
                 continue
             exact = preview["exact_match"]
-            if exact is None or unit.casefold() not in _UNITS:
+            coverage = preview.get("retail_unit_coverage", {})
+            # Culinary units (tsp, tbsp, sprig, bunch) only pass with a declared estimate.
+            if exact is None or (unit.casefold() not in _UNITS and not coverage):
                 decision["reasons"].append(f"{name}: unresolved preview match or unit")
                 continue
             semantic_ids = preview.get("semantic_compatible_product_ids")
-            coverage = preview.get("retail_unit_coverage", {})
             products = {p["product_id"]: p for p in local_products(conn, name, semantic_ids)}
             preferred = products.get(exact["product_id"])
             if preferred is None or preferred["canonical_url"] != exact["canonical_url"]:
@@ -301,7 +302,9 @@ def recipe_plan(
             ):
                 decision["reasons"].append(f"{name}: hard product price limit")
                 continue
-            basis, factor = _UNITS[unit.casefold()]
+            basis, factor = _UNITS.get(
+                unit.casefold(), (f"recipe-unit:{unit.casefold()}", Decimal(1))
+            )
             item.update(
                 removal_protected=bool(set(ids) & removed_equivalents),
                 status="exact" if pid == exact["product_id"] else "substituted",

@@ -483,3 +483,87 @@ def test_mixed_native_primary_estimated_fallback_cart_credit_labels_estimate(
         "cart credit includes explicit agent estimates" in a and "not an observed package fact" in a
         for a in ingredient["assumptions"]
     )
+
+
+@pytest.mark.parametrize(
+    "coverage", [{"111": "20"}, None], ids=["declared-estimate", "no-estimate"]
+)
+def test_culinary_units_require_declared_coverage(
+    home: GrossyPaths, coverage: dict[str, str] | None
+) -> None:
+    """tsp/tbsp/sprig/bunch are not measurable: only an explicit estimate unblocks them."""
+    revision = add_recipe(home, "dinner", names=["stock paste"], unit="tsp", amount=2)
+    add_product(home, "111", "Vegetable Stock Paste 100g", size=100, unit="g")
+    run_id = prepare(home)
+    run_recipes_apply(home, run_id, proposal(run_id))
+    m = match(
+        "dinner",
+        revision,
+        "111",
+        "stock paste",
+        evidence="agent_semantic_review",
+        compatible_product_ids=["111"],
+        rationale="Vegetable stock paste jar; recipe measures teaspoons.",
+    )
+    if coverage:
+        m["retail_unit_coverage"] = coverage
+    item = run_matches_apply(home, run_id, proposal(run_id, [m]))["recipe_slots"][0]["preview"][
+        "ingredients"
+    ][0]
+    assert item["target"] == "3"  # 2 tsp for two servings scaled to three.
+    run_selection_apply(home, run_id, "recipe1")
+    result = run_recipe_preflight(home, run_id, observation(facts=[fact("111")]))
+    decision = result["decisions"][0]
+    if coverage is None:
+        assert decision["status"] == "blocked"
+        assert any("unresolved preview match or unit" in r for r in decision["reasons"])
+        assert result["manifest"]["additions"] == []
+        return
+    assert item["package_quantity"] == "1"
+    assert decision["status"] == "passing"
+    assert result["manifest"]["additions"][0]["quantity"] == 1
+    ingredient = decision["ingredients"][0]
+    assert ingredient["estimated_coverage"] is True
+    assert ingredient["basis"] == "recipe-unit:tsp"
+
+
+def test_partial_cart_credit_is_exact_and_buys_nothing_extra(home: GrossyPaths) -> None:
+    """One tub in the cart fully covers a fraction of it: no repeating-decimal shortfall."""
+    revision = add_recipe(home, "dinner", names=["natural yogurt"], unit="ml", amount=200)
+    add_product(home, "111", "Yogurt Strained 1kg", size=1, unit="kg")
+    run_id = prepare(home, ["111"])
+    run_recipes_apply(home, run_id, proposal(run_id))
+    m = match(
+        "dinner",
+        revision,
+        "111",
+        "natural yogurt",
+        evidence="agent_semantic_review",
+        compatible_product_ids=["111"],
+        retail_unit_coverage={"111": "900"},
+        rationale="Strained yogurt tub in cart. Estimate: 1 kg supplies at least 900 ml.",
+    )
+    item = run_matches_apply(home, run_id, proposal(run_id, [m]))["recipe_slots"][0]["preview"][
+        "ingredients"
+    ][0]
+    assert item["target"] == "300"
+    assert item["cart_credit"] == "300"
+    assert item["missing_target"] == "0"
+    assert item["package_quantity"] == "0"
+
+
+def test_owner_created_family_matches_recipe_ingredient_by_name(home: GrossyPaths) -> None:
+    """A family named like the ingredient resolves primary + approved fallback, no history."""
+    from grossy.history.maintenance import run_family_create, run_family_link
+
+    add_recipe(home, "dinner", names=["frozen veggie burger patties"], unit="pc", amount=2)
+    add_product(home, "300", "Soy Burger Vegan 226g", approved=False)
+    add_product(home, "400", "Plant-Based Burger 2x113g", approved=False)
+    run_family_create(home, "fam-veggie-patties", "300", "frozen veggie burger patties")
+    run_family_link(home, "400", "fam-veggie-patties")
+    run_id = prepare(home)
+    item = run_recipes_apply(home, run_id, proposal(run_id))["recipe_slots"][0]["preview"][
+        "ingredients"
+    ][0]
+    assert item["exact_match"]["product_id"] == "300"
+    assert [f["product_id"] for f in item["approved_family_fallbacks"]] == ["400"]
