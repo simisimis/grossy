@@ -135,6 +135,11 @@ or `grossy history sync` commands:
 /skill:grossy recipes refresh <recipe-id> --apply
 ```
 
+The coordinator executes these through the scripted steps in
+`.pi/skills/grossy/scripts/` (`live.sh start|history|stage1|recurring|advance|
+recipes|matches|recipe-add|status`); see that directory's README for the
+phase mapping and the private work-directory layout.
+
 Class lists use meat,fish,poultry,vegetarian; slots use recipe1..recipe4.
 `all` includes every persisted nonempty slot, not a default recommendation.
 `just history-sync`, `just weekly-plan`, and
@@ -229,6 +234,11 @@ comparable, and for counted recipe units it overrides the retail piece count
 basis (tsp, tbsp, sprig, bunch) are blocked unless such an estimate is declared;
 they never mix with mass/volume/count credit. It is reported as an explicit
 estimate and rounded upward.
+
+Pantry is an exact-name list (`pantry_assumptions`). Owner policy: water, plain
+cooking oils, salt, all dried spices/herbs, basil, bay leaves and wine are pantry;
+specialty oils and fresh produce are bought. Add new pantry-class names between
+runs, never mid-run.
 
 Weekly recipe targets scale linearly to `household.recipe_servings` (sample
 default 3). The run snapshots the whole config: changing servings blocks matching

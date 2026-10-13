@@ -109,7 +109,7 @@ def _get_grossy_store_path() -> Path:
     assert grossy_path.exists(), "grossy executable not found"
     content = grossy_path.resolve().read_text()
     # The wrapper contains the store path like:
-    # /nix/store/xxx-grossy-0.1.0/bin/.grossy-wrapped
+    # /nix/store/xxx-grossy-0.2.0/bin/.grossy-wrapped
     match = re.search(r"(/nix/store/[^']+grossy-[\d.]+)/bin/\.grossy-wrapped", content)
     assert match, f"Could not find grossy store path in wrapper: {grossy_path}"
     return Path(match.group(1))

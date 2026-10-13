@@ -1,6 +1,6 @@
 [project]
 name = "grossy"
-version = "0.1.0"
+version = "0.2.0"
 description = "Deterministic CLI for weekly grocery shopping automation on AB.gr"
 requires-python = ">=3.12"
 dependencies = [

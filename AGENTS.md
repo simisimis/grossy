@@ -82,9 +82,18 @@ the four option slots.
   Record sanitized counts, checksums and results instead of private phase output.
 - A coding task or passing offline gate does not authorize a live browser check.
   Only the coordinator/user performs approved live steps; workers/reviewers do
-  not browse. Cart additions/removals need separate exact-action confirmation,
-  fresh preflight, durable intent and whole-cart readback. Do not replay intent,
-  compensate or continue after a failed phase, drift, CAPTCHA or authentication loss.
+  not browse. For normal weekly workflows, the weekly invocation authorizes
+  recurring additions and the owner's explicit dinner selection authorizes recipe
+  additions through durable run-scoped stage consent; do not ask for batch or
+  per-item addition confirmation. Present dinner options and wait for the owner's
+  choice; never select dinners on their behalf. Removals still need separate
+  exact-action confirmation. Every addition requires fresh preflight, durable
+  intent, a single-use action-check immediately before its one browser write,
+  and identity-bound whole-cart readback. Revoked consent stops further writes.
+  Stop for owner basket review after recurring completion; advance only on the
+  owner's explicit instruction. Bounded smoke scope remains separate. Do not
+  replay intent, compensate or continue after a failed phase, drift, CAPTCHA or
+  authentication loss.
 - Do not enter credentials/2FA, progress checkout, select fulfilment, pay or submit
   orders. With explicit approval, the coordinator may open AB.gr `/checkout`
   solely to read the cart-item list; exclude account/address/payment/fulfilment

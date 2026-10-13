@@ -56,6 +56,29 @@ invocations do not rerun the Just guard and can be shadowed by a newly injected
 host/venv fallback is supported. This is provenance protection, not a sandbox
 against arbitrary shell changes or a network firewall.
 
+## Scripted execution (use these first)
+
+The verified browser procedures and CLI phase sequences below are implemented
+as deterministic scripts in [scripts/](scripts/README.md). Run them through
+`.pi/skills/grossy/scripts/live.sh <step>` from the repository; each step runs
+inside the Nix shell, writes private artifacts to the work directory named in
+`~/.local/state/grossy/live-current.txt`, and stops with `STOP: <reason>` on any
+fail-closed condition. Do not re-derive page procedures from the prose when a
+script covers the step; if a script stops, read its reason, fix the cause or
+report, never bypass it.
+
+| Skill command | Script steps |
+| --- | --- |
+| `history sync [--dry-run]` | `live.sh start`, then `live.sh history [--dry-run]` |
+| `weekly plan` | `start` → `history` → `stage1` → `recurring` → **stop for basket review** → `advance` → `recipes` → write matches spec → `matches <spec>` → **present options, wait for the owner's pick** |
+| `weekly add <run-id> <list>` | `live.sh recipe-add <list>` (runs `selection-apply` with the owner's exact choice) |
+| `weekly reroll`, `remove`, `finish`, `abandon`, `resume` | `live.sh grossy weekly ...` for the CLI phase; browser reads for resume/removal use the shared modules |
+| any time | `live.sh status` |
+
+The semantic ingredient review (matches spec) is coordinator judgement and is
+written per run; the spec format is in the `matches_apply.py` docstring.
+If a procedure changes on AB.gr, fix the script and this file together.
+
 ## Commands
 
 ### `history sync [--dry-run]`
@@ -195,6 +218,18 @@ Start Stage1: history sync, whole-cart baseline, owner-confirmed recurring addit
     `awaiting-recipe-selection` without adding recipe ingredients.
     Identical recipes-apply retries regenerate stored reports, never replan.
     Stop on non-zero exit; SQLite retains report recovery truth after I/O failure.
+
+#### Pantry policy (owner standing rules)
+
+`pantry_assumptions` matches exact normalized ingredient names. Owner rules:
+- **Pantry:** water; plain cooking oils (generic, olive, sunflower, vegetable,
+  rapeseed); salt; every dried spice and dried herb; basil; bay leaves; wine.
+- **Never pantry:** specialty oils (sesame, truffle) and fresh produce (fresh
+  herbs other than basil, fresh ginger, fresh chillies).
+- **New names:** when dinner options list a dried spice or herb, or another
+  pantry-class item, whose exact name is not yet on the list, report it with the
+  options. Add it to the config immediately after that run closes. Changing the
+  config mid-run blocks the run.
 
 #### Recipe ingredient matching before selection
 
@@ -780,6 +815,24 @@ for attempts one to three, and every attempt is its own intent:
 3. Check the attempt count before persisting an intent. After three
    not-applied attempts for one product, stop and tell the owner.
 Any other quantity is unexplained drift: stop.
+
+When the owner closes the browser window, the pinned tab disappears and the next
+agent-browser call may leave only a bare `about:blank` tab without the profile.
+If the pinned target is missing and every remaining tab is `about:blank`, close
+the session browser, relaunch headed Brave with the Grossy profile
+(`--headed --executable-path <brave> --profile <ab-profile> --pin-tab open
+https://www.ab.gr/checkout`), bind the new tab and continue. If any other tab is
+present, stop: never adopt a tab the agent did not open.
+
+Basket-review advance with owner edits: bind every checkout line to a product page.
+Known lines first (hard reload; a stale 0 for a line checkout still lists gets one
+more reload). Bind unknown lines by exact name/brand search and product-page
+quantity/price. Report the four outcomes separately and honestly:
+- **Unavailable:** lines showing "See Alternatives" with no quantity are excluded
+  as unbuyable, not owner removals.
+- **Removed:** recurring items the owner took out.
+- **Re-bound:** recurring lines bound via search, not owner additions.
+- **Added:** genuine owner additions.
 
 Record the task tab's stable target ID privately and select that exact target
 before each browser command, retaining `--pin-tab`. A session name/sticky pin
