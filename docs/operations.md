@@ -191,6 +191,28 @@ Advance accepts manual edits but rejects failed/incomplete readback evidence.
 that stage, including a persisted intent whose action-check has not run;
 readback of a pending intent remains possible.
 
+Recurring cadence uses **Saturday–Friday shopping weeks in Europe/Athens**.
+A completed purchase counts for the week starting on its preceding (or same)
+Saturday. A weekly item becomes due the following Saturday; an N-week item
+becomes due N Saturdays after that purchase week's start, not N × 7 days after
+the purchase date. Saturday/Sunday orders therefore count toward the coming
+Monday's shopping. This works across year boundaries without week-number resets.
+Only completed-order history advances cadence; cart additions do not. Existing
+run snapshots are not replanned automatically when this rule changes.
+
+During recurring prefill, record unavailable products and try only listed,
+policy-approved alternatives with fresh facts. If none passes, skip the item and
+continue other safe additions. This applies when a previously verified item becomes
+unavailable too: confirm its product-page identity/stock, exclude its unavailable
+checkout row from buyable cart credit, and retain earlier mutation evidence.
+Do not guess a missing quantity or count this as an owner removal. Stop if the
+just-written target cannot provide verified quantity readback, or if other cart
+changes remain unexplained. Reports list unavailable IDs, selected alternatives
+and final skipped decisions. Structured preflight `product_candidates` supplies
+stored candidate URLs and `unresolved_candidates` names approved IDs that are
+unregistered or policy-blocked; human preview substitution strings are not machine
+records. Only run-known recurring identities can be excluded as unavailable.
+
 Recipe options use accepted local revisions and local product facts only;
 availability/price projections are unverified until fresh rendered preflight.
 `recipes-apply` owns eligibility, deterministic weights/slots and immutable

@@ -48,6 +48,10 @@ bound = json.load(open(D/"baseline-bound.json"))
 for p, r in bound.items(): remember(p, r["canonical_url"], r["title"])
 pend = [i for i in b["recurring_items"] if i["status"] == "pending"]
 print("pending recurring items:", len(pend))
+candidate_plan = drill.grossy("weekly", "recurring-preflight", run, str(D/"baseline-cart.json"), out="recurring-candidates.json")
+CANDIDATES = candidate_plan.get("product_candidates", [])
+for candidate in CANDIDATES: remember(candidate["product_id"], candidate["canonical_url"])
+write("known-urls.json", URLS)
 start = drill.now(); readings = []
 def read(pid, qty=None):
     """Known in-cart lines wait for their baseline quantity (stale 0 after navigation is a known display issue)."""
@@ -61,7 +65,7 @@ for i in pend:
     if pid not in URLS: stop("no_url_for:"+pid)
     r = read(pid, bound.get(pid, {}).get("quantity"))
     if r["availability"] != "available":
-        for alt in [s.get("product_id") for s in (i.get("substitution_proposals") or []) if isinstance(s, dict)]:
+        for alt in [c["product_id"] for c in CANDIDATES if c["primary_product_id"] == pid and c["product_id"] != pid]:
             if alt and alt in URLS and alt not in [x["product_id"] for x in readings]:
                 ra = read(alt); print(f"  primary {pid} unavailable -> read alternative {alt}: {ra['availability']}")
 lines = []

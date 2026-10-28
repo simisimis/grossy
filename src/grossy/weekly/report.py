@@ -134,6 +134,20 @@ def build_markdown_report(data: dict[str, Any]) -> str:
         lines.append("_No recurring items resolved._")
         lines.append("")
 
+    if "recurring_unavailable_product_ids" in data:
+        lines.append("## Recurring availability outcome")
+        for pid in data["recurring_unavailable_product_ids"]:
+            lines.append(f"- **{pid}**: unavailable (not counted as buyable cart credit)")
+        for primary, alternative in data.get("recurring_substitutions", {}).items():
+            lines.append(f"- **{primary}**: approved alternative **{alternative}** selected")
+        for decision in data.get("recurring_preflight_decisions", []):
+            if decision["status"].startswith(("skipped", "blocked")):
+                lines.append(
+                    f"- **{decision['product_id']}**: {decision['status']}; "
+                    f"{decision.get('reason', 'see preview policy decision')}"
+                )
+        lines.append("")
+
     # Category references.
     items = data.get("recurring_items", [])
     all_refs: set[str] = set()

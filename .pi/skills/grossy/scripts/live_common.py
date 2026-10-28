@@ -100,7 +100,7 @@ def product(pid, url, required_quantity=None, force_reload=False):
          'const q=main("[data-testid=product-block-quantity-input]"),add=main("[data-testid=product-block-add]"),un=main("[data-testid=product-block-unavailable-text]");'
          'const readyEmpty=q.length===0&&add.length===1&&!add[0].disabled&&add[0].getAttribute("aria-disabled")!=="true";'
          'const readyInCart=q.length===1&&add.length===0&&/^[1-9][0-9]*$/.test(q[0].value)&&(q[0].getAttribute("data-quantity")===null||q[0].getAttribute("data-quantity")===q[0].value);'
-         'return document.readyState==="complete"&&main("[data-testid=product-common-header-title]").length===1&&main("[data-testid=product-properties]").length===1&&(un.length===1||readyEmpty||readyInCart)'+gate+';', tag='product-'+pid)
+         'return document.readyState==="complete"&&main("[data-testid=product-common-header-title]").length===1&&main("[data-testid=product-properties]").length===1&&(un.length===1||((readyEmpty||readyInCart)'+gate+'));', tag='product-'+pid)
     r = evaluate('if(!location.pathname.endsWith("/p/'+pid+'"))throw Error("unexpected_product");const main=s=>[...document.querySelectorAll(s)].filter(e=>v(e)&&!e.closest("[data-testid=product-block],[data-testid=product-carousel-container]"));'
          'const panels=main("[data-testid=product-properties]");const prices=panels.flatMap(e=>[...e.querySelectorAll("[data-testid=product-block-price]")].filter(v));const titles=main("[data-testid=product-common-header-title]");'
          'const q=main("[data-testid=product-block-quantity-input]"),add=main("[data-testid=product-block-add]");'
@@ -118,19 +118,6 @@ def product(pid, url, required_quantity=None, force_reload=False):
         if r['data_quantity'] is not None and r['data_quantity']!=str(quantity): stop('inconsistent_product_quantity:'+pid)
     else: stop('ambiguous_product_cart_state:'+pid)
     return {'product_id':pid,'canonical_url':url,'availability':'available','displayed_price_eur':price,'quantity':quantity,'title':r['title']}
-
-def checkout(expected_lines, tag='checkout'):
-    """Read-only checkout cart list: line count, rows, empty state, badge. No private sections."""
-    browser(['open','https://www.ab.gr/checkout'], tag)
-    wait('if(location.pathname!=="/checkout")throw Error("unexpected_cart_route");const empty=[...document.querySelectorAll("p,span,div,h1,h2,h3")].filter(e=>e.children.length===0&&v(e)&&!e.closest("button,a")&&'+EMPTY_RE+'.test(e.textContent.trim())).length;'
-         'const lines=[...document.querySelectorAll("[data-testid=remove-basket-item]")].filter(v).length;return document.readyState==="complete"&&lines===EXP&&empty===EMP;'.replace('EXP',str(expected_lines)).replace('EMP','0' if expected_lines else '1'), tag=tag)
-    return evaluate('if(location.pathname!=="/checkout")throw Error("unexpected_cart_route");const remove=[...document.querySelectorAll("[data-testid=remove-basket-item]")].filter(v);'
-         'const rows=remove.map(btn=>{let e=btn.parentElement;while(e&&!(e.querySelectorAll("[data-testid=remove-basket-item]").length===1&&e.querySelectorAll("[data-testid=product-block-quantity-input]").length===1&&e.querySelectorAll("[data-testid=product-name]").length===1))e=e.parentElement;if(!e)return {ambiguous:true};'
-         'const name=e.querySelector("[data-testid=product-name]"),brand=e.querySelector("[data-testid=product-brand]"),q=e.querySelector("[data-testid=product-block-quantity-input]"),prices=[...e.querySelectorAll("[data-testid=product-block-price]")].filter(v);'
-         'return {name:name?.innerText,brand:brand?.innerText,quantity:q?.value,price_count:prices.length,price_parts:prices.length===1?[...prices[0].children].map(c=>c.innerText.trim()):[]};});'
-         'const badges=[...document.querySelectorAll("[data-testid=item-count-in-basket-button-toggle]")].filter(v);'
-         'const empty=[...document.querySelectorAll("p,span,div,h1,h2,h3")].filter(e=>e.children.length===0&&v(e)&&!e.closest("button,a")&&'+EMPTY_RE+'.test(e.textContent.trim())).length;'
-         'return {line_count:remove.length,rows,empty_count:empty,badge_count:badges.length,badge_text:badges.map(e=>e.innerText.trim())};', tag=tag)
 
 def grossy(*args, out=None, expect_exit=(0,)):
     p = subprocess.run(['grossy',*args],capture_output=True,text=True)

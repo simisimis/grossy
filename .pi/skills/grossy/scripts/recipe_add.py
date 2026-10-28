@@ -4,8 +4,8 @@ fresh facts -> recipe-preflight x2 -> recipe-intent -> action-check -> ONE click
 Usage: recipe_add.py <recipe-list|all> [max-actions]     e.g. recipe_add.py recipe1,recipe4
 Never run without the owner's dinner selection. One click per persisted+checked intent; never re-clicks.
 """
-import sys, json, re, time, os; sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import live_common as drill
+import sys, json, time, os; sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import live_common as drill, cart_bind, recurring_cart
 from live_common import stop, write, D
 
 RUN = json.load(open(D/"plan-prepare.json"))["run_id"]
@@ -28,9 +28,11 @@ for s in chosen:
         for fb in i.get("approved_family_fallbacks") or []:
             if fb.get("product_id"): RECIPE[fb["product_id"]] = fb.get("canonical_url")
 URL = json.load(open(D/"known-urls.json")) if (D/"known-urls.json").exists() else {}
-URL.update({r["product_id"]: r["canonical_url"] for r in json.load(open(D/"recurring-readings.json"))})
+KNOWN = {}  # pid -> {title, canonical_url}: local evidence for binding unavailable checkout rows (e.g. a recurring line out of stock)
+for r in json.load(open(D/"recurring-readings.json")): URL[r["product_id"]] = r["canonical_url"]; KNOWN[r["product_id"]] = r
 for f in ("baseline-bound.json", "advance-bound.json"):
-    if (D/f).exists(): URL.update({p: r["canonical_url"] for p, r in json.load(open(D/f)).items()})
+    if (D/f).exists():
+        for p, r in json.load(open(D/f)).items(): URL[p] = r["canonical_url"]; KNOWN[p] = r
 URL.update({p: u for p, u in RECIPE.items() if u})
 missing_urls = [p for p in RECIPE if p not in URL]
 if missing_urls: stop("missing_urls:" + ",".join(missing_urls))
@@ -55,21 +57,26 @@ def refresh(expected, skip=()):
         if pid in skip: continue
         if pid not in cache or time.time() - cache[pid]["read_at"] > STALE: read(pid, expected.get(pid, 0))
 
-def checkout_check(expected, tag):
-    c = drill.checkout(len(expected), tag)
-    if c["line_count"] != len(expected) or c["empty_count"] != (0 if expected else 1): stop("checkout_count_conflict")
-    matched = set()
-    for row in c["rows"]:
-        if row.get("ambiguous") or not row.get("name") or row["price_count"] != 1: stop("ambiguous_checkout_line")
-        price = drill.price_of(row["price_parts"])
-        ids = [p for p in expected if norm(row["name"]) in norm(cache[p]["title"]) and norm(row.get("brand") or "") in norm(cache[p]["title"])
-               and str(expected[p]) == row["quantity"] and price in (cache[p]["displayed_price_eur"], "%.2f" % (float(cache[p]["displayed_price_eur"]) * expected[p]))]
-        if len(ids) != 1 or ids[0] in matched:
-            write(tag+"-unbound-row.json", {"row": row, "candidates": len(ids)}); stop("checkout_line_not_bound_to_verified_product")
-        matched.add(ids[0])
-    if matched != set(expected): stop("checkout_unbound_line")
-    if c["badge_count"] != 1 or not re.fullmatch(r"\d+", c["badge_text"][0]) or int(c["badge_text"][0]) != sum(expected.values()):
-        stop("header_badge_inconsistent")
+def read_unavailable(pid, url):
+    """Confirm an unavailable checkout row on its product page; such lines carry no quantity and no cart credit."""
+    t, iso = time.time(), drill.now()
+    r = drill.product(pid, url or URL[pid], None, force_reload=True)
+    cache[pid] = {**r, "read_at": t, "iso": iso}
+
+def checkout_check(expected, tag, protected=()):
+    """Identity-bound checkout readback. Returns the buyable quantities (confirmed unavailable lines excluded)."""
+    c = cart_bind.checkout_rows(tag)
+    try:
+        recurring_cart.bind_unavailable_rows(c, cache, KNOWN, read_unavailable)
+        remaining = recurring_cart.reconcile(c, expected, cache, protected)
+    except ValueError as exc:
+        write(tag+"-checkout-diagnostic.json", {"reason": str(exc), "row_count": len(c["rows"])})
+        stop(str(exc))
+    if remaining != expected:
+        # The recipe stage's cart anchor is identity/price-bound in the CLI; a line lost here is
+        # unexplained drift there, so report it instead of continuing with a reduced cart.
+        stop("checkout_lines_lost_since_recipe_anchor:" + ",".join(sorted(set(expected) - set(remaining))))
+    return remaining
 
 FACT_KEYS = ("product_id", "canonical_url", "displayed_price_eur", "availability", "package_amount", "package_unit", "package_count", "sale_kind")
 def observation(expected):
@@ -92,7 +99,7 @@ def readback(pre, m, a, expected):
     post = {**expected, a["product_id"]: expected.get(a["product_id"], 0) + a["quantity"]}
     read(a["product_id"], post[a["product_id"]])
     refresh(post, skip={a["product_id"]})
-    checkout_check(post, pre+"-readback")
+    checkout_check(post, pre+"-readback", protected={a["product_id"]})
     obs = observation(post); obs["mutation_result"] = {"manifest_checksum": m["checksum"], "outcome": "readback"}
     write(pre+"-readback.json", obs)
     r = phase("recipe-observe", pre+"-readback.json", "grossy.weekly.recipe-observe.v1", "success")

@@ -21,7 +21,7 @@ from typing import Any, Literal, cast
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator
 
 from grossy.browser.observation import CartObservation, validate_cart_observation
-from grossy.config.models import GrossyConfigModel, product_id_from_url
+from grossy.config.models import GrossyConfigModel, StapleModel, product_id_from_url
 from grossy.db.connection import open_connection
 from grossy.db.lock import WriterLock
 from grossy.db.migrations import run_migrations
@@ -189,6 +189,35 @@ def _cart(obs: CartObservation) -> dict[str, int]:
     return {line.product_id: line.quantity for line in obs.lines}
 
 
+def _recurring_available_quantities(
+    obs: CartObservation,
+    expected: dict[str, int],
+    *,
+    known: set[str],
+    protected: set[str] | None = None,
+) -> dict[str, int]:
+    """Exclude only missing lines with fresh, explicit unavailable product evidence.
+
+    Only run-known recurring identities (primaries and policy-approved alternatives)
+    can be forgiven; an unavailable fact for any other line is still unexplained
+    drift. Never infer a quantity for an unavailable row or forgive an unverified
+    target write. Historical verified additions remain intact.
+    """
+    current = _cart(obs)
+    unavailable = {
+        fact.product_id
+        for fact in obs.recurring_product_facts
+        if fact.availability == "unavailable"
+    }
+    missing = set(expected) - set(current)
+    excluded = (missing & unavailable & known) - (protected or set())
+    if excluded:
+        _require_fresh_observation(obs)
+        if obs.mutation_result is not None and obs.mutation_result.outcome != "readback":
+            raise WeeklyPlanError("unavailable reconciliation requires complete readback")
+    return {pid: quantity for pid, quantity in expected.items() if pid not in excluded}
+
+
 def _cart_lines(obs: CartObservation) -> dict[str, dict[str, Any]]:
     return {line.product_id: line.model_dump(mode="json") for line in obs.lines}
 
@@ -297,6 +326,93 @@ def _policy(conn: sqlite3.Connection, config: GrossyConfigModel) -> str:
     )
 
 
+class _StapleIndex:
+    """YAML staples with their product IDs and policy families resolved once."""
+
+    def __init__(self, conn: sqlite3.Connection, config: GrossyConfigModel) -> None:
+        self.entries: list[tuple[StapleModel, str, str | None]] = []
+        for staple in list(config.staples.breakfast) + list(config.staples.lunch):
+            sid = staple.product_id or product_id_from_url(staple.product_url or "") or ""
+            self.entries.append((staple, sid, product_gate(conn, sid).family_id))
+
+    def matching(self, pid: str, family: str | None) -> list[StapleModel]:
+        return [
+            staple
+            for staple, sid, staple_family in self.entries
+            if sid == pid or (family is not None and staple_family == family)
+        ]
+
+
+def _approved_alternatives(
+    conn: sqlite3.Connection,
+    pid: str,
+    family: str | None,
+    source: str,
+    matches: list[StapleModel],
+) -> set[str]:
+    """Policy-approved substitutes for one recurring primary (never the primary).
+
+    YAML references must all allow substitution; their approved lists intersect.
+    Otherwise learned items fall back to approved, non-blacklisted family members.
+    """
+    if matches and all(s.allow_substitution for s in matches):
+        return set.intersection(*(set(s.approved_alternative_product_ids) for s in matches)) - {pid}
+    if source == "learned" and family:
+        return set(_approved_family_member_product_ids(conn, family)) - {pid}
+    return set()
+
+
+def _recurring_alternatives(
+    conn: sqlite3.Connection, rid: int, config: GrossyConfigModel
+) -> dict[str, set[str]]:
+    """Primary recurring product ID -> policy-approved alternative IDs."""
+    staples = _StapleIndex(conn, config)
+    return {
+        pid: _approved_alternatives(conn, pid, family, source, staples.matching(pid, family))
+        for pid, family, source in conn.execute(
+            "SELECT p.retailer_product_id,f.family_id,i.source_type "
+            "FROM run_recurring_items i JOIN products p ON p.id=i.product_id "
+            "LEFT JOIN product_families f ON f.id=i.family_id WHERE i.run_id=?",
+            (rid,),
+        )
+    }
+
+
+def _recurring_known_product_ids(
+    conn: sqlite3.Connection, rid: int, config: GrossyConfigModel
+) -> set[str]:
+    """Identities whose evidenced unavailability recurring reconciliation may accept."""
+    alternatives = _recurring_alternatives(conn, rid, config)
+    return set(alternatives) | set().union(*alternatives.values())
+
+
+def _recurring_product_candidates(
+    conn: sqlite3.Connection, rid: int, config: GrossyConfigModel
+) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+    """Structured local identities for primaries and policy-approved fallbacks.
+
+    Human preview rationale strings are not a machine-readable candidate list.
+    Returns (resolved candidates with stored canonical URLs, unresolved candidates
+    with a reason); unknown catalogue URLs are reported rather than fabricated.
+    """
+    candidates: list[dict[str, str]] = []
+    unresolved: list[dict[str, str]] = []
+    for pid, alternatives in _recurring_alternatives(conn, rid, config).items():
+        for product in sorted({pid} | alternatives):
+            entry = {"primary_product_id": pid, "product_id": product}
+            if product_gate(conn, product).is_blocked:
+                unresolved.append({**entry, "reason": "blocked-policy"})
+                continue
+            row = conn.execute(
+                "SELECT canonical_url FROM products WHERE retailer_product_id=?", (product,)
+            ).fetchone()
+            if row and row[0]:
+                candidates.append({**entry, "canonical_url": row[0]})
+            else:
+                unresolved.append({**entry, "reason": "unregistered-product"})
+    return candidates, unresolved
+
+
 def _plan(
     conn: sqlite3.Connection, rid: int, config: GrossyConfigModel, obs: CartObservation
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
@@ -309,7 +425,7 @@ def _plan(
     facts = {fact.product_id: fact for fact in obs.recurring_product_facts}
     additions: list[dict[str, Any]] = []
     decisions: list[dict[str, str]] = []
-    staples = list(config.staples.breakfast) + list(config.staples.lunch)
+    staples = _StapleIndex(conn, config)
     for pid, family, target, source, status in conn.execute(
         "SELECT p.retailer_product_id,f.family_id,i.intended_quantity,i.source_type,i.status "
         "FROM run_recurring_items i JOIN products p ON p.id=i.product_id "
@@ -337,18 +453,7 @@ def _plan(
             )
             if preferred is None or preferred.retailer_product_id != pid:
                 raise WeeklyPlanError("stale recurring learned target; renewed planning required")
-        matches = [
-            s
-            for s in staples
-            if (s.product_id or product_id_from_url(s.product_url or "")) == pid
-            or (
-                family is not None
-                and product_gate(
-                    conn, s.product_id or product_id_from_url(s.product_url or "") or ""
-                ).family_id
-                == family
-            )
-        ]
+        matches = staples.matching(pid, family)
         # Baseline consolidation keeps the first YAML reference's exact product
         # and quantity; later references still constrain substitution/hard limits.
         if source in ("yaml", "both") and (
@@ -383,17 +488,10 @@ def _plan(
         selected = pid
         fact = facts.get(pid)
         if fact is not None and fact.availability == "unavailable":
-            allowed: set[str] = set()
-            if matches and all(s.allow_substitution for s in matches):
-                allowed = set.intersection(
-                    *(set(s.approved_alternative_product_ids) for s in matches)
-                )
-            elif source == "learned" and family:
-                allowed = set(_approved_family_member_product_ids(conn, family)) - {pid}
             selected = next(
                 (
                     p
-                    for p in sorted(allowed)
+                    for p in sorted(_approved_alternatives(conn, pid, family, source, matches))
                     if p in facts
                     and facts[p].availability == "available"
                     and not product_gate(conn, p).is_blocked
@@ -402,7 +500,14 @@ def _plan(
             )
             fact = facts.get(selected)
         if fact is None or fact.availability != "available":
-            decisions.append({"product_id": pid, "status": "skipped-unknown-or-unavailable"})
+            decisions.append(
+                {
+                    "product_id": pid,
+                    "status": "skipped-unknown-or-unavailable",
+                    "availability": facts[pid].availability if pid in facts else "unknown",
+                    "reason": "no available policy-approved alternative",
+                }
+            )
             continue
         assert fact.displayed_price_eur is not None  # Available facts require a real price.
         price = Decimal(fact.displayed_price_eur)
@@ -424,7 +529,12 @@ def _plan(
             }
         )
         decisions.append(
-            {"product_id": pid, "status": "substituted" if selected != pid else "passing"}
+            {
+                "product_id": pid,
+                "status": "substituted" if selected != pid else "passing",
+                "selected_product_id": selected,
+                "availability": facts[pid].availability if pid in facts else "unknown",
+            }
         )
     if len({a["product_id"] for a in additions}) != len(additions):
         raise WeeklyPlanError("ambiguous overlapping recurring substitutions")
@@ -551,6 +661,17 @@ def _prepare(
         projected_total_eur=f"{current_total + projected:.2f}",
         variance_eur=f"{current_total + projected - config.weekly_budget:.2f}",
     )
+    if stage == "recurring":
+        report["recurring_preflight_decisions"] = decisions
+        substitutions = report.setdefault("recurring_substitutions", {})
+        for decision in decisions:
+            if decision["status"] == "substituted":
+                substitutions[decision["product_id"]] = decision["selected_product_id"]
+        report["recurring_unavailable_product_ids"] = sorted(
+            fact.product_id
+            for fact in obs.recurring_product_facts
+            if fact.availability == "unavailable"
+        )
     if stage == "recipe":
         report["budget"].update(
             known_projected_recipe_eur=f"{projected:.2f}", recipe_cost_complete=True
@@ -599,6 +720,17 @@ def _prepare(
         "manifest": manifest,
         "decisions": decisions,
         "remaining_addition_count": len(additions),
+        **(
+            dict(
+                zip(
+                    ("product_candidates", "unresolved_candidates"),
+                    _recurring_product_candidates(conn, rid, config),
+                    strict=True,
+                )
+            )
+            if stage == "recurring"
+            else {}
+        ),
     }
 
 
@@ -613,9 +745,12 @@ def run_recurring_preflight(
         if _pending(conn, rid, stage):
             raise WeeklyPlanError("unreconciled intent requires resume-prepare")
         expected = _latest(conn, rid, f"{stage}-cart")
-        unexpected = (stage == "recurring" or expected) and _cart(obs) != (
-            expected["quantities"] if expected else _baseline(conn, rid)
-        )
+        quantities = expected["quantities"] if expected else _baseline(conn, rid)
+        if stage == "recurring":
+            quantities = _recurring_available_quantities(
+                obs, quantities, known=_recurring_known_product_ids(conn, rid, config)
+            )
+        unexpected = (stage == "recurring" or expected) and _cart(obs) != quantities
         if stage == "recipe":
             anchor = _recipe_anchor(conn, rid)
             unexpected = anchor is not None and _cart_lines(obs) != _cart_lines(anchor)
@@ -874,6 +1009,13 @@ def run_recurring_observe(
             pid = addition["product_id"]
             expected[pid] = expected.get(pid, 0) + addition["quantity"]
         expected_lines = _expected_recipe_lines(before_observation, manifest["additions"])
+        if stage == "recurring":
+            expected = _recurring_available_quantities(
+                obs,
+                expected,
+                known=_recurring_known_product_ids(conn, rid, config),
+                protected={a["product_id"] for a in manifest["additions"]},
+            )
         success = (
             obs.mutation_result.outcome == "readback"
             and _cart(obs) == expected
@@ -976,6 +1118,13 @@ def run_resume_prepare(
                     for pid, line in observed_lines.items()
                 ):
                     raise WeeklyPlanError("unexplained cart identity/price change on resume")
+            if stage == "recurring":
+                before = _recurring_available_quantities(
+                    obs,
+                    before,
+                    known=_recurring_known_product_ids(conn, rid, config),
+                    protected=allowed,
+                )
             if any(
                 current.get(p, 0) != before.get(p, 0)
                 for p in set(current) | set(before)
@@ -1012,10 +1161,14 @@ def run_resume_prepare(
             if anchor is not None:
                 if _cart_lines(obs) != _cart_lines(anchor):
                     raise WeeklyPlanError("unexplained cart change on resume")
-            elif (stage == "recurring" or expected) and _cart(obs) != (
-                expected["quantities"] if expected else _baseline(conn, rid)
-            ):
-                raise WeeklyPlanError("unexplained cart change on resume")
+            elif stage == "recurring" or expected:
+                quantities = expected["quantities"] if expected else _baseline(conn, rid)
+                if stage == "recurring":
+                    quantities = _recurring_available_quantities(
+                        obs, quantities, known=_recurring_known_product_ids(conn, rid, config)
+                    )
+                if _cart(obs) != quantities:
+                    raise WeeklyPlanError("unexplained cart change on resume")
         _event(conn, rid, f"{stage}-resume", {"quantities": _cart(obs)})
         return _prepare(conn, config, paths, rid, run_id, obs, stage)
 

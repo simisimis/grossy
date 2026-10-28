@@ -534,6 +534,35 @@ class TestRecurringResolution:
         assert item["missing_delta"] >= 0
         assert item["status"] in ("pending", "skipped")
 
+    @pytest.mark.parametrize("source", ["observed", "manual"])
+    @pytest.mark.parametrize("day,due", [(30, False), (31, True)])
+    def test_shopping_week_boundary_controls_learned_preview(
+        self, tmp_path: Path, source: str, day: int, due: bool
+    ) -> None:
+        from grossy.weekly.plan import _resolve_learned_families
+
+        paths = _initialized(tmp_path)
+        _seed_family(
+            paths,
+            "fam-bananas",
+            "7063312",
+            recurrence_source=source,
+            last_purchase_date="2026-10-28",
+        )
+        conn = open_connection(paths.database_file)
+        try:
+            items = _resolve_learned_families(
+                conn, set(), {}, set(), today=datetime(2026, 10, day, tzinfo=ATHENS_TZ)
+            )
+        finally:
+            conn.close()
+        bananas = [item for item in items if item.family_id == "fam-bananas"]
+        assert bool(bananas) is due
+        if due:
+            assert bananas[0].retailer_product_id == "7063312"
+            assert bananas[0].status == "pending"
+            assert bananas[0].missing_delta == 1
+
     @pytest.mark.parametrize("case", ["not-due", "disabled"])
     def test_not_due_or_disabled_family_is_absent(self, tmp_path: Path, case: str) -> None:
         """A not-yet-due or disabled (FR-63) family not covered by YAML is not previewed."""

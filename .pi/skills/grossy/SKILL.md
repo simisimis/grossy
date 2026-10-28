@@ -285,6 +285,32 @@ Start Stage1: history sync, whole-cart baseline, owner-confirmed recurring addit
 
 #### Recurring additions (deterministic, fail-closed)
 
+Recurring due dates use Saturday–Friday shopping weeks in Europe/Athens.
+A weekly purchase becomes due the following Saturday; an N-week cadence becomes
+due N weeks after the Saturday starting its purchase week. Weekend orders count
+for the coming Monday. Only completed-order history advances cadence, not cart
+prefill. Never replan or close an active run automatically to apply this rule.
+
+**Unavailable recurring items:** record fresh product-page unavailability. Use a
+listed policy-approved alternative when its fresh stock/price facts pass preflight;
+otherwise skip that item and continue the other safe additions. Preflight returns
+structured `product_candidates` (primary ID, candidate ID and stored canonical URL)
+and `unresolved_candidates` (approved IDs without a registered URL or blocked by
+policy, with a reason); use these identities, not the human `substitution_proposals`
+rationale strings. Only run-known identities (primaries and policy-approved
+alternatives) may be excluded as unavailable; any other missing line is still drift.
+The final report lists unavailable products, selected alternatives and skipped items.
+
+This also covers a previously verified item becoming unavailable during prefill.
+Bind its checkout name/brand to its product-page identity and confirm unavailable
+stock there. Exclude that line from buyable cart credit without inventing a
+quantity, classifying it as an owner removal or erasing the earlier addition.
+Recurring preflight/readback/resume may accept this evidenced loss; other cart
+changes still stop. If the just-written target becomes unavailable before its
+quantity can be verified, stop with an unverified intent rather than claiming success.
+The recipe stage reads the same checkout rows: an already-unavailable recurring line
+is bound and confirmed the same way, but a line lost during the recipe stage stops.
+
 1. Read the entire current cart and rendered current product facts without a
    write. Emit `grossy.cart.observation.v1`; optional
    `recurring_product_facts` is a list of closed records containing only
@@ -321,8 +347,10 @@ Start Stage1: history sync, whole-cart baseline, owner-confirmed recurring addit
    revocation (`grossy weekly consent-revoke <run-id> recurring`) stops all
    further writes immediately; readback of a pending intent remains possible.
 4. Immediately re-read cart/facts and rerun recurring-preflight. If the proposed
-   delta or facts changed, stop for review (the consent does not authorize a
-   changed manifest). Use only the newly accepted exact manifest (one addition
+   delta or facts changed, stop for review, except for fresh stock changes and
+   newly read approved alternatives: prepare again without intent or click, then
+   require two agreeing preflights. Price changes still stop. Use only the newly
+   accepted exact manifest (one addition
    maximum), including its `schema_name: grossy.cart.mutation-manifest.v1`,
    strict version `1`, timezone-aware `generated_at`, `run_id`, `stage: recurring`,
    `preflight_checksum`, `additions`, and `checksum`. Each addition has only
@@ -367,7 +395,8 @@ Start Stage1: history sync, whole-cart baseline, owner-confirmed recurring addit
 
 - Another run is active → fail.
 - History sync failure → stop before cart mutation.
-- Unexpected cart change before mutation → enter `needs-attention`.
+- Unexpected cart change before mutation → enter `needs-attention`; freshly
+  confirmed unavailable-line loss follows the bounded recurring rule above.
 - Product unavailable or ambiguous → skip and report.
 - Hard price limit exceeded → block affected addition.
 

@@ -142,8 +142,14 @@ def infer_recurrence(order_dates: Sequence[str]) -> RecurrenceInference:
 
 
 def family_due_date(last_purchase_date: str, recurrence_weeks: int) -> date:
-    """The date a family becomes due (FR-49): last purchase + recurrence weeks."""
-    return date.fromisoformat(last_purchase_date) + timedelta(weeks=recurrence_weeks)
+    """Due Saturday, N shopping weeks after the purchase's Saturday–Friday week.
+
+    Calendar dates are local to Europe/Athens. Anchor to an actual Saturday,
+    not a week-of-year number, so multi-week cadences also cross years safely.
+    """
+    purchased = date.fromisoformat(last_purchase_date)
+    shopping_week_start = purchased - timedelta(days=(purchased.weekday() - 5) % 7)
+    return shopping_week_start + timedelta(weeks=recurrence_weeks)
 
 
 def is_family_due(

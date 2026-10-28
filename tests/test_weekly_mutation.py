@@ -991,3 +991,147 @@ def test_stale_policy_invalid_pending_observe_rejects_atomically(
         observe(home, run_id, cart)
     assert {table: rows(home, f"SELECT * FROM {table}") for table in before} == before
     assert all(p.read_bytes() == content for p, content in reports.items())
+
+
+def unavailable_observation(quantities: dict[str, int], pid: str = "111") -> dict[str, Any]:
+    data = observation(quantities)
+    fact = next(f for f in data["recurring_product_facts"] if f["product_id"] == pid)
+    fact.update(availability="unavailable", displayed_price_eur=None)
+    return data
+
+
+@pytest.mark.parametrize("fallback", [True, False])
+def test_verified_item_becomes_unavailable_other_items_finish(
+    home: GrossyPaths, fallback: bool
+) -> None:
+    if fallback:
+        config = yaml.safe_load(home.config_file.read_text())
+        config["staples"]["breakfast"][0].update(
+            allow_substitution=True, approved_alternative_product_ids=["333"]
+        )
+        home.config_file.write_text(yaml.safe_dump(config))
+        run_product_register(home, url("333"))
+    run_id = prepare(home, {"999": 8})
+    first = run_recurring_preflight(home, run_id, observation({"999": 8}))["manifest"]
+    assert first["additions"][0]["product_id"] == "111"
+    run_recurring_intent(home, run_id, first)
+    verified = observation({"111": 3, "999": 8})
+    verified["mutation_result"] = {"manifest_checksum": first["checksum"], "outcome": "readback"}
+    assert run_recurring_observe(home, run_id, verified)["status"] == "success"
+    previous = rows(home, "SELECT observed_json FROM run_mutation_observations")
+
+    quantities = {"999": 8}
+    added = []
+    for _ in range(4):
+        data = unavailable_observation(quantities)
+        prepared = run_recurring_preflight(home, run_id, data)
+        candidates = prepared["product_candidates"]
+        if fallback:
+            assert {
+                "primary_product_id": "111",
+                "product_id": "333",
+                "canonical_url": url("333"),
+            } in candidates
+        manifest = prepared["manifest"]
+        run_recurring_intent(home, run_id, manifest)
+        if not manifest["additions"]:
+            break
+        addition = manifest["additions"][0]
+        added.append(addition["product_id"])
+        quantities[addition["product_id"]] = addition["quantity"]
+        data = unavailable_observation(quantities)
+        data["mutation_result"] = {"manifest_checksum": manifest["checksum"], "outcome": "readback"}
+        assert run_recurring_observe(home, run_id, data)["status"] == "success"
+    else:
+        pytest.fail("recurring stage did not finish")
+    assert set(added) == ({"333", "222"} if fallback else {"222"})
+    assert (
+        rows(home, "SELECT observed_json FROM run_mutation_observations")[: len(previous)]
+        == previous
+    )
+    report = json.loads((home.run_dir(run_id) / "report.json").read_text())
+    assert report["recurring_unavailable_product_ids"] == ["111"]
+    if fallback:
+        assert report["recurring_substitutions"] == {"111": "333"}
+    else:
+        assert any(
+            d["product_id"] == "111" and d["status"].startswith("skipped")
+            for d in report["recurring_preflight_decisions"]
+        )
+    assert "unavailable" in (home.run_dir(run_id) / "report.md").read_text()
+
+
+@pytest.mark.parametrize("problem", ["unknown", "stale", "incomplete", "unrelated-drift"])
+def test_unavailable_does_not_waive_evidence_or_other_cart_drift(
+    home: GrossyPaths, problem: str
+) -> None:
+    run_id = prepare(home)
+    data = unavailable_observation({"999": 8})
+    if problem == "unknown":
+        data["recurring_product_facts"][0]["availability"] = "unknown"
+    elif problem == "stale":
+        data["generated_at"] = (datetime.now(UTC) - timedelta(minutes=6)).isoformat()
+    elif problem == "incomplete":
+        data["mutation_result"] = {"manifest_checksum": "a" * 64, "outcome": "incomplete"}
+    else:
+        data["lines"][0]["quantity"] = 7
+    with pytest.raises(WeeklyPlanError):
+        run_recurring_preflight(home, run_id, data)
+    assert not rows(home, "SELECT id FROM run_mutation_manifests")
+
+
+def test_unavailable_fact_for_non_recurring_line_is_still_drift(home: GrossyPaths) -> None:
+    """Only run-known recurring identities may be forgiven; an owner/baseline line is not."""
+    run_id = prepare(home, {"999": 8})
+    data = observation({})
+    data["recurring_product_facts"].append(
+        {
+            "product_id": "999",
+            "canonical_url": url("999"),
+            "displayed_price_eur": None,
+            "availability": "unavailable",
+        }
+    )
+    with pytest.raises(WeeklyPlanError, match="needs-attention|unexpected cart change"):
+        run_recurring_preflight(home, run_id, data)
+
+
+def test_preflight_reports_unregistered_alternatives_as_unresolved(home: GrossyPaths) -> None:
+    config = yaml.safe_load(home.config_file.read_text())
+    config["staples"]["breakfast"][0].update(
+        allow_substitution=True, approved_alternative_product_ids=["333"]
+    )
+    home.config_file.write_text(yaml.safe_dump(config))
+    run_id = prepare(home, {"999": 8})
+    prepared = run_recurring_preflight(home, run_id, observation({"999": 8}))
+    assert {"primary_product_id": "111", "product_id": "333", "reason": "unregistered-product"} in (
+        prepared["unresolved_candidates"]
+    )
+    assert "333" not in {c["product_id"] for c in prepared["product_candidates"]}
+
+
+def test_readback_allows_unrelated_unavailable_but_not_unverified_target(home: GrossyPaths) -> None:
+    run_id = prepare(home, {"111": 3, "999": 8})
+    manifest = run_recurring_preflight(home, run_id, observation({"111": 3, "999": 8}))["manifest"]
+    assert manifest["additions"][0]["product_id"] == "222"
+    run_recurring_intent(home, run_id, manifest)
+    data = unavailable_observation({"222": 1, "999": 8})
+    data["mutation_result"] = {"manifest_checksum": manifest["checksum"], "outcome": "readback"}
+    assert run_recurring_observe(home, run_id, data)["status"] == "success"
+
+
+def test_unavailable_written_target_is_not_verified(home: GrossyPaths) -> None:
+    run_id = prepare(home, {"999": 8})
+    manifest = run_recurring_preflight(home, run_id, observation({"999": 8}))["manifest"]
+    run_recurring_intent(home, run_id, manifest)
+    data = unavailable_observation({"999": 8})
+    data["mutation_result"] = {"manifest_checksum": manifest["checksum"], "outcome": "readback"}
+    assert run_recurring_observe(home, run_id, data)["status"] == "error"
+
+
+def test_resume_accepts_fresh_unavailable_without_replaying_writes(home: GrossyPaths) -> None:
+    run_id = prepare(home)
+    prepared = run_resume_prepare(home, run_id, unavailable_observation({"999": 8}))
+    assert prepared["status"] == "accepted"
+    assert prepared["manifest"]["additions"][0]["product_id"] == "222"
+    assert not rows(home, "SELECT id FROM run_mutation_manifests")

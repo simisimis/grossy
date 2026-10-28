@@ -214,27 +214,58 @@ def test_infer_recurrence(
 
 
 class TestDueDateEuropeAthens:
-    def test_due_date_is_last_purchase_plus_weeks(self) -> None:
-        assert family_due_date("2026-09-13", 1) == date(2026, 9, 20)
-        assert family_due_date("2026-09-13", 2) == date(2026, 9, 27)
+    @pytest.mark.parametrize(
+        "purchased,weeks,expected",
+        [
+            ("2026-09-12", 1, date(2026, 9, 19)),  # Saturday
+            ("2026-09-13", 1, date(2026, 9, 19)),  # Sunday
+            ("2026-09-14", 1, date(2026, 9, 19)),  # Monday
+            ("2026-09-17", 1, date(2026, 9, 19)),  # Thursday
+            ("2026-09-18", 1, date(2026, 9, 19)),  # Friday
+            ("2026-09-13", 2, date(2026, 9, 26)),
+            ("2026-12-31", 2, date(2027, 1, 9)),
+        ],
+    )
+    def test_due_date_uses_saturday_shopping_weeks(
+        self, purchased: str, weeks: int, expected: date
+    ) -> None:
+        assert family_due_date(purchased, weeks) == expected
 
     @pytest.mark.parametrize(
         "today,due",
-        [(date(2026, 9, 19), False), (date(2026, 9, 20), True), (date(2026, 9, 21), True)],
+        [
+            (date(2026, 10, 30), False),
+            (date(2026, 10, 31), True),
+            (date(2026, 11, 1), True),
+        ],
+    )
+    def test_bananas_due_next_shopping_week_after_wednesday_purchase(
+        self, today: date, due: bool
+    ) -> None:
+        assert is_family_due("2026-10-28", 1, today=today) is due
+
+    @pytest.mark.parametrize(
+        "today,due",
+        [(date(2026, 11, 6), False), (date(2026, 11, 7), True)],
+    )
+    def test_two_week_cadence_skips_one_shopping_week(self, today: date, due: bool) -> None:
+        assert is_family_due("2026-10-28", 2, today=today) is due
+
+    @pytest.mark.parametrize(
+        "today,due",
+        [(date(2026, 9, 18), False), (date(2026, 9, 19), True), (date(2026, 9, 20), True)],
         ids=["before-boundary", "on-boundary", "after-boundary"],
     )
     def test_due_when_today_reaches_boundary(self, today: date, due: bool) -> None:
-        """FR-49: due when the current date >= last purchase + recurrence weeks."""
+        """Due when the Athens date reaches the next shopping-week boundary."""
         assert is_family_due("2026-09-13", 1, today=today) is due
 
     def test_default_today_uses_athens_calendar_date(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # A fixed UTC instant whose HOST date is 2026-09-19 but whose Athens
-        # date (UTC+3) is 2026-09-20. The due date is 2026-09-20, so the
-        # result must be True: it proves the Europe/Athens date, not the host
-        # UTC date, drives the comparison.
+        # Friday UTC is already Saturday in Athens: the shopping-week
+        # boundary must use the Athens date, not the host's UTC date.
         from datetime import datetime as real_datetime
 
-        fixed_instant = real_datetime(2026, 9, 19, 23, 0, tzinfo=UTC)
+        fixed_instant = real_datetime(2026, 9, 18, 23, 0, tzinfo=UTC)
 
         class _FakeDatetime:
             @staticmethod

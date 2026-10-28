@@ -57,6 +57,19 @@ If the owner closed the window, `live_common.browser` relaunches Brave with the
 profile only when every remaining tab is `about:blank`. `start` rebinds the
 previously bound tab when it still exists, even if the owner opened other tabs.
 
+Recurring stock changes: recognize checkout rows with See Alternatives and no
+quantity input, then confirm unavailability on the identity-bound product page.
+Record unavailable stock without inventing quantity; try the structured preflight
+`product_candidates` alternatives, or skip and continue other safe products.
+Keep earlier verified additions in audit history. Final reports include unavailable,
+substituted and skipped items. An unavailable just-written target still stops with
+unverified readback; unrelated drift, conflicting prices and ambiguous identities
+still stop. Action artifact numbers do not depend on cart line count, so losing an
+unavailable line cannot overwrite an earlier intent. Both prefill loops share
+`cart_bind.checkout_rows` and the pure `recurring_cart` reconciliation; the recipe
+loop binds a pre-existing unavailable row the same way but stops if a buyable line
+disappears after the recipe anchor.
+
 Owner edits are only accepted at the basket-review barrier. A cart that changes
 between `stage1` baseline and the `recurring` loop puts the run in
 `needs-attention`, and neither preflight nor resume-prepare accepts it: abandon
