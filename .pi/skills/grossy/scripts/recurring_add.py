@@ -2,6 +2,12 @@
 import sys, json, re, time, datetime; sys.path.insert(0, __import__("os").path.dirname(__import__("os").path.abspath(__file__)))
 import live_common as drill, cart_bind, recurring_cart
 from live_common import stop, write, D
+from slot_gate import require_ready
+
+try:
+    require_ready(D)
+except ValueError as exc:
+    stop(str(exc))
 
 RUN = json.load(open(D/"plan-prepare.json"))["run_id"]
 INIT = {r["product_id"]: r for r in json.load(open(D/"recurring-readings.json"))}

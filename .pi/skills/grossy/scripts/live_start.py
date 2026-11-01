@@ -1,9 +1,15 @@
 """Create a private live work directory, point live-current.txt at it, and launch/bind the task-owned headed Brave tab.
 
-Usage: live_start.py [--reuse]   (--reuse keeps the current work directory and only (re)binds the browser tab)
+Usage: live_start.py [--reuse] [--history-only]
+Default weekly start pauses for manual delivery-slot selection; --history-only is for standalone history sync.
+--reuse preserves this work directory's readiness state and only (re)binds the browser tab.
 Read-only: opens the owner-verified order-history overview route. Never adopts a tab the agent did not open.
 """
 import datetime, json, os, pathlib, subprocess, sys
+from slot_gate import initialize, load
+
+if set(sys.argv[1:]) - {'--reuse', '--history-only'}:
+    print('STOP: usage: live.sh start [--reuse] [--history-only]', flush=True); sys.exit(1)
 
 os.umask(0o077)
 BASE = pathlib.Path(os.environ.get('XDG_STATE_HOME', str(pathlib.Path.home()/'.local/state')))/'grossy'
@@ -23,6 +29,10 @@ else:
     D = BASE/('live-weekly-'+datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ'))
     D.mkdir(mode=0o700)
     PTR.write_text(str(D)+'\n'); PTR.chmod(0o600)
+try:
+    initialize(D, history_only='--history-only' in sys.argv, reuse='--reuse' in sys.argv)
+except ValueError as exc:
+    print('STOP:', exc, flush=True); sys.exit(1)
 # One headed Brave per profile: a new work dir keeps the previous session name so a live tab can be rebound.
 SESSION = (D/'session.txt').read_text().strip() if (D/'session.txt').exists() else (prev_session or 'grossy-live-'+D.name[-16:])
 (D/'session.txt').write_text(SESSION+'\n')
@@ -51,3 +61,8 @@ else:
     target = t[0]['targetId']; print('launched headed Brave with the Grossy profile')
 (D/'task-tab-target.json').write_text(json.dumps({'target_id': target}))
 print('work dir:', D); print('session:', SESSION); print('task tab bound')
+if '--history-only' not in sys.argv:
+    if load(D)['status'] == 'awaiting-owner':
+        print('PAUSE: select your delivery day/time slot manually in Brave, then report "slot selected". No history, availability checks or prefill yet.')
+    else:
+        print('Owner-reported slot readiness preserved for this work directory; stop if the slot changed.')

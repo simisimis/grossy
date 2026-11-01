@@ -8,6 +8,12 @@ import sys, json, os; sys.path.insert(0, os.path.dirname(os.path.abspath(__file_
 import live_common as drill, cart_bind
 from live_common import stop, write, D
 from decimal import Decimal
+from slot_gate import require_ready
+
+try:
+    require_ready(D)
+except ValueError as exc:
+    stop(str(exc))
 
 # Known product identities (URL + title) from every earlier live work directory: used to bind cart lines and read facts.
 URLS, KNOWN = {}, {}

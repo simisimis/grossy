@@ -21,6 +21,13 @@ automatic expansion of this smoke allowance.
   no competing writer/active run, verified private backup/export available.
 - User manually authenticates headed Brave using the existing private profile.
   Do not type credentials/2FA, copy profile state, or retain login-page evidence.
+- Before any weekly availability checks/prefill, the owner manually selects the
+  delivery day/time in headed Brave and explicitly reports readiness. The agent
+  must pause while they do so; it never selects the slot or inspects private
+  fulfilment details. Normal scripted weekly starts require `live.sh slot-ready`
+  after that report, not before. Readiness is owner-attested, not live-verified,
+  and does not expand this smoke's mutation bounds. A later slot change stops the
+  workflow for separate review and fresh evidence.
 - Review due requests and accepted local recipes before the live sequence. Arrange
   a safe scope with exactly **one missing recurring product action** and exactly
   **one missing selected-recipe product action**. One action may add a positive

@@ -8,6 +8,12 @@ No browser use.
 import sys, json, os, hashlib; sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import live_common as drill
 from live_common import stop, write, D
+from slot_gate import require_ready
+
+try:
+    require_ready(D)
+except ValueError as exc:
+    stop(str(exc))
 
 RUN = json.load(open(D/"plan-prepare.json"))["run_id"]
 def checksum(p):

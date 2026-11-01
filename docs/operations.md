@@ -136,9 +136,25 @@ or `grossy history sync` commands:
 ```
 
 The coordinator executes these through the scripted steps in
-`.pi/skills/grossy/scripts/` (`live.sh start|history|stage1|recurring|advance|
-recipes|matches|recipe-add|status`); see that directory's README for the
+`.pi/skills/grossy/scripts/` (`live.sh start|slot-ready|history|stage1|recurring|
+advance|recipes|matches|recipe-add|status`); see that directory's README for the
 phase mapping and the private work-directory layout.
+
+Every new weekly plan begins with `live.sh start` and a mandatory pause. The
+owner selects the delivery day/time manually in Brave, then reports "slot
+selected". The coordinator ends its turn and performs no further browser work,
+history sync, availability checks or prefill until that report; AB.gr stock can
+appear unavailable without a delivery slot. Only then run `live.sh slot-ready`
+and continue with fresh history/cart/product observations. `--skip-history-sync`
+does not skip this barrier. No delivery date/time arguments are necessary.
+The agent never selects a slot or reads private fulfilment details. The private
+0600 receipt records only owner readiness, not rendered verification or consent.
+New work directories require a new handoff; `start --reuse` preserves readiness
+for the same directory only. A slot change after planning starts requires stopping
+for separate recovery review, not reusing facts or automatically abandoning the
+run. Legacy prepared directories without a receipt also require review; never
+fabricate retrospective readiness. Standalone history sync uses
+`start --history-only`, which cannot unlock weekly preparation/prefill.
 
 Class lists use meat,fish,poultry,vegetarian; slots use recipe1..recipe4.
 `all` includes every persisted nonempty slot, not a default recommendation.

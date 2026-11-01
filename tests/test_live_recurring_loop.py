@@ -158,6 +158,22 @@ def test_loop_finishes_after_verified_salad_becomes_unavailable(
     monkeypatch.syspath_prepend(
         str(Path(__file__).resolve().parents[1] / ".pi/skills/grossy/scripts")
     )
+    slot_gate = runpy.run_path(
+        str(Path(__file__).resolve().parents[1] / ".pi/skills/grossy/scripts/slot_gate.py")
+    )
+
+    # The owner handoff precedes planning in real workflows; seed its private
+    # receipt here without reading or changing any delivery-slot details.
+    slot_gate["save"](
+        work,
+        {
+            "schema_name": slot_gate["SCHEMA"],
+            "schema_version": 1,
+            "mode": "weekly",
+            "status": "owner-confirmed",
+            "confirmed_at": now(),
+        },
+    )
     runpy.run_path(
         str(Path(__file__).resolve().parents[1] / ".pi/skills/grossy/scripts/recurring_add.py")
     )

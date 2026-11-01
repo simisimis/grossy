@@ -8,6 +8,12 @@ order-scan.json, scan-validate.json, sync-apply.json. Private: never print sourc
 import sys, json, re, time, os; sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import live_common as drill
 from live_common import stop, write, D
+from slot_gate import require_ready
+
+try:
+    require_ready(D, history=True)
+except ValueError as exc:
+    stop(str(exc))
 
 DRY = '--dry-run' in sys.argv
 ORDERS_URL = 'https://www.ab.gr/customerhub/quick-shop/orders'

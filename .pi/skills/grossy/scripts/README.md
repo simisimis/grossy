@@ -19,7 +19,9 @@ print source order IDs or URLs; counts only.
 
 | Step | Script | Effect |
 | --- | --- | --- |
-| `start [--reuse]` | `live_start.py` | New 0700 work dir, pointer file, headed Brave with the Grossy profile pinned on the order-history overview. `--reuse` only rebinds the tab. |
+| `start [--reuse]` | `live_start.py` | New 0700 work dir, pointer file, headed Brave pinned on the order-history overview, pending manual-slot receipt. `--reuse` rebinds and preserves this directory's readiness state. |
+| *(owner selects delivery day/time manually; agent ends turn and waits)* | | No further browser activity, history sync, availability checks or prefill. |
+| `slot-ready` | `slot_ready.py` | Only after the owner's explicit "slot selected" report: record readiness locally without inspecting slot details or touching the browser/cart. |
 | `history [--dry-run]` | `history_sync.py` | discover-prepare, six dated controls, listed proposal, sync-dry-run, scan-prepare, bounded scan of unknown orders, scan-validate, sync-apply. |
 | `stage1 [--skip-history-sync]` | `plan_stage1.py` | plan-prepare, identity-bound whole-cart baseline, baseline-apply, recurring facts (alternatives for unavailable primaries), first recurring-preflight summary. |
 | `recurring [max]` | `recurring_add.py` | Recurring prefill loop under stage consent: reread, preflight twice, intent, action-check, one click, identity-bound readback, recurring-observe; ends with the zero-addition intent (`awaiting-basket-review`). |
@@ -33,11 +35,23 @@ print source order IDs or URLs; counts only.
 | `grossy weekly finish <run-id>` | | Local closure after the owner reviewed the cart. |
 | `status` | `status.py` | Work dir, run id, lifecycle, verified quantities, pending-intent markers. |
 
+Standalone history sync uses `start --history-only` then `history [--dry-run]`;
+that mode cannot authorize weekly preparation or prefill. Weekly history, stage1,
+recurring, advance, recipes, matches and recipe-add fail before phase/browser
+activity unless the private
+`delivery-slot-readiness.json` receipt is confirmed. It stores no delivery details.
+New work directories never inherit readiness; malformed/missing receipts fail closed.
+`slot-ready` refuses confirmation after plan-prepare, preventing a slot change
+from silently reusing earlier stock/price facts. Stop for separate review for a
+changed slot or a legacy prepared run lacking a receipt; do not fabricate one.
+Slot readiness is owner-attested, not browser-verified, and is not mutation consent.
+
 Other CLI phases (reroll-apply, abandon, consent-revoke, removal-*) run with
 `live.sh grossy weekly ...`.
 
 ## Shared modules
 
+- `slot_gate.py`: private readiness validation and atomic 0600 owner-attestation receipt; no browser/SQLite access.
 - `live_common.py`: exact task-tab binding with `--pin-tab`, origin/CAPTCHA/login
   guard on every `eval`, boolean-only readiness waits, product-page reader
   (`product`, `recipe_fact`), read-only checkout reader, `grossy` phase runner,
@@ -73,7 +87,8 @@ disappears after the recipe anchor.
 Owner edits are only accepted at the basket-review barrier. A cart that changes
 between `stage1` baseline and the `recurring` loop puts the run in
 `needs-attention`, and neither preflight nor resume-prepare accepts it: abandon
-the run and re-plan (`start`, `history`, `stage1`, `recurring`); the new
+the run and re-plan (`start`, manual slot selection, owner report, `slot-ready`,
+`history`, `stage1`, `recurring`); the new
 baseline binds the current cart and credits the edits. Learned family
 recurrence is recomputed by every history sync; pin cadences the owner cares
 about with `grossy history set-recurrence <family> --weeks N` between runs.

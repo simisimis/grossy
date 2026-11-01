@@ -69,8 +69,8 @@ report, never bypass it.
 
 | Skill command | Script steps |
 | --- | --- |
-| `history sync [--dry-run]` | `live.sh start`, then `live.sh history [--dry-run]` |
-| `weekly plan` | `start` → `history` → `stage1` → `recurring` → **stop for basket review** → `advance` → `recipes` → write matches spec → `matches <spec>` → **present options, wait for the owner's pick** |
+| `history sync [--dry-run]` | `live.sh start --history-only`, then `live.sh history [--dry-run]` |
+| `weekly plan` | `start` → **stop for owner's manual delivery-slot selection** → `slot-ready` (only after owner reports ready) → `history` → `stage1` → `recurring` → **stop for basket review** → `advance` → `recipes` → write matches spec → `matches <spec>` → **present options, wait for the owner's pick** |
 | `weekly add <run-id> <list>` | `live.sh recipe-add <list>` (runs `selection-apply` with the owner's exact choice) |
 | `weekly reroll`, `remove`, `finish`, `abandon`, `resume` | `live.sh grossy weekly ...` for the CLI phase; browser reads for resume/removal use the shared modules |
 | any time | `live.sh status` |
@@ -165,12 +165,33 @@ Synchronize the six currently observable dated AB.gr orders.
 
 ### `weekly plan [--skip-history-sync]`
 
-Start Stage1: history sync, whole-cart baseline, owner-confirmed recurring additions/readback, then read-only recipe options.
+Start Stage1: manual delivery-slot handoff, history sync, whole-cart baseline,
+recurring additions/readback, then read-only recipe options.
 
-**Phase sequence:**
+**Mandatory delivery-slot barrier (also with `--skip-history-sync`):**
+Run `live.sh start` to open headed Brave, then end the turn and ask the owner to
+select the delivery day/time manually and report "slot selected". Do not navigate
+again, sync history, read availability or prefill while the owner selects it.
+AB.gr can show buyable items as unavailable before a slot is selected. Never
+select a slot, click its controls, inspect fulfilment/account/payment details,
+or assume a saved slot is ready. No date/time argument is needed.
+Only after the owner's explicit readiness report, run `live.sh slot-ready`,
+then continue below with fresh observations. The private work-directory receipt
+records owner attestation only, not rendered slot verification or cart consent.
+Never run `slot-ready` automatically after `start`, copy a receipt from another
+work directory, or use `--history-only` to bypass this weekly barrier. New starts
+require a new handoff; `start --reuse` preserves the same directory's state.
+A changed slot after planning starts requires stopping for separately approved
+recovery; never reuse earlier stock/price facts or silently abandon/replan.
+Legacy work directories without a readiness receipt stop for separate review;
+do not fabricate retrospective confirmation for an already-prepared run.
 
-1. Unless `--skip-history-sync` is explicit, execute `history sync` (see above),
-   retaining the validated listed-orders proposal. Stop on any failure.
+**Phase sequence (after owner readiness):**
+
+1. Unless `--skip-history-sync` is explicit, run `live.sh history` in the current
+   work directory, retaining the validated listed-orders proposal. Do not run
+   `start` again or invoke the standalone history-sync workflow: that creates a
+   new work directory and loses the owner's slot-readiness handoff. Stop on any failure.
 2. `grossy weekly plan-prepare --listed-orders <listed-proposal.json>`, or
    `grossy weekly plan-prepare --skip-history-sync` for an explicit skip.
    Local history alone is not comparison evidence. These CLI phases never browse.

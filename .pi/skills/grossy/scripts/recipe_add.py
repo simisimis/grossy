@@ -7,6 +7,12 @@ Never run without the owner's dinner selection. One click per persisted+checked 
 import sys, json, time, os; sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import live_common as drill, cart_bind, recurring_cart
 from live_common import stop, write, D
+from slot_gate import require_ready
+
+try:
+    require_ready(D)
+except ValueError as exc:
+    stop(str(exc))
 
 RUN = json.load(open(D/"plan-prepare.json"))["run_id"]
 args = [a for a in sys.argv[1:]]
