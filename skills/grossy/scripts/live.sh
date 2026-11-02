@@ -15,7 +15,7 @@
 #   live.sh grossy <args...>           any grossy CLI command in the same shell (finish, abandon, reroll-apply ...)
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO="$(cd "$HERE/../../../.." && pwd)"
+REPO="$(cd "$HERE/../../.." && pwd)"
 STEP="${1:-}"; [ $# -gt 0 ] && shift
 run() { exec nix develop --offline --no-write-lock-file "$REPO" -c "$@"; }
 case "$STEP" in

@@ -7,7 +7,7 @@ supervised browser work. The CLI does not launch a browser.
 ## Start here
 
 - Read [README.md](README.md) and [operations](docs/operations.md).
-- For grocery/browser operations, load [the Grossy skill](.pi/skills/grossy/SKILL.md).
+- For grocery/browser operations, load [the Grossy skill](skills/grossy/SKILL.md).
   Follow [the bounded smoke runbook](docs/smoke-test.md) for live verification.
 - For implementation, inspect the requested task and relevant source/tests before
   editing. Keep changes within that task; preserve existing working-copy changes.
@@ -61,7 +61,7 @@ Python/PATH settings; do not use ambient host/venv fallbacks.
 - `weekly/`: baseline, four stable recipe slots, selection and cart reconciliation.
 - `browser/`, `doctor.py`, `security.py`: abstract/fake browser boundary,
   diagnostics and sanitization. No concrete live browser adapter exists in Python.
-- `skill.py` and `.pi/skills/grossy/SKILL.md`: validated operational invocation
+- `skill.py` and `skills/grossy/SKILL.md`: validated operational invocation
   helpers and coordinator workflow instructions.
 - `tests/`: offline regressions, runtime command/skill parity and Nix provenance.
 

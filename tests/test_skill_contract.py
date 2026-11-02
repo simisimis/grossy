@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-SKILL_PATH = Path(__file__).resolve().parents[1] / ".pi" / "skills" / "grossy" / "SKILL.md"
+SKILL_PATH = Path(__file__).resolve().parents[1] / "skills" / "grossy" / "SKILL.md"
 
 
 @pytest.fixture(scope="module")

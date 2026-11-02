@@ -7,8 +7,8 @@ description: Safely run Grossy grocery-history, recipe-planning, and weekly-shop
 
 ## Operator guidance and bounded verification
 
-See [operations](../../../docs/operations.md) and
-[supervised smoke](../../../docs/smoke-test.md). Live work is coordinator-owned;
+See [operations](../../docs/operations.md) and
+[supervised smoke](../../docs/smoke-test.md). Live work is coordinator-owned;
 workers/reviewers must not execute any live browser operation.
 
 **Owner preference (2026-10-07): add, don't ask.** Prefill the basket directly.
@@ -60,7 +60,7 @@ against arbitrary shell changes or a network firewall.
 
 The verified browser procedures and CLI phase sequences below are implemented
 as deterministic scripts in [scripts/](scripts/README.md). Run them through
-`.pi/skills/grossy/scripts/live.sh <step>` from the repository; each step runs
+`skills/grossy/scripts/live.sh <step>` from the repository; each step runs
 inside the Nix shell, writes private artifacts to the work directory named in
 `~/.local/state/grossy/live-current.txt`, and stops with `STOP: <reason>` on any
 fail-closed condition. Do not re-derive page procedures from the prose when a

@@ -6,7 +6,7 @@ the skill's Observation Protocol, so a weekly run does not have to be rebuilt
 from the prose. Run everything through `live.sh` from any directory:
 
 ```sh
-.pi/skills/grossy/scripts/live.sh <step> [args]
+skills/grossy/scripts/live.sh <step> [args]
 ```
 
 Each step executes inside the repository Nix shell. Private artifacts go to the

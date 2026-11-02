@@ -16,7 +16,7 @@ from typer.main import get_command
 
 from grossy.cli import app
 
-SKILL_PATH = Path(__file__).resolve().parents[1] / ".pi/skills/grossy/SKILL.md"
+SKILL_PATH = Path(__file__).resolve().parents[1] / "skills/grossy/SKILL.md"
 
 
 def _leaves(command: click.Command, prefix: str = "") -> dict[str, click.Command]:

@@ -6,8 +6,19 @@ supervised rendered-browser actions. No CLI command launches a browser.
 
 - [Setup, commands, corrections and recovery](docs/operations.md)
 - [Coordinator-owned, bounded smoke verification](docs/smoke-test.md)
-- Skill contract: [`.pi/skills/grossy/SKILL.md`](.pi/skills/grossy/SKILL.md)
+- Skill contract: [`skills/grossy/SKILL.md`](skills/grossy/SKILL.md)
 - Coding-agent instructions: [`AGENTS.md`](AGENTS.md)
+
+## Skill layout
+
+The canonical Agent Skills directory is `skills/grossy/`, with `SKILL.md` and its
+supporting scripts together. Pi discovers it through `.pi/settings.json`; resource
+paths there resolve relative to `.pi/`. Start Pi from the repository root and
+invoke `/skill:grossy`. Pi loads project settings only when project trust is
+granted. Other compatible agents can load the same skill directory using their
+own discovery configuration; `/skill:grossy` is Pi syntax.
+The workflow still requires this repository's Nix shell, Grossy CLI and approved
+headed-browser setup; moving the skill does not make it a standalone application.
 
 ## Nix development shell
 

@@ -136,7 +136,7 @@ or `grossy history sync` commands:
 ```
 
 The coordinator executes these through the scripted steps in
-`.pi/skills/grossy/scripts/` (`live.sh start|slot-ready|history|stage1|recurring|
+`skills/grossy/scripts/` (`live.sh start|slot-ready|history|stage1|recurring|
 advance|recipes|matches|recipe-add|status`); see that directory's README for the
 phase mapping and the private work-directory layout.
 

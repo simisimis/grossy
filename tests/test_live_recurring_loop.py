@@ -155,11 +155,9 @@ def test_loop_finishes_after_verified_salad_becomes_unavailable(
     monkeypatch.setitem(sys.modules, "live_common", drill)
     monkeypatch.setitem(sys.modules, "cart_bind", binding)
     monkeypatch.setattr(sys, "argv", ["recurring_add.py", "20"])
-    monkeypatch.syspath_prepend(
-        str(Path(__file__).resolve().parents[1] / ".pi/skills/grossy/scripts")
-    )
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "skills/grossy/scripts"))
     slot_gate = runpy.run_path(
-        str(Path(__file__).resolve().parents[1] / ".pi/skills/grossy/scripts/slot_gate.py")
+        str(Path(__file__).resolve().parents[1] / "skills/grossy/scripts/slot_gate.py")
     )
 
     # The owner handoff precedes planning in real workflows; seed its private
@@ -175,7 +173,7 @@ def test_loop_finishes_after_verified_salad_becomes_unavailable(
         },
     )
     runpy.run_path(
-        str(Path(__file__).resolve().parents[1] / ".pi/skills/grossy/scripts/recurring_add.py")
+        str(Path(__file__).resolve().parents[1] / "skills/grossy/scripts/recurring_add.py")
     )
     assert clicks == (["111", "333", "222"] if fallback else ["111", "222"])
     assert quantities == (

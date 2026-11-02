@@ -13,7 +13,7 @@
 # source while third-party dependencies resolve from the Nix store.
 #
 # Operational targets are manual. They invoke the project Pi skill
-# (.pi/skills/grossy/SKILL.md); the deterministic Python process never
+# (skills/grossy/SKILL.md); the deterministic Python process never
 # contains an agent.
 
 default: check

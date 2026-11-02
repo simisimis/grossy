@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-SCRIPTS = Path(__file__).resolve().parents[1] / ".pi/skills/grossy/scripts"
+SCRIPTS = Path(__file__).resolve().parents[1] / "skills/grossy/scripts"
 spec = importlib.util.spec_from_file_location("recurring_cart", SCRIPTS / "recurring_cart.py")
 assert spec is not None and spec.loader is not None
 cart = importlib.util.module_from_spec(spec)
