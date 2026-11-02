@@ -87,11 +87,18 @@ def _make_project(tmp_path: Path, *, ordering_harness: bool = True) -> Path:
 
 
 def _run_just(
-    project: Path, tmp_path: Path, *args: str, fail_tool: str | None = None
+    project: Path,
+    tmp_path: Path,
+    *args: str,
+    fail_tool: str | None = None,
+    workers: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     log = _install_fake_tools(tmp_path)
     env = dict(os.environ)
     env.pop("PYTHONPATH", None)
+    env.pop("GROSSY_TEST_WORKERS", None)
+    if workers is not None:
+        env["GROSSY_TEST_WORKERS"] = workers
     env["PATH"] = f"{tmp_path / 'bin'}{os.pathsep}{env.get('PATH', '')}"
     env["FAKE_TOOL_LOG"] = str(log)
     if fail_tool:
@@ -129,7 +136,7 @@ def test_check_runs_all_quality_steps_in_order(tmp_path: Path) -> None:
         ("ruff", ["format", "--check", "src", "tests"]),
         ("ruff", ["check", "src", "tests"]),
         ("mypy", []),
-        ("python3", ["-m", "pytest"]),
+        ("python3", ["-m", "pytest", "-n", "auto"]),
     ]
 
 
@@ -158,7 +165,8 @@ def test_check_short_circuits_on_first_failure(
         ),
         ("lint", [("ruff", ["check", "src", "tests"])]),
         ("typecheck", [("mypy", [])]),
-        ("test", [("python3", ["-m", "pytest"])]),
+        ("test", [("python3", ["-m", "pytest", "-n", "auto"])]),
+        ("test-serial", [("python3", ["-m", "pytest", "-n", "0"])]),
     ],
 )
 def test_single_target_invokes_exactly_its_tools(
@@ -168,6 +176,39 @@ def test_single_target_invokes_exactly_its_tools(
     result = _run_just(project, tmp_path, target)
     assert result.returncode == 0, result.stderr
     assert _tool_invocations(tmp_path / "tool-args.log") == expected
+
+
+@pytest.mark.parametrize("target", ["test", "check"])
+@pytest.mark.parametrize("workers", ["0", "2", "auto", "2; touch SHOULD_NOT_EXIST"])
+def test_worker_override_is_passed_as_one_literal_argument(
+    tmp_path: Path, target: str, workers: str
+) -> None:
+    project = _make_project(tmp_path)
+    result = _run_just(project, tmp_path, target, workers=workers)
+    assert result.returncode == 0, result.stderr
+    assert _tool_invocations(tmp_path / "tool-args.log")[-1] == (
+        "python3",
+        ["-m", "pytest", "-n", workers],
+    )
+    assert not (project / "SHOULD_NOT_EXIST").exists()
+
+
+def test_cli_worker_override_takes_precedence_over_environment(tmp_path: Path) -> None:
+    project = _make_project(tmp_path)
+    result = _run_just(project, tmp_path, "test_workers=2", "test", workers="4")
+    assert result.returncode == 0, result.stderr
+    assert _tool_invocations(tmp_path / "tool-args.log") == [
+        ("python3", ["-m", "pytest", "-n", "2"])
+    ]
+
+
+def test_serial_target_ignores_parallel_environment(tmp_path: Path) -> None:
+    project = _make_project(tmp_path)
+    result = _run_just(project, tmp_path, "test-serial", workers="4")
+    assert result.returncode == 0, result.stderr
+    assert _tool_invocations(tmp_path / "tool-args.log") == [
+        ("python3", ["-m", "pytest", "-n", "0"])
+    ]
 
 
 def test_setup_rejects_venv_in_path(tmp_path: Path) -> None:
@@ -198,6 +239,7 @@ def test_setup_rejects_venv_in_path(tmp_path: Path) -> None:
         ("setup", []),
         ("check", []),
         ("test", []),
+        ("test-serial", []),
         ("format", []),
         ("lint", []),
         ("typecheck", []),

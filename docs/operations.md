@@ -25,6 +25,14 @@ Validate with:
 nix develop --offline --no-write-lock-file -c just check
 ```
 
+The pytest stage of `just check` and `just test` uses one pytest-xdist worker
+per CPU by default (`-n auto`). Inside the shell, use `just test_workers=2 check` to reduce
+concurrency, `just test-serial` for serial tests, or `just test_workers=0 check`
+for the full gate without worker processes. `GROSSY_TEST_WORKERS` sets the default;
+an explicit Just variable override takes precedence. Direct focused pytest
+commands stay serial unless passed `-n`. All modes retain private temporary state
+and the same Nix shell-provenance checks; none authorizes live operations.
+
 Enter `nix develop`, then use `grossy ...` for CLI commands below (the
 store-built executable, self-contained from the Nix store). Consult
 `grossy --help` and each subcommand's `--help` for argument details.

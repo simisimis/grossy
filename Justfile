@@ -16,6 +16,10 @@
 # (skills/grossy/SKILL.md); the deterministic Python process never
 # contains an agent.
 
+# pytest-xdist worker count: one per CPU by default. Override with
+# GROSSY_TEST_WORKERS or `just test_workers=2 check`; 0 runs serially.
+test_workers := env("GROSSY_TEST_WORKERS", "auto")
+
 default: check
 
 # Shared dependency: compare PATH tools to this project's declared shell closure.
@@ -54,13 +58,17 @@ typecheck: setup
 # Source-tree tests: PYTHONPATH points to the repository src/ so grossy
 # modules resolve from source while third-party deps come from the Nix store.
 test: setup
-    PYTHONPATH="$PWD/src" python3 -m pytest
+    PYTHONPATH="$PWD/src" python3 -m pytest -n {{ quote(test_workers) }}
+
+# Same complete suite without xdist worker processes, useful for debugging.
+test-serial: setup
+    PYTHONPATH="$PWD/src" python3 -m pytest -n 0
 
 check: setup
     ruff format --check src tests
     ruff check src tests
     mypy
-    PYTHONPATH="$PWD/src" python3 -m pytest
+    PYTHONPATH="$PWD/src" python3 -m pytest -n {{ quote(test_workers) }}
 
 # --- manual operational targets (PRD 16.2) ---
 

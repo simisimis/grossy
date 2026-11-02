@@ -922,6 +922,23 @@ def test_refresh_diff_upgrades_v6_with_backup_then_apply_retains_snapshot(
     assert new_snapshot["servings"] == 3.0
 
 
+def _hold_writer_lock(lock_path_str: str, ready_path_str: str) -> None:
+    """Spawned child: hold a private lock without forking an xdist worker's threads."""
+    import fcntl
+    import time
+
+    lock_path = Path(lock_path_str)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        os.write(fd, f"{os.getpid()}\n".encode())
+        Path(ready_path_str).touch(mode=0o600)
+        time.sleep(30)
+    finally:
+        os.close(fd)
+
+
 def test_refresh_diff_respects_writer_lock(env: tuple[Path, GrossyPaths]) -> None:
     """refresh-diff acquires the writer lock; a held lock causes failure.
 
@@ -936,38 +953,22 @@ def test_refresh_diff_respects_writer_lock(env: tuple[Path, GrossyPaths]) -> Non
 
     tmp_path, paths = env
 
-    def _hold_lock(lock_path_str: str, ready_path_str: str) -> None:
-        """Child process: acquire the writer lock and signal readiness."""
-        import fcntl
-        import os
-
-        lock_path = Path(lock_path_str)
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        os.write(fd, f"{os.getpid()}\n".encode())
-        Path(ready_path_str).touch()
-        # Hold the lock until killed (timeout safety)
-        time.sleep(30)
-
     ready_file = paths.state_dir / "writer.lock.ready"
     ready_file.unlink(missing_ok=True)
 
-    proc = multiprocessing.Process(
-        target=_hold_lock,
+    proc = multiprocessing.get_context("spawn").Process(
+        target=_hold_writer_lock,
         args=(str(paths.state_dir / "writer.lock"), str(ready_file)),
         daemon=True,
     )
     proc.start()
-    # Wait for the child to acquire the lock
-    deadline = time.monotonic() + 10
-    while not ready_file.exists():
-        if time.monotonic() > deadline:
-            proc.terminate()
-            pytest.fail("lock-holding subprocess did not start in time")
-        time.sleep(0.05)
-
     try:
+        # Wait for the child to acquire the lock; always clean it up on failure.
+        deadline = time.monotonic() + 10
+        while not ready_file.exists():
+            if not proc.is_alive() or time.monotonic() > deadline:
+                pytest.fail("lock-holding subprocess did not become ready")
+            time.sleep(0.05)
         refresh_path = _write_json(tmp_path, _refresh_proposal(_refresh_payload()), "refresh.json")
         with pytest.raises(LockHeldError):
             run_refresh_diff_with_paths(refresh_path, paths)

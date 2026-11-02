@@ -67,6 +67,7 @@
               ps.pyyaml
               ps.typer
               ps.pytest
+              ps.pytest-xdist
               ps.mypy
               ps.types-pyyaml
             ]);

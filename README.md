@@ -47,6 +47,30 @@ settings afterwards. Direct CLI calls do not rerun this guard and a newly set
 `PYTHONPATH` can shadow the installed package. The guard permits only the
 explicit repository `src` path for source-test/helper subprocesses.
 
+## Test execution
+
+`just check` runs format/lint checks, strict mypy and the full pytest suite using
+**one pytest-xdist worker per CPU** (`-n auto`). `just test` uses the same worker setting.
+Direct `python3 -m pytest` remains serial unless you pass `-n` explicitly.
+
+```sh
+# Fewer workers, including all quality checks:
+nix develop --offline --no-write-lock-file -c just test_workers=2 check
+# Serial tests for debugging:
+nix develop --offline --no-write-lock-file -c just test-serial
+# Serial full quality gate:
+nix develop --offline --no-write-lock-file -c just test_workers=0 check
+```
+
+`GROSSY_TEST_WORKERS` also sets the worker count; an explicit `test_workers=...`
+Just override takes precedence. Workers have isolated processes and tests use private
+temporary state; no real accounts, browser sessions or shared user database.
+
+Measured locally on 1,507 tests: serial **135.49s**, two workers **88.13s**, four
+workers **48–80s**, `auto` **27s**. These are pytest-reported suite durations,
+excluding Nix shell entry and the other quality checks; timings vary with machine load. The existing
+nixpkgs pin supplies pytest-xdist; no pip/uv installation is needed.
+
 Live compatibility and final release remain pending user verification. Grossy
 never progresses checkout, chooses fulfilment, pays or submits an order. The
 coordinator may open AB.gr `/checkout` solely for an explicitly approved cart-list

@@ -13,6 +13,7 @@ These required tests fail outside the project Nix development shell.
 
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import re
@@ -67,8 +68,10 @@ def test_tool_is_store_backed(tool: str) -> None:
     assert _is_store_path(path), f"{tool} not in Nix store: {path}"
 
 
-def test_pytest_module_is_store_backed() -> None:
-    assert _is_store_path(pytest.__file__), f"pytest not in Nix store: {pytest.__file__}"
+@pytest.mark.parametrize("module_name", ["pytest", "xdist", "execnet"])
+def test_pytest_module_is_store_backed(module_name: str) -> None:
+    module = importlib.import_module(module_name)
+    assert _is_store_path(module.__file__), f"{module_name} not in Nix store: {module.__file__}"
 
 
 class TestEnvironmentIsolation:
