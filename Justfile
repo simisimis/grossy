@@ -8,7 +8,8 @@
 # VIRTUAL_ENV, user-site) is active.
 #
 # Quality targets use Nix store tools directly
-# (ruff, mypy, pytest) without any network access. Source tests set PYTHONPATH
+# (ruff, mypy, pytest) without any network access. Ruff covers the package
+# source, the tests and the coordinator skill scripts. Source tests set PYTHONPATH
 # explicitly to the repository src/ directory so grossy modules resolve from
 # source while third-party dependencies resolve from the Nix store.
 #
@@ -46,11 +47,11 @@ setup:
     @echo "Shell provenance OK: declared Grossy closure, no ambient Python environment."
 
 format: setup
-    ruff format src tests
-    ruff check --fix src tests
+    ruff format src tests skills/grossy/scripts
+    ruff check --fix src tests skills/grossy/scripts
 
 lint: setup
-    ruff check src tests
+    ruff check src tests skills/grossy/scripts
 
 typecheck: setup
     mypy
@@ -65,8 +66,8 @@ test-serial: setup
     PYTHONPATH="$PWD/src" python3 -m pytest -n 0
 
 check: setup
-    ruff format --check src tests
-    ruff check src tests
+    ruff format --check src tests skills/grossy/scripts
+    ruff check src tests skills/grossy/scripts
     mypy
     PYTHONPATH="$PWD/src" python3 -m pytest -n {{ quote(test_workers) }}
 

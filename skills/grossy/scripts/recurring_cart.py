@@ -1,4 +1,5 @@
 """Pure recurring cart reconciliation; no browser, CLI or state-file side effects."""
+
 import re
 from decimal import Decimal
 
@@ -8,9 +9,13 @@ def norm(text):
 
 
 def candidates(row, readings):
-    matches = [pid for pid, reading in readings.items()
-               if norm(row.get("name")) and norm(row["name"]) in norm(reading["title"])
-               and norm(row.get("brand")) in norm(reading["title"])]
+    matches = [
+        pid
+        for pid, reading in readings.items()
+        if norm(row.get("name"))
+        and norm(row["name"]) in norm(reading["title"])
+        and norm(row.get("brand")) in norm(reading["title"])
+    ]
     # Prefer the full rendered name+brand over an incidental substring in a
     # different alternative's title; still reject duplicate exact identities.
     full = norm(" ".join(filter(None, (row.get("brand"), row.get("name")))))
@@ -53,7 +58,10 @@ def reconcile(cart, expected, readings, protected=()):
     remaining = dict(expected)
     unavailable = {pid for pid, r in readings.items() if r["availability"] == "unavailable"}
     if unavailable & set(protected):
-        raise ValueError("written_target_unavailable_readback_unverified:" + ",".join(sorted(unavailable & set(protected))))
+        raise ValueError(
+            "written_target_unavailable_readback_unverified:"
+            + ",".join(sorted(unavailable & set(protected)))
+        )
     for pid in unavailable:
         remaining.pop(pid, None)
     matched = set()
@@ -65,20 +73,38 @@ def reconcile(cart, expected, readings, protected=()):
             ids = [pid for pid in ids if pid in unavailable]
         else:
             parts = row.get("price_parts", [])
-            if len(parts) != 3 or parts[0] not in ("€", "~€") or not re.fullmatch(r"\d+", parts[1]) or not re.fullmatch(r"\d{2}", parts[2]):
+            if (
+                len(parts) != 3
+                or parts[0] not in ("€", "~€")
+                or not re.fullmatch(r"\d+", parts[1])
+                or not re.fullmatch(r"\d{2}", parts[2])
+            ):
                 raise ValueError(f"checkout_row_{index}:invalid_price_parts")
             price = Decimal(parts[1] + "." + parts[2])
-            ids = [pid for pid in ids if pid in remaining
-                   and str(remaining[pid]) == row.get("quantity")
-                   and price in (Decimal(readings[pid]["displayed_price_eur"]),
-                                 Decimal(readings[pid]["displayed_price_eur"]) * remaining[pid])]
+            ids = [
+                pid
+                for pid in ids
+                if pid in remaining
+                and str(remaining[pid]) == row.get("quantity")
+                and price
+                in (
+                    Decimal(readings[pid]["displayed_price_eur"]),
+                    Decimal(readings[pid]["displayed_price_eur"]) * remaining[pid],
+                )
+            ]
         if len(ids) != 1 or ids[0] in matched:
-            raise ValueError(f"checkout_row_{index}:identity_quantity_or_price_mismatch:candidates={len(ids)}")
+            raise ValueError(
+                f"checkout_row_{index}:identity_quantity_or_price_mismatch:candidates={len(ids)}"
+            )
         matched.add(ids[0])
     if matched - unavailable != set(remaining):
-        raise ValueError("checkout_missing_buyable_lines:" + ",".join(sorted(set(remaining) - matched)))
+        raise ValueError(
+            "checkout_missing_buyable_lines:" + ",".join(sorted(set(remaining) - matched))
+        )
     total = sum(remaining.values())
     unavailable_rows = sum(bool(row.get("unavailable")) for row in cart["rows"])
-    if cart["badge"] not in ([str(total)], [str(total + unavailable_rows)]) and not (not cart["rows"] and cart["badge"] in ([], ["0"])):
+    if cart["badge"] not in ([str(total)], [str(total + unavailable_rows)]) and not (
+        not cart["rows"] and cart["badge"] in ([], ["0"])
+    ):
         raise ValueError("checkout_header_badge_inconsistent")
     return remaining

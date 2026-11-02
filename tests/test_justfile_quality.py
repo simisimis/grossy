@@ -26,6 +26,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+RUFF_TARGETS = ["src", "tests", "skills/grossy/scripts"]
 
 
 @pytest.fixture(autouse=True)
@@ -78,11 +79,10 @@ def _make_project(tmp_path: Path, *, ordering_harness: bool = True) -> Path:
         end = justfile.index("\nformat:", start)
         justfile = justfile[:start] + "\nsetup:\n    @true\n" + justfile[end:]
     (project / "Justfile").write_text(justfile)
-    # Minimal src/tests directories so tools don't fail on missing paths.
-    (project / "src").mkdir()
-    (project / "src" / "__init__.py").write_text("")
-    (project / "tests").mkdir()
-    (project / "tests" / "__init__.py").write_text("")
+    # Minimal src/tests/skill-script directories so tools don't fail on missing paths.
+    for target in RUFF_TARGETS:
+        (project / target).mkdir(parents=True)
+        (project / target / "__init__.py").write_text("")
     return project
 
 
@@ -133,8 +133,8 @@ def test_check_runs_all_quality_steps_in_order(tmp_path: Path) -> None:
     result = _run_just(project, tmp_path, "check")
     assert result.returncode == 0, result.stderr
     assert _tool_invocations(tmp_path / "tool-args.log") == [
-        ("ruff", ["format", "--check", "src", "tests"]),
-        ("ruff", ["check", "src", "tests"]),
+        ("ruff", ["format", "--check", *RUFF_TARGETS]),
+        ("ruff", ["check", *RUFF_TARGETS]),
         ("mypy", []),
         ("python3", ["-m", "pytest", "-n", "auto"]),
     ]
@@ -161,9 +161,9 @@ def test_check_short_circuits_on_first_failure(
     [
         (
             "format",
-            [("ruff", ["format", "src", "tests"]), ("ruff", ["check", "--fix", "src", "tests"])],
+            [("ruff", ["format", *RUFF_TARGETS]), ("ruff", ["check", "--fix", *RUFF_TARGETS])],
         ),
-        ("lint", [("ruff", ["check", "src", "tests"])]),
+        ("lint", [("ruff", ["check", *RUFF_TARGETS])]),
         ("typecheck", [("mypy", [])]),
         ("test", [("python3", ["-m", "pytest", "-n", "auto"])]),
         ("test-serial", [("python3", ["-m", "pytest", "-n", "0"])]),

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 NAME = "delivery-slot-readiness.json"
@@ -64,13 +64,16 @@ def initialize(work: Path, *, history_only: bool, reuse: bool) -> None:
         return
     if (work / "plan-prepare.json").exists():
         raise ValueError("legacy_run_requires_separate_delivery_slot_review")
-    save(work, {
-        "schema_name": SCHEMA,
-        "schema_version": 1,
-        "mode": "history" if history_only else "weekly",
-        "status": "not-required" if history_only else "awaiting-owner",
-        "confirmed_at": None,
-    })
+    save(
+        work,
+        {
+            "schema_name": SCHEMA,
+            "schema_version": 1,
+            "mode": "history" if history_only else "weekly",
+            "status": "not-required" if history_only else "awaiting-owner",
+            "confirmed_at": None,
+        },
+    )
 
 
 def require_ready(work: Path, *, history: bool = False) -> None:
@@ -91,5 +94,5 @@ def confirm(work: Path) -> None:
         raise ValueError("delivery_slot_browser_start_incomplete")
     if state["status"] == "owner-confirmed":
         return
-    state.update(status="owner-confirmed", confirmed_at=datetime.now(timezone.utc).isoformat())
+    state.update(status="owner-confirmed", confirmed_at=datetime.now(UTC).isoformat())
     save(work, state)
