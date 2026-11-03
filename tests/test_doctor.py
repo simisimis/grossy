@@ -77,10 +77,10 @@ def _doctor(
     *,
     browser: BrowserAdapter | None = None,
     which: Callable[[str], str | None] | None = None,
-    stdout: str = "0.27.1\n",
+    stdout: str = "agent-browser development build\n",
     returncode: int = 0,
 ) -> DoctorResult:
-    """Run doctor with deterministic executable discovery and version output."""
+    """Run doctor with deterministic executable discovery and probe output."""
     with (
         patch("shutil.which", side_effect=which or (lambda _: "/usr/bin/fake")),
         patch(
@@ -335,36 +335,50 @@ class TestDoctorToolChecks:
         result = _doctor(paths, which=lambda x: "/usr/bin/fake" if x != "agent-browser" else None)
         assert _check_name(result, "agent_browser") == "fail"
 
-    @pytest.mark.parametrize(
-        ("stdout", "returncode", "expected_status", "remediation"),
-        [
-            pytest.param("0.27.4\n", 0, "pass", None, id="supported-0.27-patch"),
-            pytest.param("agent-browser 0.38.1\n", 0, "pass", None, id="installed-0.38.1"),
-            pytest.param("0.38.1\n", 0, "pass", None, id="bare-0.38.1"),
-            pytest.param("agent-browser 0.39.0\n", 0, "fail", "0.38", id="future-minor"),
-            pytest.param("agent-browser 1.38.1\n", 0, "fail", None, id="future-major"),
-            pytest.param("other-tool 0.38.1\n", 0, "fail", None, id="wrong-prefix"),
-            pytest.param("agent-browser 0.38.1junk\n", 0, "fail", None, id="prefixed-junk"),
-            pytest.param("agent-browser 0.38.1\n", 1, "fail", None, id="prefixed-command-failed"),
-            pytest.param("0.26.0\n", 0, "fail", "0.27", id="unsupported-minor"),
-            pytest.param("0.28.0\n", 0, "fail", None, id="unsupported-next-minor"),
-            pytest.param("0.27.not-a-version\n", 0, "fail", None, id="malformed-version"),
-            pytest.param("0.27.1junk\n", 0, "fail", None, id="trailing-junk"),
-            pytest.param("0.27.1\n", 1, "fail", None, id="command-failed"),
-        ],
-    )
-    def test_agent_browser_version_gate(
-        self,
-        paths: GrossyPaths,
-        stdout: str,
-        returncode: int,
-        expected_status: str,
-        remediation: str | None,
+    def test_agent_browser_version_output_is_informational(self, paths: GrossyPaths) -> None:
+        result = _doctor(paths, stdout="agent-browser development build\n")
+        assert _check_name(result, "agent_browser") == "pass"
+        detail = _check_detail(result, "agent_browser")
+        assert "agent-browser development build" in detail
+        assert "capabilities and live compatibility not verified" in detail
+
+    def test_agent_browser_empty_version_output_is_not_a_gate(self, paths: GrossyPaths) -> None:
+        result = _doctor(paths, stdout="")
+        assert _check_name(result, "agent_browser") == "pass"
+        assert "not reported" in _check_detail(result, "agent_browser")
+
+    def test_agent_browser_diagnostic_output_is_sanitized_and_bounded(
+        self, paths: GrossyPaths
     ) -> None:
-        result = _doctor(paths, stdout=stdout, returncode=returncode)
-        assert _check_name(result, "agent_browser") == expected_status
-        if remediation is not None:
-            assert remediation in _check_remediation(result, "agent_browser")
+        result = _doctor(paths, stdout="<script>\n" + "x" * 1000)
+        detail = _check_detail(result, "agent_browser")
+        assert _check_name(result, "agent_browser") == "pass"
+        assert "<script>" not in detail
+        assert "\n" not in detail
+        assert "x" * 161 not in detail
+
+    def test_agent_browser_failed_probe_fails(self, paths: GrossyPaths) -> None:
+        result = _doctor(paths, stdout="agent-browser development build\n", returncode=1)
+        assert _check_name(result, "agent_browser") == "fail"
+        assert "exited with code 1" in _check_detail(result, "agent_browser")
+        assert "installation and PATH" in _check_remediation(result, "agent_browser")
+
+    @pytest.mark.parametrize(
+        "error",
+        [OSError("cannot execute"), subprocess.TimeoutExpired(["agent-browser", "--version"], 10)],
+        ids=["os-error", "timeout"],
+    )
+    def test_agent_browser_probe_errors_fail(self, paths: GrossyPaths, error: Exception) -> None:
+        with (
+            patch("shutil.which", return_value="/usr/bin/fake"),
+            patch("subprocess.run", side_effect=error) as probe,
+        ):
+            result = run_doctor(paths)
+        assert _check_name(result, "agent_browser") == "fail"
+        assert "cannot probe agent-browser" in _check_detail(result, "agent_browser")
+        probe.assert_called_once_with(
+            ["agent-browser", "--version"], capture_output=True, text=True, timeout=10
+        )
 
 
 class TestDoctorBrowserChecks:

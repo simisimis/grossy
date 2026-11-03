@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import fcntl
 import os
-import re
 import shutil
 import sqlite3
 import stat
@@ -27,10 +26,6 @@ from grossy.security import sanitize_human_text
 
 DOCTOR_SCHEMA_NAME = "grossy.doctor.result"
 DOCTOR_SCHEMA_VERSION = 1
-
-AGENT_BROWSER_SUPPORTED_MAJOR = 0
-AGENT_BROWSER_SUPPORTED_MINORS = frozenset({27, 38})
-AGENT_BROWSER_SUPPORTED_VERSIONS = "0.27.x or 0.38.x"
 
 
 @dataclass(frozen=True)
@@ -447,7 +442,7 @@ def _check_agent_browser() -> DoctorCheckResult:
             "agent_browser",
             "fail",
             "agent-browser not found on PATH",
-            f"install agent-browser {AGENT_BROWSER_SUPPORTED_VERSIONS}",
+            "install agent-browser and ensure it is on PATH",
         )
     try:
         result = subprocess.run(
@@ -461,41 +456,22 @@ def _check_agent_browser() -> DoctorCheckResult:
                 "agent_browser",
                 "fail",
                 f"agent-browser --version exited with code {result.returncode}",
-                f"install agent-browser {AGENT_BROWSER_SUPPORTED_VERSIONS}",
+                "check the agent-browser installation and PATH",
             )
-        version_str = result.stdout.strip()
-        # 0.38 emits "agent-browser X.Y.Z"; retain the legacy bare format.
-        # Full-match both formats, rejecting other prefixes and trailing junk.
-        match = re.fullmatch(r"(?:agent-browser )?([0-9]+)\.([0-9]+)\.([0-9]+)", version_str)
-        if not match:
-            return DoctorCheckResult(
-                "agent_browser",
-                "fail",
-                f"cannot parse agent-browser version: {version_str!r}",
-                f"install agent-browser {AGENT_BROWSER_SUPPORTED_VERSIONS}",
-            )
-        major = int(match.group(1))
-        minor = int(match.group(2))
-        if major == AGENT_BROWSER_SUPPORTED_MAJOR and minor in AGENT_BROWSER_SUPPORTED_MINORS:
-            return DoctorCheckResult(
-                "agent_browser",
-                "pass",
-                f"agent-browser version {version_str} "
-                f"(supported {AGENT_BROWSER_SUPPORTED_VERSIONS})",
-            )
+        # Version output is diagnostic only, not a capability or live-site check.
+        version_info = sanitize_human_text(result.stdout)[:160] or "not reported"
         return DoctorCheckResult(
             "agent_browser",
-            "fail",
-            f"agent-browser version {version_str} is not supported; "
-            f"expected {AGENT_BROWSER_SUPPORTED_VERSIONS}",
-            f"install agent-browser {AGENT_BROWSER_SUPPORTED_VERSIONS}",
+            "pass",
+            f"agent-browser responds (--version: {version_info}); "
+            "capabilities and live compatibility not verified",
         )
     except Exception as exc:
         return DoctorCheckResult(
             "agent_browser",
             "fail",
-            f"cannot check agent-browser version: {exc}",
-            f"install agent-browser {AGENT_BROWSER_SUPPORTED_VERSIONS}",
+            f"cannot probe agent-browser: {exc}",
+            "check the agent-browser installation and PATH",
         )
 
 
