@@ -126,6 +126,7 @@ def test_unready_scripts_stop_before_any_phase_or_browser_call(
     monkeypatch.setitem(sys.modules, "live_common", drill)
     monkeypatch.setitem(sys.modules, "cart_bind", ModuleType("cart_bind"))
     monkeypatch.syspath_prepend(str(SCRIPTS))
+    monkeypatch.setattr(sys, "argv", [f"{script}.py"])
     reason = "readiness_missing_or_invalid" if mode == "legacy" else "select_delivery_slot_manually"
     with pytest.raises(ValueError, match=reason):
         runpy.run_path(str(SCRIPTS / f"{script}.py"))
@@ -191,6 +192,7 @@ def test_history_phase_starts_only_after_applicable_readiness(
         setattr(drill, key, value)
     monkeypatch.setitem(sys.modules, "live_common", drill)
     monkeypatch.syspath_prepend(str(SCRIPTS))
+    monkeypatch.setattr(sys, "argv", ["history_sync.py"])
     with pytest.raises(RuntimeError, match="reached-first-phase"):
         runpy.run_path(str(SCRIPTS / "history_sync.py"))
     assert calls == [("history", "discover-prepare")]

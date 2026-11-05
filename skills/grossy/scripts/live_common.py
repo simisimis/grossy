@@ -68,6 +68,9 @@ def _tabs():
         capture_output=True,
         text=True,
     )
+    # Exit 1 / success:false means no browser for this session, not an empty tab list.
+    if p.returncode:
+        return None
     try:
         d = json.loads(p.stdout)
         d = d.get("data", d)
@@ -109,21 +112,30 @@ def recover_closed_window():
     )
 
 
-def browser(args, tag="cmd"):
+def _select_task_tab():
     target = json.loads((D / "task-tab-target.json").read_text())["target_id"]
-    if subprocess.run(
+    return subprocess.run(
         ["agent-browser", "--session", SESSION, "--pin-tab", "tab", target],
         capture_output=True,
         text=True,
-    ).returncode:
-        recover_closed_window()
-        target = json.loads((D / "task-tab-target.json").read_text())["target_id"]
-        if subprocess.run(
-            ["agent-browser", "--session", SESSION, "--pin-tab", "tab", target],
-            capture_output=True,
-            text=True,
-        ).returncode:
-            stop("exact_task_tab_unavailable")
+    ).returncode
+
+
+def select_task_tab(recover=True):
+    """Select the pinned original tab before every browser command. With ``recover=False`` a
+    failed selection stops at once: no relaunch, no rebinding, no retry (history walk, PRD
+    FR-12). The default recovers only a closed window whose session has blank tabs left."""
+    if not _select_task_tab():
+        return
+    if not recover:
+        stop("exact_task_tab_unavailable")
+    recover_closed_window()
+    if _select_task_tab():
+        stop("exact_task_tab_unavailable")
+
+
+def browser(args, tag="cmd", recover=True):
+    select_task_tab(recover)
     p = subprocess.run(
         ["agent-browser", "--session", SESSION, "--pin-tab", *args], capture_output=True, text=True
     )
@@ -147,18 +159,18 @@ def browser(args, tag="cmd"):
     return p.stdout
 
 
-def evaluate(body, tag="eval"):
-    out = browser(["eval", "(() => {" + V + GUARD + body + "})()"], tag)
+def evaluate(body, tag="eval", recover=True):
+    out = browser(["eval", "(() => {" + V + GUARD + body + "})()"], tag, recover)
     try:
         return json.loads(out)
     except ValueError:
         stop("invalid_browser_result")
 
 
-def wait(body, seconds=45, tag="wait"):
+def wait(body, seconds=45, tag="wait", recover=True):
     deadline = time.monotonic() + seconds
     while True:
-        r = evaluate(body, tag)
+        r = evaluate(body, tag, recover)
         if r is True:
             return
         if r is not False:
@@ -386,23 +398,72 @@ MAIN = ':not([data-testid="product-block"] *):not([data-testid="product-carousel
 ADD_SEL = '[data-testid="product-block-add"]' + MAIN
 
 
-def settle_page(tag="settle"):
-    """Wait for network idle (bounded).
+def settle_page(tag="settle", recover=True, timeout=40):
+    """Wait for network idle for at most ``timeout`` seconds on the pinned tab.
 
-    A busy page is not an error, the timed delay still applies."""
-    target = json.loads((D / "task-tab-target.json").read_text())["target_id"]
-    subprocess.run(
-        ["agent-browser", "--session", SESSION, "--pin-tab", "tab", target],
-        capture_output=True,
-        text=True,
-    )
-    p = subprocess.run(
-        ["agent-browser", "--session", SESSION, "--pin-tab", "wait", "--load", "networkidle"],
-        capture_output=True,
-        text=True,
-        timeout=40,
-    )
+    Returns False when the page stayed busy (timeout or tool failure); a busy page is not an
+    error, the caller's timed delay still applies. Tab selection follows ``select_task_tab``."""
+    select_task_tab(recover)
+    try:
+        p = subprocess.run(
+            ["agent-browser", "--session", SESSION, "--pin-tab", "wait", "--load", "networkidle"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return False
     return p.returncode == 0
+
+
+# Shared lazy-list walk (reservation-history list and order pages): two consecutive settled
+# bottom passes end a walk; the stall rule is the only safety stop (PRD FR-1, FR-5). Every
+# command of a walk uses the strict pinned tab (recover=False): target loss stops the run.
+STALL_SECONDS = 30
+SCROLL_BOTTOM_JS = "window.scrollTo(0,document.body.scrollHeight);return true;"
+AT_BOTTOM_JS = "return (window.innerHeight+window.scrollY)>=document.body.scrollHeight-5;"
+
+
+def bottom_pass(tag="walk", budget=STALL_SECONDS):
+    """Scroll to the bottom, give lazy loading 1.5 s, wait for network idle for at most
+    ``budget`` seconds, then measure the bottom. Returns (settled, at_bottom); a pass whose
+    network wait did not settle never counts as settled. The guard in evaluate stops on
+    authentication loss or a challenge; target loss stops without recovery."""
+    evaluate(SCROLL_BOTTOM_JS, tag, recover=False)
+    time.sleep(1.5)
+    settled = settle_page(tag, recover=False, timeout=max(1.0, budget))
+    at_bottom = evaluate(AT_BOTTOM_JS, tag, recover=False) is True
+    return settled, at_bottom
+
+
+def walk_to_settled_bottom(collect, tag="walk", halt=None):
+    """Bottom passes until two consecutive settled passes (network idle, bottom reached after
+    settling, nothing new).
+
+    ``collect()`` reads the rendered content and returns the number of new items; it runs once
+    before scrolling and after every pass. ``halt()`` may end the walk early after a collect.
+    Stall rule: no new content and no settled bottom for STALL_SECONDS ends the walk as
+    ``stalled``; each network wait is bounded by the remaining stall budget. There is no
+    scroll-count or global-time ceiling.
+    Returns {"passes": n, "ended": "settled" | "stalled" | "halted"}.
+    """
+    collect()
+    if halt and halt():
+        return {"passes": 0, "ended": "halted"}
+    passes = settled_passes = 0
+    progress_at = time.monotonic()
+    while settled_passes < 2:
+        passes += 1
+        settled, at_bottom = bottom_pass(tag, STALL_SECONDS - (time.monotonic() - progress_at))
+        new = collect()
+        settled_passes = settled_passes + 1 if settled and at_bottom and not new else 0
+        if new or settled_passes:
+            progress_at = time.monotonic()
+        elif time.monotonic() - progress_at >= STALL_SECONDS:
+            return {"passes": passes, "ended": "stalled"}
+        if halt and halt():
+            return {"passes": passes, "ended": "halted"}
+    return {"passes": passes, "ended": "settled"}
 
 
 def click_once(pid, expected_after, delay, tag, sel=ADD_SEL):

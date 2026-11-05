@@ -4,7 +4,7 @@
 #
 #   live.sh start [--reuse] [--history-only]  open Brave; weekly start pauses for manual slot selection
 #   live.sh slot-ready                record the owner's explicit "slot selected" report
-#   live.sh history [--dry-run]        history sync (discover, six controls, dry-run, bounded scan + apply)
+#   live.sh history [--dry-run] [--full]  history sync (reservation-history walk newest first, dry-run, scan-prepare)
 #   live.sh stage1 [--skip-history-sync]  plan-prepare, whole-cart baseline, recurring facts, preflight
 #   live.sh recurring [max-actions]    recurring prefill loop (intent -> action-check -> one click -> readback)
 #   live.sh advance                    basket-review advance after owner edits

@@ -4,8 +4,8 @@ task-owned headed Brave tab.
 Usage: live_start.py [--reuse] [--history-only]
 Default weekly start pauses for manual delivery-slot selection; --history-only is for standalone
 history sync. --reuse preserves this work directory's readiness state and only (re)binds the
-browser tab. Read-only: opens the owner-verified order-history overview route. Never adopts a tab
-the agent did not open.
+browser tab. Read-only: opens the reservation-history list route. Never adopts a tab the agent
+did not open.
 """
 
 import datetime
@@ -34,7 +34,7 @@ PROFILE = (
     / "ab-profile"
 )
 BRAVE = pathlib.Path.home() / ".nix-profile" / "bin" / "brave"
-START_URL = "https://www.ab.gr/customerhub/quick-shop/orders"
+START_URL = "https://www.ab.gr/en/my-account/reservation-history"
 
 prev_session = prev_target = None
 if PTR.exists():
@@ -71,6 +71,9 @@ def tabs():
         capture_output=True,
         text=True,
     )
+    # Exit 1 / success:false means no browser for this session, not an empty tab list.
+    if p.returncode:
+        return None
     try:
         d = json.loads(p.stdout)
         d = d.get("data", d)
