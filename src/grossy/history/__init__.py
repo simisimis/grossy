@@ -1,4 +1,4 @@
-"""Grossy observable-six history synchronization and learned state (PRD FR-6..FR-62)."""
+"""Grossy order-history synchronization and learned state."""
 
 from grossy.history.learn import (
     ATHENS_TZ,

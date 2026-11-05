@@ -1,4 +1,4 @@
-"""Observable-six history synchronization (PRD FR-6..FR-31, sections 10.2, 15, 18).
+"""Reservation-history synchronization (PRD FR-7..FR-31, sections 10.2, 15, 18).
 
 Deterministic phases that never open a browser (PRD 10.3.9):
 
@@ -7,11 +7,11 @@ Deterministic phases that never open a browser (PRD 10.3.9):
 - ``sync-dry-run``: count-only unknown discovery; it reads only the imported
   source order IDs and never opens an order or inspects product contents
   (FR-13).
-- ``scan-prepare``: deterministic scan preparation; it computes the exact
-  unknown orders (listed minus imported, FR-9) and exposes them oldest first
-  so the skill scans exactly that set (FR-14, FR-15). With zero unknown
-  orders it writes the sanitized no-op synchronization summary (FR-28) and
-  reports ``no-op``.
+- ``scan-prepare``: deterministic scan preparation; it computes the unknown
+  orders of the current walk (listed minus imported, FR-9) and exposes them
+  oldest first so the skill scans exactly that set (FR-14, FR-15). With zero
+  unknown orders it writes the sanitized no-op synchronization summary
+  (FR-28) and reports ``no-op``.
 - ``scan-validate``: deterministic validation of an order-scan proposal.
 - ``sync-apply``: atomic one-transaction import of every accepted unknown
   order (FR-25); a failed discovery, scan, validation, or application imports
@@ -39,7 +39,7 @@ from grossy.fsutil import atomic_write_text, ensure_private_dir
 from grossy.history.learn import InferenceSummary, run_inference
 from grossy.history.maintenance import category_rename_target, product_has_category_override
 from grossy.history.proposal import (
-    OBSERVABLE_ORDER_WINDOW,
+    LISTED_ORDERS_SCHEMA_NAME,
     ORDER_SCAN_SCHEMA_NAME,
     HistoryProposalError,
     ListedOrdersProposal,
@@ -215,7 +215,7 @@ def _get_or_create_category(conn: sqlite3.Connection, heading: str | None, now: 
 
 @dataclass(frozen=True)
 class DiscoverPrepareResult:
-    """Result of the observable-six discovery preparation phase."""
+    """Result of the listed-orders discovery preparation phase."""
 
     database_exists: bool
     schema_version: int
@@ -229,16 +229,15 @@ class DiscoverPrepareResult:
             "database_exists": self.database_exists,
             "database_schema_version": self.schema_version,
             "imported_order_count": self.imported_order_count,
-            "required_order_window": OBSERVABLE_ORDER_WINDOW,
-            "listed_orders_schema": "grossy.history.listed-orders.v1",
+            "listed_orders_schema": LISTED_ORDERS_SCHEMA_NAME,
             "requirements": [
-                "inspect the rendered AB.gr order-history list",
-                "extract exactly the six currently listed dated orders",
-                "exclude the 'All orders' union entry (no per-order timing)",
-                "for each order capture a numeric stable source order ID, a "
-                "DD/MM/YYYY displayed label, a normalized ISO order date, and a "
-                "stable navigation URL",
-                "emit a grossy.history.listed-orders.v1 proposal and run sync-dry-run",
+                "walk the rendered AB.gr reservation-history list newest first",
+                "enumerate every listed order of the current walk (any count, including zero)",
+                "for each order capture its numeric-string source order ID with "
+                "leading zeros, the list date normalized to ISO YYYY-MM-DD from "
+                "the rendered DD/MM/YYYY text, and the order-details URL "
+                "https://www.ab.gr/my-account/order?id=<numeric-string>",
+                f"emit a {LISTED_ORDERS_SCHEMA_NAME} proposal and run sync-dry-run",
             ],
         }
 
@@ -266,9 +265,9 @@ class SyncDryRunResult:
 class SyncPrepareResult:
     """Result of the deterministic scan-preparation phase (FR-9, FR-14, FR-15).
 
-    ``unknown_orders`` carries the exact orders the skill must scan, oldest
+    ``unknown_orders`` carries the unknown orders of the current walk, oldest
     first. It is machine output on stdout and therefore carries the stable
-    source order IDs, dates, labels, and navigation URLs the skill needs to
+    source order IDs, ISO dates, and navigation URLs the skill needs to
     navigate; human-facing reports still omit them (FR-29). The phase is
     count-only with respect to order contents: no order is opened and no
     product content is inspected (FR-13).
@@ -374,7 +373,7 @@ class SyncApplyResult:
 
 
 def run_discover_prepare(paths: GrossyPaths) -> DiscoverPrepareResult:
-    """Prepare observable-six discovery: migrate and report imported state."""
+    """Prepare listed-orders discovery: migrate and report imported state."""
     if not paths.database_file.exists():
         raise HistorySyncError(
             f"database not found at {paths.database_file}; run 'grossy init' first"
@@ -421,12 +420,12 @@ def run_sync_dry_run(proposal_path: Path, paths: GrossyPaths) -> SyncDryRunResul
 
 
 def run_scan_prepare(listed_orders_path: Path, paths: GrossyPaths) -> SyncPrepareResult:
-    """Deterministic scan preparation: expose the exact unknown orders oldest first.
+    """Deterministic scan preparation: expose the current walk's unknown orders oldest first.
 
     Implements the discovery set-difference of FR-9 (listed minus
     already-imported, no date cursor per FR-10) and fixes the oldest-first
     scan order of FR-14. The result is machine output: it carries the stable
-    source order IDs, dates, labels, and navigation URLs the skill needs to
+    source order IDs, ISO dates, and navigation URLs the skill needs to
     navigate each unknown order (FR-15). No order is opened and no product
     content is inspected (FR-13).
 
@@ -450,7 +449,6 @@ def run_scan_prepare(listed_orders_path: Path, paths: GrossyPaths) -> SyncPrepar
     unknown_orders = tuple(
         {
             "source_order_id": order.source_order_id,
-            "displayed_label": order.displayed_label,
             "order_date": order.order_date,
             "navigation_url": order.navigation_url,
         }
@@ -502,10 +500,10 @@ def run_sync_apply(
 
     When ``listed_orders_path`` is supplied (FR-10.3.6, FR-23, FR-24), the
     scan's order identities are bound to the discovered unknown set: every
-    scanned order must appear in the listed-orders window with matching date
-    and navigation URL, and the scan must contain exactly the unknown orders
-    (listed minus already-imported). This prevents partial scans or out-of-
-    window IDs from being committed (PRD FR-26, FR-10.3.6).
+    scanned order must appear in the listed-orders discovery with matching
+    date and navigation URL, and the scan must contain exactly the unknown
+    orders (listed minus already-imported). This prevents partial scans or
+    unlisted IDs from being committed (PRD FR-26, FR-10.3.6).
     """
     data = _load_json(proposal_path)
     proposal = _validate_scan_or_fail(data)
@@ -542,7 +540,7 @@ def run_sync_apply(
 
                 # FR-23: the scan must contain exactly the unknown orders.
                 missing = expected_unknown - scan_ids
-                out_of_window = scan_ids - listed_ids
+                unlisted = scan_ids - listed_ids
                 already_imported = scan_ids & imported
                 if missing:
                     raise HistorySyncError(
@@ -550,11 +548,11 @@ def run_sync_apply(
                         f"expected unknown order(s) from the listed-orders "
                         f"discovery; the scan must cover the full unknown set"
                     )
-                if out_of_window:
+                if unlisted:
                     raise HistorySyncError(
-                        f"order-scan proposal contains {len(out_of_window)} order(s) "
-                        f"not present in the listed-orders window; "
-                        f"out-of-window or 'All orders'-derived IDs are rejected"
+                        f"order-scan proposal contains {len(unlisted)} order(s) "
+                        f"not present in the listed-orders discovery; "
+                        f"unlisted or 'All orders'-derived IDs are rejected"
                     )
                 if already_imported:
                     raise HistorySyncError(
@@ -610,7 +608,7 @@ def run_sync_apply(
             json_path = report_dir / f"sync-apply-{stamp}.json"
             # FR-29: the known source order IDs to redact from untrusted report
             # text are all imported orders (visible post-apply in this
-            # transaction) plus the discovered listed-orders window.
+            # transaction) plus the discovered listed-orders counts.
             redaction_ids = _imported_source_order_ids(conn)
             if listed is not None:
                 redaction_ids = redaction_ids | {o.source_order_id for o in listed.orders}
@@ -1355,7 +1353,7 @@ def _render_noop_markdown(generated_at: str, listed_order_count: int) -> str:
         "- Status: no-op (nothing to synchronize)",
         "",
         "## Discovery",
-        f"- Listed orders (observable window): {listed_order_count}",
+        f"- Listed orders: {listed_order_count}",
         "- Unknown orders at discovery: 0",
         "- Orders scanned this synchronization: 0",
         "- Imported orders: 0",
@@ -1397,7 +1395,7 @@ def _render_apply_markdown(
         f"- Proposal checksum: {checksum}",
         "",
         "## Discovery",
-        f"- Listed orders (observable window): {stats.listed_order_count}",
+        f"- Listed orders: {stats.listed_order_count}",
         f"- Unknown orders at discovery: {stats.unknown_order_count}",
         f"- Orders scanned this synchronization: {stats.orders_in_scan}",
         f"- Imported orders: {stats.imported_orders}",

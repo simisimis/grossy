@@ -1,4 +1,4 @@
-"""Scroll stabilization and order-list filtering (FR-6, FR-7, FR-15, FR-16, FR-22).
+"""Scroll stabilization and order-list filtering (FR-7, FR-15, FR-16, FR-22).
 
 These are pure, deterministic functions that process raw browser observations
 before a versioned proposal is emitted. The Pi skill calls these when it
@@ -9,8 +9,6 @@ in isolation with fake observations (PRD 19.3).
 from __future__ import annotations
 
 from dataclasses import dataclass
-
-from grossy.history.proposal import OBSERVABLE_ORDER_WINDOW
 
 
 @dataclass(frozen=True)
@@ -37,8 +35,9 @@ class RawProductCard:
 class OrderListEntry:
     """One entry from the rendered order-history list page.
 
-    The list contains the six dated orders plus a single ``All orders`` union
-    entry (``is_union_entry=True``) which must be excluded (FR-7).
+    The list contains any number of dated orders (including zero) and may
+    carry a single ``All orders`` union entry (``is_union_entry=True``) which
+    must be excluded (FR-7).
     """
 
     label: str
@@ -52,7 +51,7 @@ class ScanStabilizationError(Exception):
 
 
 class OrderListError(Exception):
-    """Raised when the order-list observation is invalid (FR-6, FR-7)."""
+    """Raised when the order-list observation is invalid (FR-7)."""
 
 
 def stabilize_scan(bottom_passes: list[list[RawProductCard]]) -> list[RawProductCard]:
@@ -120,21 +119,16 @@ def stabilize_scan(bottom_passes: list[list[RawProductCard]]) -> list[RawProduct
 
 
 def filter_dated_orders(entries: list[OrderListEntry]) -> list[OrderListEntry]:
-    """Filter the rendered order list to exactly six dated orders.
+    """Filter the rendered order list to its dated orders, whatever their count.
 
-    FR-6: The observable-six window contains exactly six dated orders.
     FR-7: The ``All orders`` union entry must be excluded because it is a
-    de-duplicated union without per-order timing.
+    de-duplicated union without per-order timing. Any number of dated
+    orders, including zero, is accepted.
 
-    Raises :class:`OrderListError` if the count of non-union entries is not
-    exactly six, or if any dated entry lacks a stable source order ID.
+    Raises :class:`OrderListError` if any dated entry lacks a stable source
+    order ID.
     """
     dated = [e for e in entries if not e.is_union_entry]
-    if len(dated) != OBSERVABLE_ORDER_WINDOW:
-        raise OrderListError(
-            f"expected exactly {OBSERVABLE_ORDER_WINDOW} dated orders in the "
-            f"observable-six window, got {len(dated)}"
-        )
     for entry in dated:
         if entry.source_order_id is None:
             raise OrderListError("a dated order entry lacks a stable source order ID")

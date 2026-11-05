@@ -299,15 +299,14 @@ def _seed_product(
 def _listed_orders_6(base_id: int = 100001) -> dict[str, Any]:
     """Build a valid 6-order listed-orders proposal (numeric IDs)."""
     return {
-        "schema_name": "grossy.history.listed-orders.v1",
-        "schema_version": 1,
+        "schema_name": "grossy.history.listed-orders.v2",
+        "schema_version": 2,
         "generated_at": datetime.now(UTC).isoformat(),
         "orders": [
             {
                 "source_order_id": str(base_id + i),
-                "displayed_label": f"{(i + 1):02d}/01/2026",
                 "order_date": f"2026-01-{(i + 1):02d}",
-                "navigation_url": f"https://www.ab.gr/en/membership/orders/{base_id + i}",
+                "navigation_url": f"https://www.ab.gr/my-account/order?id={base_id + i}",
             }
             for i in range(6)
         ],

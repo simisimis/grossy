@@ -3,8 +3,9 @@
 Two proposal families cross the browser/agent boundary into the deterministic
 CLI:
 
-- ``grossy.history.listed-orders.v1``: the six currently listed dated orders
-  (the observable-six window), with the "All orders" union entry excluded.
+- ``grossy.history.listed-orders.v2``: every order enumerated from the
+  reservation-history list in the current walk (any count, including zero),
+  each with its numeric-string ID, ISO list date and order-details URL.
 - ``grossy.history.order-scan.v1``: the stabilized product scan of every
   unknown order in one synchronization.
 
@@ -36,13 +37,12 @@ from pydantic import (
 from grossy.config.models import (
     NUMERIC_ID_PATTERN,
     PRODUCT_URL_HOST,
-    _decode_path_segment,
     product_id_from_url,
 )
 from grossy.security import ProhibitedContentError, scan_prohibited_content
 
-LISTED_ORDERS_SCHEMA_NAME = "grossy.history.listed-orders.v1"
-LISTED_ORDERS_SCHEMA_VERSION = 1
+LISTED_ORDERS_SCHEMA_NAME = "grossy.history.listed-orders.v2"
+LISTED_ORDERS_SCHEMA_VERSION = 2
 
 ORDER_SCAN_SCHEMA_NAME = "grossy.history.order-scan.v1"
 ORDER_SCAN_SCHEMA_VERSION = 1
@@ -55,8 +55,11 @@ ORDER_SCAN_SCHEMA_VERSION = 1
 FAMILY_LINKS_SCHEMA_NAME = "grossy.history.family-links.v1"
 FAMILY_LINKS_SCHEMA_VERSION = 1
 
-# The observable-six window (PRD FR-6): exactly six dated orders are listed.
-OBSERVABLE_ORDER_WINDOW = 6
+# The only order navigation route, shared by listed-orders v2 and order-scan
+# v1: the AB.gr order-details page selected by exactly one raw numeric ``id``
+# query.
+ORDER_DETAILS_PATH = "/my-account/order"
+_ORDER_DETAILS_QUERY_RE = re.compile(r"^id=[0-9]+$")
 
 # Displayed label form DD/MM/YYYY (FR-8).
 _DISPLAYED_LABEL_RE = re.compile(r"^(\d{2})/(\d{2})/(\d{4})$")
@@ -111,20 +114,15 @@ def _is_safe_url_char(char: str) -> bool:
     return char.isprintable() and char not in (" ", "<", ">")
 
 
-def _validate_navigation_url(url: str) -> None:
-    """Validate a stable AB.gr order navigation URL (FR-8).
+def _validate_order_details_url(url: str) -> None:
+    """Validate an order-details navigation URL (listed-orders v2, order-scan v1).
 
-    Order pages are a distinct route from product pages, so this checks the
-    canonical https authority and a well-formed, non-traversing path rather
-    than the product ``/p/<id>`` marker. The history overview additionally
-    requires exactly one raw numeric ``id`` query; legacy queryless paths
-    remain supported. Model validators bind this query to the source ID.
-    Every path segment is also
-    percent-decoded (once) and held to the same narrow safety language as the
-    product-URL segments: literal or encoded (including nested) traversal
-    (``.``, ``..``, ``%2e%2e``), encoded separators (``%2f``), and encoded
-    controls (``%00``) are all rejected. This guarantees the checked URL cannot
-    be percent-encoded into a different route under a listed order identity.
+    The only accepted form is
+    ``https://www.ab.gr/my-account/order?id=<numeric-string>``: the canonical
+    https authority, the literal order-details path (no language prefix, no
+    trailing slash, no percent-encoding) and exactly one raw numeric ``id``
+    query. The model validators bind that query to the source ID. Fragments,
+    extra queries and unsafe characters are rejected.
     """
     try:
         parsed = urlsplit(url)
@@ -136,29 +134,22 @@ def _validate_navigation_url(url: str) -> None:
         )
     if "#" in url:
         raise HistoryProposalError("navigation_url must not contain a fragment")
-    overview_path = "/customerhub/quick-shop/orders"
-    if "?" in url:
-        if parsed.path != overview_path or not re.fullmatch(r"id=[0-9]+", parsed.query):
-            raise HistoryProposalError(
-                "navigation_url query must be exactly one numeric id on the history overview"
-            )
-    elif parsed.path == overview_path:
-        raise HistoryProposalError("navigation_url must identify a dated order, not All orders")
     if "\\" in url or any(not _is_safe_url_char(char) for char in url):
         raise HistoryProposalError("navigation_url contains unsafe characters")
-    segments = parsed.path.split("/")
-    if len(segments) < 2 or segments[1] == "":
-        raise HistoryProposalError("navigation_url must carry a non-empty path")
-    for segment in segments[1:]:
-        if segment in ("", ".", ".."):
-            raise HistoryProposalError("navigation_url contains an empty or traversal path segment")
-        # Reject percent-encoded traversal/separator/control forms (including
-        # nested encodings) so the URL stays the rendered order route.
-        if _decode_path_segment(segment) is None:
-            raise HistoryProposalError(
-                "navigation_url contains a percent-encoded traversal, "
-                "separator, or control that would change the rendered order route"
-            )
+    if parsed.path != ORDER_DETAILS_PATH or not _ORDER_DETAILS_QUERY_RE.fullmatch(parsed.query):
+        raise HistoryProposalError(
+            "navigation_url must be the order-details route "
+            f"https://{PRODUCT_URL_HOST}{ORDER_DETAILS_PATH}?id=<numeric-string>"
+        )
+
+
+def _check_order_details_identity(url: str, source_order_id: str) -> None:
+    """Bind the validated order-details ``id`` query to its exact source ID.
+
+    IDs are compared as strings so leading zeros are preserved.
+    """
+    if urlsplit(url).query.removeprefix("id=") != source_order_id:
+        raise HistoryProposalError("navigation_url id must match source_order_id")
 
 
 def _format_validation_error(exc: ValidationError) -> str:
@@ -171,31 +162,22 @@ def _format_validation_error(exc: ValidationError) -> str:
     return str(exc)
 
 
-def _check_navigation_order_identity(url: str, source_order_id: str) -> None:
-    """Bind the already validated numeric selection to its exact source ID."""
-    query = urlsplit(url).query
-    if query and query.removeprefix("id=") != source_order_id:
-        raise HistoryProposalError("navigation_url id must match source_order_id")
-
-
-# --- listed-orders proposal (grossy.history.listed-orders.v1) ---------------
+# --- listed-orders proposal (grossy.history.listed-orders.v2) ---------------
 
 
 class ListedOrder(BaseModel):
-    """One dated order in the observable-six window (FR-8)."""
+    """One order enumerated from the reservation-history list.
+
+    ``order_date`` is the list entry's date normalized to ISO ``YYYY-MM-DD``
+    by the skill script (strict day-first parse of the rendered
+    ``DD/MM/YYYY``); it is the only date field.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     source_order_id: str = Field(pattern=NUMERIC_ID_PATTERN)
-    displayed_label: str
     order_date: str
     navigation_url: str
-
-    @field_validator("displayed_label")
-    @classmethod
-    def _check_label(cls, value: str) -> str:
-        _parse_displayed_label(value)
-        return value
 
     @field_validator("order_date")
     @classmethod
@@ -206,22 +188,17 @@ class ListedOrder(BaseModel):
     @field_validator("navigation_url")
     @classmethod
     def _check_url(cls, value: str) -> str:
-        _validate_navigation_url(value)
+        _validate_order_details_url(value)
         return value
 
     @model_validator(mode="after")
     def _check_consistency(self) -> ListedOrder:
-        _check_navigation_order_identity(self.navigation_url, self.source_order_id)
-        if _parse_displayed_label(self.displayed_label) != _parse_iso_date(self.order_date):
-            raise HistoryProposalError(
-                "source order: displayed_label "
-                f"{self.displayed_label!r} disagrees with order_date {self.order_date!r}"
-            )
+        _check_order_details_identity(self.navigation_url, self.source_order_id)
         return self
 
 
 class ListedOrdersProposal(BaseModel):
-    """Versioned observable-six listed-orders proposal (FR-6..FR-11)."""
+    """Versioned listed-orders proposal: any order count, including zero."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -255,12 +232,7 @@ class ListedOrdersProposal(BaseModel):
         return value
 
     @model_validator(mode="after")
-    def _check_window(self) -> ListedOrdersProposal:
-        if len(self.orders) != OBSERVABLE_ORDER_WINDOW:
-            raise HistoryProposalError(
-                f"the listed-orders proposal must contain exactly the "
-                f"{OBSERVABLE_ORDER_WINDOW}-order window, got {len(self.orders)}"
-            )
+    def _check_unique_ids(self) -> ListedOrdersProposal:
         seen: set[str] = set()
         for order in self.orders:
             if order.source_order_id in seen:
@@ -379,7 +351,7 @@ class ScannedOrder(BaseModel):
     @field_validator("navigation_url")
     @classmethod
     def _check_url(cls, value: str) -> str:
-        _validate_navigation_url(value)
+        _validate_order_details_url(value)
         return value
 
     @field_validator("displayed_product_count")
@@ -391,7 +363,7 @@ class ScannedOrder(BaseModel):
 
     @model_validator(mode="after")
     def _check_order(self) -> ScannedOrder:
-        _check_navigation_order_identity(self.navigation_url, self.source_order_id)
+        _check_order_details_identity(self.navigation_url, self.source_order_id)
         if _parse_displayed_label(self.displayed_label) != _parse_iso_date(self.order_date):
             raise HistoryProposalError(
                 "source order: displayed_label "

@@ -55,7 +55,7 @@ def _label(iso_date: str) -> str:
 
 
 def _nav_url(source_order_id: str) -> str:
-    return f"https://www.ab.gr/orders/{source_order_id}"
+    return f"https://www.ab.gr/my-account/order?id={source_order_id}"
 
 
 def _product_url(product_id: str) -> str:

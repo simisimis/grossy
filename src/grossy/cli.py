@@ -831,7 +831,7 @@ def db_restore(
 
 @history_app.command("discover-prepare")
 def history_discover_prepare() -> None:
-    """Prepare the observable-six listed-order discovery phase."""
+    """Prepare the listed-orders discovery phase."""
     try:
         paths = resolve_paths()
         result = run_discover_prepare(paths)
@@ -857,7 +857,7 @@ def history_sync_dry_run(
 def history_scan_prepare(
     listed_orders: Annotated[Path, typer.Option("--listed-orders", exists=True, dir_okay=False)],
 ) -> None:
-    """Expose the exact unknown orders to scan, oldest first (FR-9, FR-14).
+    """Expose the current walk's unknown orders to scan, oldest first (FR-9, FR-14).
 
     Count-only: no order is opened and no product content is inspected. When
     there are no unknown orders, writes the sanitized no-op synchronization

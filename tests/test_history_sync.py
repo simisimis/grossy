@@ -1,4 +1,4 @@
-"""Tests for observable-six history synchronization (PRD FR-6..FR-31, sections 10.2, 15, 18).
+"""Tests for reservation-history synchronization (PRD FR-7..FR-31, sections 10.2, 15, 18).
 
 Covers the closed proposal schemas, the deterministic sync phases
 (discover-prepare, sync-dry-run, scan-prepare, scan-validate, sync-apply),
@@ -36,12 +36,15 @@ from grossy.history import (
     validate_listed_orders,
     validate_order_scan,
 )
+from grossy.history.proposal import LISTED_ORDERS_SCHEMA_NAME
 from grossy.init import do_init
 from grossy.paths import GrossyPaths
 
 RUNNER = CliRunner()
 
 GENERATED_AT = "2026-09-26T12:00:00+00:00"
+# The retired predecessor schema name: v2 replaced it in place with no reader.
+RETIRED_LISTED_ORDERS_SCHEMA_NAME = LISTED_ORDERS_SCHEMA_NAME.replace(".v2", ".v1")
 
 
 # --- proposal builders ------------------------------------------------------
@@ -53,7 +56,7 @@ def _label(iso_date: str) -> str:
 
 
 def _nav_url(source_order_id: str) -> str:
-    return f"https://www.ab.gr/orders/{source_order_id}"
+    return f"https://www.ab.gr/my-account/order?id={source_order_id}"
 
 
 def _product_url(product_id: str) -> str:
@@ -63,7 +66,6 @@ def _product_url(product_id: str) -> str:
 def _listed_order(source_order_id: str, order_date: str) -> dict[str, Any]:
     return {
         "source_order_id": source_order_id,
-        "displayed_label": _label(order_date),
         "order_date": order_date,
         "navigation_url": _nav_url(source_order_id),
     }
@@ -100,8 +102,8 @@ def _scanned_order(
 
 def _listed_orders_payload(orders: list[dict[str, Any]]) -> dict[str, Any]:
     return {
-        "schema_name": "grossy.history.listed-orders.v1",
-        "schema_version": 1,
+        "schema_name": "grossy.history.listed-orders.v2",
+        "schema_version": 2,
         "generated_at": GENERATED_AT,
         "orders": orders,
     }
@@ -117,7 +119,7 @@ def _scan_payload(orders: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _window_listed() -> dict[str, Any]:
-    """Six dated orders: 2026-09-20 .. 2026-09-25, IDs 1001 .. 1006."""
+    """Six listed orders: 2026-09-20 .. 2026-09-25, IDs 1001 .. 1006."""
     orders = []
     for i in range(6):
         source_id = str(1001 + i)
@@ -233,12 +235,8 @@ class TestQueryBackedOrderIdentity:
         scanned = []
         for listed in payload["orders"]:
             listed["source_order_id"] = "000" + listed["source_order_id"]
-            listed["navigation_url"] = (
-                "https://www.ab.gr/customerhub/quick-shop/orders?id=" + listed["source_order_id"]
-            )
-            order = _scanned_order(listed["source_order_id"], listed["order_date"], ["11"])
-            order["navigation_url"] = listed["navigation_url"]
-            scanned.append(order)
+            listed["navigation_url"] = _nav_url(listed["source_order_id"])
+            scanned.append(_scanned_order(listed["source_order_id"], listed["order_date"], ["11"]))
         listed_path = _write(tmp_path, "listed-query.json", payload)
         scan_path = _write(tmp_path, "scan-query.json", _scan_payload(scanned))
         dry_args = ["history", "sync-dry-run", "--listed-orders", str(listed_path)]
@@ -260,93 +258,121 @@ class TestQueryBackedOrderIdentity:
 
     @pytest.mark.parametrize("family", ["listed", "scan"])
     def test_accepts_bound_query_without_normalizing_id(self, family: str) -> None:
-        url = "https://www.ab.gr/customerhub/quick-shop/orders?id=000123456"
+        url = _nav_url("000123456")
         order = _validate_query_order(family, url)
         assert order.source_order_id == "000123456"
         assert order.navigation_url == url
 
     @pytest.mark.parametrize("family", ["listed", "scan"])
-    def test_preserves_legacy_queryless_route(self, family: str) -> None:
-        url = _nav_url("000123456")
-        assert _validate_query_order(family, url).navigation_url == url
-
-    @pytest.mark.parametrize("family", ["listed", "scan"])
     def test_rejects_query_id_mismatch(self, family: str) -> None:
         with pytest.raises(HistoryProposalError, match="id must match source_order_id"):
-            _validate_query_order(
-                family, "https://www.ab.gr/customerhub/quick-shop/orders?id=123456"
-            )
+            _validate_query_order(family, _nav_url("123456"))
+
+    # --- both families: only the order-details route ------------------------
 
     @pytest.mark.parametrize("family", ["listed", "scan"])
     @pytest.mark.parametrize(
         "url",
         [
+            # Retired routes: the quick-shop history overview and queryless paths.
+            "https://www.ab.gr/customerhub/quick-shop/orders?id=000123456",
             "https://www.ab.gr/customerhub/quick-shop/orders",
-            "https://www.ab.gr/customerhub/quick-shop/orders?",
-            "https://www.ab.gr/customerhub/quick-shop/orders?id=LAST_ORDERS_PRODUCTS",
-            "https://www.ab.gr/customerhub/quick-shop/orders?id=",
-            "https://www.ab.gr/customerhub/quick-shop/orders?id=000123456&id=000123456",
-            "https://www.ab.gr/customerhub/quick-shop/orders?id=000123456&extra=1",
-            "https://www.ab.gr/customerhub/quick-shop/orders?ID=000123456",
-            "https://www.ab.gr/customerhub/quick-shop/orders?id=%3000123456",
-            "https://www.ab.gr/customerhub/quick-shop/orders?%69d=000123456",
-            "https://www.ab.gr/customerhub/quick-shop/orders?id=000123456#",
-            "https://www.ab.gr/customerhub/quick-shop/orders?id=000123456#section",
-            "https://www.ab.gr/customerhub/quick-shop/orders/?id=000123456",
-            "https://www.ab.gr/customerhub/quick-shop/../orders?id=000123456",
-            "https://www.ab.gr/customerhub/quick-shop/%6frders?id=000123456",
+            "https://www.ab.gr/orders/000123456",
+            "https://www.ab.gr/en/eshop/order-history/detail/000123456",
+            # Order-details route with a wrong or ambiguous selection.
+            "https://www.ab.gr/my-account/order",
+            "https://www.ab.gr/my-account/order?",
+            "https://www.ab.gr/my-account/order?id=LAST_ORDERS_PRODUCTS",
+            "https://www.ab.gr/my-account/order?id=",
+            "https://www.ab.gr/my-account/order?id=000123456&id=000123456",
+            "https://www.ab.gr/my-account/order?id=000123456&extra=1",
+            "https://www.ab.gr/my-account/order?ID=000123456",
+            "https://www.ab.gr/my-account/order?id=%3000123456",
+            "https://www.ab.gr/my-account/order?%69d=000123456",
+            "https://www.ab.gr/my-account/order?id=000123456#",
+            "https://www.ab.gr/my-account/order?id=000123456#section",
+            "https://www.ab.gr/my-account/order/?id=000123456",
+            "https://www.ab.gr/en/my-account/order?id=000123456",
+            "https://www.ab.gr/my-account/../my-account/order?id=000123456",
+            "https://www.ab.gr/my-account/%6frder?id=000123456",
+            "https://www.ab.gr/my-account/order?id=000123456<script>",
             "https://www.ab.gr/other?id=000123456",
-            "https://evil.example/customerhub/quick-shop/orders?id=000123456",
+            "http://www.ab.gr/my-account/order?id=000123456",
+            "https://evil.example/my-account/order?id=000123456",
         ],
     )
-    def test_rejects_aggregate_or_ambiguous_selection(self, family: str, url: str) -> None:
+    def test_rejects_retired_or_ambiguous_route(self, family: str, url: str) -> None:
         with pytest.raises(HistoryProposalError):
             _validate_query_order(family, url)
 
 
 class TestListedOrdersSchema:
-    def test_valid_window_accepted(self) -> None:
-        proposal = validate_listed_orders(_window_listed())
-        assert len(proposal.orders) == 6
+    @pytest.mark.parametrize("count", [0, 1, 6, 60], ids=["zero", "one", "six", "many"])
+    def test_accepts_any_order_count(self, count: int) -> None:
+        """v2 has no fixed window: zero, one and many listed orders validate."""
+        orders = [
+            _listed_order(f"{1000 + i:09d}", f"2026-{1 + i // 28:02d}-{1 + i % 28:02d}")
+            for i in range(count)
+        ]
+        proposal = validate_listed_orders(_listed_orders_payload(orders))
+        assert proposal.schema_name == "grossy.history.listed-orders.v2"
+        assert proposal.schema_version == 2
+        assert len(proposal.orders) == count
 
-    @pytest.mark.parametrize(
-        "url",
-        [
-            "https://www.ab.gr/en/eshop/order-history/detail/1001",
-            "https://www.ab.gr/orders/%CE%B1",
-        ],
-        ids=["multi-segment", "percent-encoded-utf8"],
-    )
-    def test_accepts_legitimate_navigation_url(self, url: str) -> None:
-        payload = _window_listed()
-        payload["orders"][0]["navigation_url"] = url
-        assert validate_listed_orders(payload).orders[0].navigation_url == url
+    def test_preserves_leading_zero_ids_as_strings(self) -> None:
+        payload = _listed_orders_payload(
+            [_listed_order("000123456", "2026-11-05"), _listed_order("123456", "2026-11-05")]
+        )
+        proposal = validate_listed_orders(payload)
+        assert [o.source_order_id for o in proposal.orders] == ["000123456", "123456"]
+        assert proposal.orders[0].navigation_url == _nav_url("000123456")
+
+    def test_accepts_iso_date_with_day_at_most_twelve(self) -> None:
+        """A list date 05/11/2026 arrives as ISO 2026-11-05 and is kept verbatim."""
+        proposal = validate_listed_orders(
+            _listed_orders_payload([_listed_order("000000001", "2026-11-05")])
+        )
+        assert proposal.orders[0].order_date == "2026-11-05"
 
     @pytest.mark.parametrize(
         "mutation,match",
         [
-            pytest.param(
-                lambda p: p["orders"].pop(), "exactly the 6-order window", id="wrong-window-size"
-            ),
             pytest.param(
                 lambda p: p["orders"].__setitem__(-1, dict(p["orders"][0])),
                 "duplicate source order ID",
                 id="duplicate-ids",
             ),
             pytest.param(
-                lambda p: p["orders"][0].update(displayed_label="2026-09-20"),
-                "DD/MM/YYYY",
-                id="non-ddmmyyyy-label",
+                lambda p: p["orders"][0].update(displayed_label="20/09/2026"),
+                None,
+                id="v1-displayed-label-field",
             ),
             pytest.param(
-                lambda p: p["orders"][0].update(order_date="2026-10-01"),
-                "disagrees with order_date",
-                id="label-date-mismatch",
+                lambda p: p["orders"][0].update(order_date="20/09/2026"),
+                "ISO YYYY-MM-DD",
+                id="ddmmyyyy-date",
             ),
             pytest.param(
                 lambda p: p["orders"][0].update(order_date="20260920"),
                 "ISO YYYY-MM-DD",
                 id="non-iso-date",
+            ),
+            pytest.param(
+                lambda p: p["orders"][0].update(order_date="2026-13-01"),
+                "not a valid calendar date",
+                id="invalid-calendar-date",
+            ),
+            pytest.param(
+                lambda p: p["orders"][0].update(source_order_id="1001x"),
+                None,
+                id="non-numeric-id",
+            ),
+            pytest.param(
+                lambda p: p["orders"][0].update(
+                    navigation_url="https://www.ab.gr/customerhub/quick-shop/orders?id=1001"
+                ),
+                "order-details route",
+                id="retired-quick-shop-route",
             ),
             pytest.param(
                 lambda p: p["orders"][0].update(navigation_url="https://evil.example/orders/1001"),
@@ -359,32 +385,36 @@ class TestListedOrdersSchema:
                 id="unknown-field",
             ),
             pytest.param(
-                lambda p: p.update(schema_name="grossy.history.listed-orders.v2"),
+                lambda p: p.update(schema_name=RETIRED_LISTED_ORDERS_SCHEMA_NAME),
                 "schema_name",
-                id="wrong-schema-name",
+                id="v1-schema-name",
+            ),
+            pytest.param(
+                lambda p: p.update(schema_version=1),
+                "schema_version",
+                id="v1-schema-version",
             ),
             pytest.param(
                 lambda p: p["orders"][0].update(
-                    navigation_url="https://www.ab.gr/orders/1001<script>"
+                    navigation_url="https://www.ab.gr/my-account/order?id=1001<script>"
                 ),
                 "prohibited content",
                 id="prohibited-content",
             ),
-            # P1: encoded/mixed dot segments, separators and controls would change
-            # the route; none may pass as the listed order route.
+            # Encoded/mixed dot segments, separators and controls would change
+            # the route; none may pass as the order-details route.
             *[
                 pytest.param(
                     lambda p, url=url: p["orders"][0].update(navigation_url=url),
-                    "percent-encoded traversal",
+                    "order-details route",
                     id=case,
                 )
                 for case, url in [
-                    ("encoded-dotdot", "https://www.ab.gr/orders/%2e%2e/other"),
-                    ("mixed-dot-1", "https://www.ab.gr/orders/.%2e/other"),
-                    ("mixed-dot-2", "https://www.ab.gr/orders/%2e./other"),
-                    ("nested-encoding", "https://www.ab.gr/orders/%252e%252e/other"),
-                    ("encoded-separator", "https://www.ab.gr/orders/%2fsecret"),
-                    ("encoded-control", "https://www.ab.gr/orders/%00x"),
+                    ("encoded-dotdot", "https://www.ab.gr/my-account/%2e%2e/order?id=1001"),
+                    ("mixed-dot", "https://www.ab.gr/my-account/.%2e/order?id=1001"),
+                    ("nested-encoding", "https://www.ab.gr/%252e%252e/my-account/order?id=1001"),
+                    ("encoded-separator", "https://www.ab.gr/my-account%2forder?id=1001"),
+                    ("encoded-control", "https://www.ab.gr/my-account/order%00?id=1001"),
                 ]
             ],
         ],
@@ -436,8 +466,8 @@ class TestOrderScanSchema:
             ),
             # P1: the scan proposal cannot be directed off the listed order route.
             pytest.param(
-                lambda o: o.update(navigation_url="https://www.ab.gr/orders/%2e%2e/other"),
-                "percent-encoded traversal",
+                lambda o: o.update(navigation_url="https://www.ab.gr/my-account/%6frder?id=1001"),
+                "order-details route",
                 id="encoded-traversal-url",
             ),
             pytest.param(
@@ -493,7 +523,9 @@ class TestDiscoverPrepare:
         assert result.schema_version >= 1
         payload = result.to_dict()
         assert payload["status"] == "ready"
-        assert payload["required_order_window"] == 6
+        assert "required_order_window" not in payload
+        assert payload["listed_orders_schema"] == "grossy.history.listed-orders.v2"
+        assert RETIRED_LISTED_ORDERS_SCHEMA_NAME not in json.dumps(payload)
 
     def test_reports_imported_count(self, initialized_home: GrossyPaths) -> None:
         conn = open_connection(initialized_home.database_file)
@@ -539,7 +571,7 @@ class TestSyncDryRun:
         self, initialized_home: GrossyPaths, tmp_path: Path
     ) -> None:
         payload = _window_listed()
-        del payload["orders"][-1]
+        payload["orders"][-1]["navigation_url"] = "https://www.ab.gr/orders/1006"
         path = _write(tmp_path, "listed.json", payload)
         with pytest.raises(HistorySyncError, match="listed-orders proposal rejected"):
             run_sync_dry_run(path, initialized_home)
@@ -575,9 +607,11 @@ class TestScanPrepare:
             "1006",
         ]
         first = result.unknown_orders[0]
-        assert first["order_date"] == "2026-09-22"
-        assert first["displayed_label"] == "22/09/2026"
-        assert first["navigation_url"] == "https://www.ab.gr/orders/1003"
+        assert first == {
+            "source_order_id": "1003",
+            "order_date": "2026-09-22",
+            "navigation_url": _nav_url("1003"),
+        }
         assert result.report_path is None
         output = result.to_dict()
         assert output["orders_opened"] == 0
@@ -599,7 +633,7 @@ class TestScanPrepare:
 
         report_text = result.report_path.read_text(encoding="utf-8")
         assert "Status: no-op" in report_text
-        assert "Listed orders (observable window): 6" in report_text
+        assert "Listed orders: 6" in report_text
         assert "Unknown orders at discovery: 0" in report_text
         # FR-29: no source order IDs in the human report.
         for i in range(6):
@@ -615,16 +649,56 @@ class TestScanPrepare:
         for i in range(6):
             assert str(1001 + i) not in json_text
 
+    def test_zero_listed_orders_is_noop(
+        self, initialized_home: GrossyPaths, tmp_path: Path
+    ) -> None:
+        """An empty walk is a valid v2 proposal and a no-op report."""
+        path = _write(tmp_path, "listed.json", _listed_orders_payload([]))
+        result = run_scan_prepare(path, initialized_home)
+        assert result.status == "no-op"
+        assert result.listed_order_count == 0
+        assert result.unknown_orders == ()
+        assert result.report_path is not None
+        assert "Listed orders: 0" in result.report_path.read_text(encoding="utf-8")
+
+    def test_single_unknown_order_with_leading_zeros(
+        self, initialized_home: GrossyPaths, tmp_path: Path
+    ) -> None:
+        payload = _listed_orders_payload([_listed_order("000123456", "2026-11-05")])
+        path = _write(tmp_path, "listed.json", payload)
+        result = run_scan_prepare(path, initialized_home)
+        assert result.status == "ready"
+        assert result.unknown_order_count == 1
+        assert result.unknown_orders[0]["source_order_id"] == "000123456"
+        assert result.unknown_orders[0]["order_date"] == "2026-11-05"
+
+    def test_many_listed_orders_returns_only_current_walk_unknowns(
+        self, initialized_home: GrossyPaths, tmp_path: Path
+    ) -> None:
+        """Sixty listed orders with thirty imported expose exactly the thirty unknown."""
+        ids = [f"{1 + i:09d}" for i in range(60)]
+        _seed_imported(initialized_home.database_file, ids[:30])
+        orders = [
+            _listed_order(oid, f"2026-{1 + i // 28:02d}-{1 + i % 28:02d}")
+            for i, oid in enumerate(ids)
+        ]
+        path = _write(tmp_path, "listed.json", _listed_orders_payload(list(reversed(orders))))
+        result = run_scan_prepare(path, initialized_home)
+        assert result.status == "ready"
+        assert result.listed_order_count == 60
+        assert result.unknown_order_count == 30
+        assert [o["source_order_id"] for o in result.unknown_orders] == ids[30:]
+
     def test_fails_without_database(self, grossy_home: GrossyPaths, tmp_path: Path) -> None:
         path = _write(tmp_path, "listed.json", _window_listed())
         with pytest.raises(HistorySyncError, match="run 'grossy init' first"):
             run_scan_prepare(path, grossy_home)
 
-    def test_rejects_invalid_listed_proposal(
+    def test_rejects_v1_listed_proposal(
         self, initialized_home: GrossyPaths, tmp_path: Path
     ) -> None:
         payload = _window_listed()
-        del payload["orders"][-1]
+        payload.update(schema_name=RETIRED_LISTED_ORDERS_SCHEMA_NAME, schema_version=1)
         path = _write(tmp_path, "listed.json", payload)
         with pytest.raises(HistorySyncError, match="listed-orders proposal rejected"):
             run_scan_prepare(path, initialized_home)
@@ -864,10 +938,10 @@ class TestSyncApply:
             run_sync_apply(scan_path, initialized_home, listed_orders_path=listed_path)
         assert _imported_ids(initialized_home.database_file) == set()
 
-    def test_apply_with_listed_orders_rejects_extra_out_of_window_order(
+    def test_apply_with_listed_orders_rejects_unlisted_order(
         self, initialized_home: GrossyPaths, tmp_path: Path
     ) -> None:
-        """A scan containing an order not in the listed window is rejected (FR-10)."""
+        """A scan containing an order not in the listed discovery is rejected (FR-10)."""
         orders = [
             _scanned_order("1001", "2026-09-20", ["11"]),
             _scanned_order("1002", "2026-09-21", ["12"]),
@@ -875,13 +949,13 @@ class TestSyncApply:
             _scanned_order("1004", "2026-09-23", ["14"]),
             _scanned_order("1005", "2026-09-24", ["15"]),
             _scanned_order("1006", "2026-09-25", ["16"]),
-            # This ID is not in the listed window.
+            # This ID is not in the listed discovery.
             _scanned_order("9999", "2026-09-10", ["99"]),
         ]
         scan_path = _write(tmp_path, "scan.json", _scan_payload(orders))
         listed_path = _write(tmp_path, "listed.json", _window_listed())
 
-        with pytest.raises(HistorySyncError, match="not present in the listed-orders window"):
+        with pytest.raises(HistorySyncError, match="not present in the listed-orders discovery"):
             run_sync_apply(scan_path, initialized_home, listed_orders_path=listed_path)
         assert _imported_ids(initialized_home.database_file) == set()
 
@@ -933,9 +1007,14 @@ class TestSyncApply:
     def test_apply_with_listed_orders_rejects_mismatched_url(
         self, initialized_home: GrossyPaths, tmp_path: Path
     ) -> None:
-        """A scan with a navigation URL that doesn't match is rejected."""
+        """A scan whose navigation URL is off the order-details route fails closed.
+
+        Both proposals accept only ``/my-account/order?id=<source_order_id>``,
+        so a URL mismatch is caught at scan validation before the sync-apply
+        URL-equality binding runs; nothing is imported either way.
+        """
         order = _scanned_order("1001", "2026-09-20", ["11"])
-        order["navigation_url"] = "https://www.ab.gr/orders/9999"  # different URL
+        order["navigation_url"] = "https://www.ab.gr/orders/1001"  # retired queryless route
         orders = [
             order,
             _scanned_order("1002", "2026-09-21", ["12"]),
@@ -947,7 +1026,67 @@ class TestSyncApply:
         scan_path = _write(tmp_path, "scan.json", _scan_payload(orders))
         listed_path = _write(tmp_path, "listed.json", _window_listed())
 
-        with pytest.raises(HistorySyncError, match="navigation_url does not match"):
+        with pytest.raises(HistorySyncError, match="order-scan proposal rejected.*order-details"):
+            run_sync_apply(scan_path, initialized_home, listed_orders_path=listed_path)
+        assert _imported_ids(initialized_home.database_file) == set()
+
+    def test_apply_single_order_stores_day_first_list_date(
+        self, initialized_home: GrossyPaths, tmp_path: Path
+    ) -> None:
+        """A list date 05/11/2026 (day <= 12) is stored as ISO 2026-11-05.
+
+        The listed order carries only the ISO date; the scan's DD/MM/YYYY label
+        must agree with it, so a month-first mix-up cannot be imported.
+        """
+        listed_path = _write(
+            tmp_path,
+            "listed.json",
+            _listed_orders_payload([_listed_order("000123456", "2026-11-05")]),
+        )
+        scan = _scanned_order("000123456", "2026-11-05", ["11"])
+        assert scan["displayed_label"] == "05/11/2026"
+        scan_path = _write(tmp_path, "scan.json", _scan_payload([scan]))
+
+        result = run_sync_apply(scan_path, initialized_home, listed_orders_path=listed_path)
+        assert result.status == "applied"
+        assert result.stats.imported_orders == 1
+        assert result.stats.listed_order_count == 1
+        assert result.stats.unknown_order_count == 1
+        conn = open_connection(initialized_home.database_file)
+        try:
+            row = conn.execute(
+                "SELECT source_order_id, displayed_label, order_date FROM source_orders"
+            ).fetchone()
+        finally:
+            conn.close()
+        assert tuple(row) == ("000123456", "05/11/2026", "2026-11-05")
+
+    def test_apply_rejects_month_first_date_mix_up(
+        self, initialized_home: GrossyPaths, tmp_path: Path
+    ) -> None:
+        """A scan dated 2026-05-11 cannot bind to a list entry dated 2026-11-05."""
+        listed_path = _write(
+            tmp_path,
+            "listed.json",
+            _listed_orders_payload([_listed_order("000123456", "2026-11-05")]),
+        )
+        scan_path = _write(
+            tmp_path,
+            "scan.json",
+            _scan_payload([_scanned_order("000123456", "2026-05-11", ["11"])]),
+        )
+        with pytest.raises(HistorySyncError, match="does not match listed-orders date"):
+            run_sync_apply(scan_path, initialized_home, listed_orders_path=listed_path)
+        assert _imported_ids(initialized_home.database_file) == set()
+
+    def test_apply_with_zero_listed_orders_rejects_any_scan(
+        self, initialized_home: GrossyPaths, tmp_path: Path
+    ) -> None:
+        listed_path = _write(tmp_path, "listed.json", _listed_orders_payload([]))
+        scan_path = _write(
+            tmp_path, "scan.json", _scan_payload([_scanned_order("1001", "2026-09-20", ["11"])])
+        )
+        with pytest.raises(HistorySyncError, match="not present in the listed-orders discovery"):
             run_sync_apply(scan_path, initialized_home, listed_orders_path=listed_path)
         assert _imported_ids(initialized_home.database_file) == set()
 
@@ -971,7 +1110,7 @@ class TestSyncApply:
         assert result.report_path is not None
         report_text = result.report_path.read_text(encoding="utf-8")
         # FR-28: listed and unknown counts are present.
-        assert "Listed orders (observable window): 6" in report_text
+        assert "Listed orders: 6" in report_text
         assert "Unknown orders at discovery: 4" in report_text
         # FR-29: source order IDs still omitted.
         assert "1001" not in report_text
@@ -1149,7 +1288,7 @@ class TestCli:
 
     def test_scan_prepare_invalid_fails_closed(self, cli_env: GrossyPaths, tmp_path: Path) -> None:
         payload = _window_listed()
-        del payload["orders"][-1]
+        payload["orders"][-1]["navigation_url"] = "https://www.ab.gr/orders/1006"
         listed = _write(tmp_path, "listed.json", payload)
         result = RUNNER.invoke(app, ["history", "scan-prepare", "--listed-orders", str(listed)])
         assert result.exit_code == 1
@@ -1330,13 +1469,13 @@ class TestStabilizeScan:
 
 
 class TestFilterDatedOrders:
-    """Tests for the observable-six order list filtering with 'All orders' exclusion."""
+    """Tests for order list filtering with 'All orders' exclusion and no fixed count."""
 
     def _dated_entry(self, oid: str, label: str) -> OrderListEntry:
         return OrderListEntry(
             label=label,
             source_order_id=oid,
-            navigation_url=f"https://www.ab.gr/orders/{oid}",
+            navigation_url=_nav_url(oid),
         )
 
     def _all_orders_entry(self) -> OrderListEntry:
@@ -1347,29 +1486,16 @@ class TestFilterDatedOrders:
             is_union_entry=True,
         )
 
-    def test_excludes_all_orders_and_returns_six(self) -> None:
-        """FR-7: the 'All orders' union entry is excluded; exactly 6 dated orders remain."""
+    @pytest.mark.parametrize("count", [0, 1, 6, 60], ids=["zero", "one", "six", "many"])
+    def test_excludes_all_orders_and_keeps_any_count(self, count: int) -> None:
+        """FR-7: the 'All orders' union entry is excluded; any dated count remains."""
         entries = [self._all_orders_entry()] + [
-            self._dated_entry(str(1001 + i), f"{20 + i:02d}/09/2026") for i in range(6)
+            self._dated_entry(f"{1001 + i:09d}", f"{1 + i % 28:02d}/09/2026") for i in range(count)
         ]
         result = filter_dated_orders(entries)
-        assert len(result) == 6
+        assert len(result) == count
         assert all(not e.is_union_entry for e in result)
-        assert {e.source_order_id for e in result} == {str(1001 + i) for i in range(6)}
-
-    def test_rejects_too_few_orders(self) -> None:
-        entries = [self._all_orders_entry()] + [
-            self._dated_entry(str(1001 + i), f"{20 + i:02d}/09/2026") for i in range(5)
-        ]
-        with pytest.raises(OrderListError, match="exactly 6 dated orders"):
-            filter_dated_orders(entries)
-
-    def test_rejects_too_many_orders(self) -> None:
-        entries = [self._all_orders_entry()] + [
-            self._dated_entry(str(1001 + i), f"{20 + i:02d}/09/2026") for i in range(7)
-        ]
-        with pytest.raises(OrderListError, match="exactly 6 dated orders"):
-            filter_dated_orders(entries)
+        assert [e.source_order_id for e in result] == [f"{1001 + i:09d}" for i in range(count)]
 
     def test_rejects_missing_source_id(self) -> None:
         entries = [
@@ -1476,7 +1602,7 @@ class TestFakeBrowserIntegration:
             "source_order_id": "2001",
             "displayed_label": "25/09/2026",
             "order_date": "2026-09-25",
-            "navigation_url": "https://www.ab.gr/orders/2001",
+            "navigation_url": _nav_url("2001"),
             "displayed_product_count": 4,
             "products": [
                 {
@@ -1534,7 +1660,7 @@ class TestFakeBrowserIntegration:
             OrderListEntry(
                 label=f"{20 + i:02d}/09/2026",
                 source_order_id=str(5001 + i),
-                navigation_url=f"https://www.ab.gr/orders/{5001 + i}",
+                navigation_url=_nav_url(str(5001 + i)),
             )
             for i in range(6)
         ]
@@ -1550,7 +1676,6 @@ class TestFakeBrowserIntegration:
             [
                 {
                     "source_order_id": e.source_order_id or "",
-                    "displayed_label": e.label,
                     "order_date": _iso_from_label(e.label),
                     "navigation_url": e.navigation_url or "",
                 }
@@ -1598,7 +1723,7 @@ class TestFakeBrowserIntegration:
             OrderListEntry(
                 label=f"{20 + i:02d}/09/2026",
                 source_order_id=str(6001 + i),
-                navigation_url=f"https://www.ab.gr/orders/{6001 + i}",
+                navigation_url=_nav_url(str(6001 + i)),
             )
             for i in range(5, -1, -1)
         ]
@@ -1612,7 +1737,6 @@ class TestFakeBrowserIntegration:
             [
                 {
                     "source_order_id": e.source_order_id or "",
-                    "displayed_label": e.label,
                     "order_date": _iso_from_label(e.label),
                     "navigation_url": e.navigation_url or "",
                 }
@@ -1668,7 +1792,7 @@ class TestFakeBrowserIntegration:
             scan_orders.append(
                 {
                     "source_order_id": source_id,
-                    "displayed_label": unknown["displayed_label"],
+                    "displayed_label": _label(unknown["order_date"]),
                     "order_date": unknown["order_date"],
                     "navigation_url": unknown["navigation_url"],
                     "displayed_product_count": len(product_ids),

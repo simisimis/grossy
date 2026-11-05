@@ -100,7 +100,7 @@ def _scanned_order(
         "source_order_id": source_order_id,
         "displayed_label": _label(order_date),
         "order_date": order_date,
-        "navigation_url": f"https://www.ab.gr/orders/{source_order_id}",
+        "navigation_url": f"https://www.ab.gr/my-account/order?id={source_order_id}",
         "displayed_product_count": len(product_ids),
         "products": [_scanned_product(pid, category=category) for pid in product_ids],
     }
