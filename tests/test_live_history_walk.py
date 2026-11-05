@@ -1,6 +1,7 @@
-"""Offline fake-browser tests for the reservation-history enumeration walk in history_sync.py.
+"""Offline fake-browser tests for the reservation-history enumeration walk and the per-order
+scan/apply loop in history_sync.py.
 
-The real live_common module runs against a fake page (evaluate/browser/settle_page seams) and
+The real live_common module runs against fake pages (evaluate/browser/settle_page seams) and
 a fake clock; CLI phases run in-process against a private temporary home. No agent-browser,
 no network, no real state.
 """
@@ -16,23 +17,42 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from test_history_sync import _seed_imported
+from test_history_sync import _imported_ids, _seed_imported
 
 from grossy.history import (
+    HistorySyncError,
     run_discover_prepare,
     run_scan_prepare,
+    run_scan_validate,
+    run_sync_apply,
     run_sync_dry_run,
     validate_listed_orders,
+    validate_order_scan,
 )
 from grossy.init import do_init
 from grossy.paths import GrossyPaths, resolve_paths
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "skills/grossy/scripts"
 LIST_URL = "https://www.ab.gr/en/my-account/reservation-history"
+ORDER_URL = "https://www.ab.gr/my-account/order?id="
 
 
 def order_id(index: int) -> str:
     return f"{900 - index:09d}"  # newest first, nine digits, leading zeros
+
+
+def product_id(sid: str, index: int) -> str:
+    return f"7{sid[-3:]}{index:02d}"
+
+
+def card(pid: str, *, link: bool = True, brand: str = "Brand") -> dict[str, list[str]]:
+    """One rendered order-page product card as the script's cards_js reports it."""
+    hrefs = [f"/en/eshop/Food/item-{pid}/p/{pid}"] if link else ["/en/eshop/Food"]
+    return {"hrefs": hrefs, "names": [f"Product {pid}"], "brands": [brand]}
+
+
+def cards(sid: str, count: int = 3) -> list[dict[str, list[str]]]:
+    return [card(product_id(sid, j)) for j in range(count)]
 
 
 class Stop(Exception):
@@ -50,29 +70,85 @@ class FakeClock:
         return self.now
 
 
-class FakeList:
-    """Reservation-history list rendering 10 entries, then 10 more per settled bottom pass.
+class LazyPage:
+    """A page rendering 10 items on open, then 10 more per settled bottom pass.
 
-    ``stall``: the bottom is never reached (content keeps the page longer than the viewport).
-    ``busy``: the network never idles, so no pass settles. Every seam records the ``recover``
-    flag it was called with and the settle timeouts it was given."""
+    ``stall``: the bottom is never reached (content keeps the page longer than the viewport)."""
 
-    def __init__(self, dates: list[str], *, stall: bool = False, busy: bool = False) -> None:
-        self.entries = [(order_id(i), date) for i, date in enumerate(dates)]
-        self.rendered = min(10, len(self.entries))
+    def __init__(self, items: list[Any], *, stall: bool = False) -> None:
+        self.items = items
+        self.rendered = min(10, len(items))
         self.stall = stall
-        self.busy = busy
-        self.opened: list[str] = []
         self.scrolls = 0
         self.at_bottom = False
         self.scrolled = False  # lazy loading is triggered by a scroll and lands on settle
+
+    def scroll(self) -> None:
+        self.scrolls += 1
+        self.scrolled = True
+        self.at_bottom = not self.stall
+
+    def settle(self) -> None:
+        if self.scrolled and self.rendered < len(self.items):
+            self.rendered = min(len(self.items), self.rendered + 10)
+            self.at_bottom = False  # the page grew below the scroll position
+        self.scrolled = False
+
+    def visible(self) -> list[Any]:
+        return self.items[: self.rendered]
+
+
+class FakeList:
+    """Reservation-history list plus the order-details pages the script opens from it.
+
+    ``products`` maps an order ID to its rendered cards (default: three linked cards per
+    order). ``busy``: the network never idles, so no pass settles. ``order_stall``: those order
+    pages never reach the bottom. ``fail_open``: opening that order's page stops as an
+    authentication challenge. Every seam records the ``recover`` flag it was called with and
+    the settle timeouts it was given."""
+
+    def __init__(
+        self,
+        dates: list[str],
+        *,
+        stall: bool = False,
+        busy: bool = False,
+        products: dict[str, list[dict[str, list[str]]]] | None = None,
+        order_stall: frozenset[str] = frozenset(),
+        fail_open: str | None = None,
+    ) -> None:
+        self.entries = [(order_id(i), date) for i, date in enumerate(dates)]
+        self.list = LazyPage(self.entries, stall=stall)
+        self.current = self.list
+        self.busy = busy
+        self.products = products or {}
+        self.order_stall = order_stall
+        self.fail_open = fail_open
+        self.opened: list[str] = []
         self.recover_flags: list[bool] = []
         self.settle_timeouts: list[float] = []
+        self.cli_calls: list[tuple[str, ...]] = []  # every CLI phase call, in order
+
+    @property
+    def scrolls(self) -> int:
+        return self.list.scrolls
 
     def browser(self, args: list[str], tag: str = "cmd", recover: bool = True) -> str:
+        import live_common
+
         self.recover_flags.append(recover)
         if args[0] == "open":
             self.opened.append(args[1])
+            if args[1] == LIST_URL:
+                self.current = self.list
+            else:
+                assert args[1].startswith(ORDER_URL)
+                sid = args[1].removeprefix(ORDER_URL)
+                if sid == self.fail_open:
+                    live_common.stop("open:authentication_or_challenge")
+                self.current = LazyPage(
+                    self.products.get(sid, cards(sid)), stall=sid in self.order_stall
+                )
         return ""
 
     def settle_page(self, tag: str = "settle", recover: bool = True, timeout: float = 40) -> bool:
@@ -80,10 +156,7 @@ class FakeList:
         self.settle_timeouts.append(timeout)
         if self.busy:
             return False
-        if self.scrolled and self.rendered < len(self.entries):
-            self.rendered = min(len(self.entries), self.rendered + 10)
-            self.at_bottom = False  # the page grew below the scroll position
-        self.scrolled = False
+        self.current.settle()
         return True
 
     def evaluate(self, body: str, tag: str = "eval", recover: bool = True) -> Any:
@@ -91,17 +164,19 @@ class FakeList:
 
         self.recover_flags.append(recover)
         if body == live_common.SCROLL_BOTTOM_JS:
-            self.scrolls += 1
-            self.scrolled = True
-            self.at_bottom = not self.stall
+            self.current.scroll()
             return True
         if body == live_common.AT_BOTTOM_JS:
-            return self.at_bottom
+            return self.current.at_bottom
         if "order-details-button" in body:
+            assert self.current is self.list, "list read on an order page"
             return [
                 {"hrefs": [f"/my-account/order?id={sid}"], "dates": [date]}
-                for sid, date in self.entries[: self.rendered]
+                for sid, date in self.current.visible()
             ]
+        if "product-block" in body:
+            assert self.current is not self.list, "order read on the list page"
+            return self.current.visible()
         if 'readyState==="complete"' in body or body.endswith("return true;"):
             return True
         pytest.fail("unexpected page read: " + body[:80])
@@ -122,9 +197,13 @@ def run_walk(
     paths: GrossyPaths,
     page: FakeList,
     *args: str,
+    work_name: str = "work",
 ) -> tuple[Path, Any, FakeClock]:
-    """Run history_sync.py against ``page``; return (work dir, exit outcome, clock)."""
-    work = tmp_path / "work"
+    """Run history_sync.py against ``page``; return (work dir, exit outcome, clock).
+
+    Every CLI call is recorded in ``page.cli_calls``; sync-apply proposals must contain exactly
+    one order (per-order transactions)."""
+    work = tmp_path / work_name
     work.mkdir(mode=0o700)
     monkeypatch.setenv("GROSSY_LIVE_DIR", str(work))
     monkeypatch.syspath_prepend(str(SCRIPTS))
@@ -142,12 +221,28 @@ def run_walk(
 
     def grossy(*args: str, out: str | None = None, **_: Any) -> dict[str, Any]:
         assert args[0] == "history"
-        if args[1] == "discover-prepare":
-            result = run_discover_prepare(paths).to_dict()
-        else:
-            assert args[2] == "--listed-orders"
-            phase = {"sync-dry-run": run_sync_dry_run, "scan-prepare": run_scan_prepare}[args[1]]
-            result = phase(Path(args[3]), paths).to_dict()
+        page.cli_calls.append(args)
+        try:
+            if args[1] == "discover-prepare":
+                result = run_discover_prepare(paths).to_dict()
+            elif args[1] == "scan-validate":
+                assert len(args) == 3
+                result = run_scan_validate(Path(args[2])).to_dict()
+            elif args[1] == "sync-apply":
+                assert args[3] == "--listed-orders" and len(args) == 5
+                proposal = validate_order_scan(json.loads(Path(args[2]).read_text()))
+                assert len(proposal.orders) == 1, "sync-apply must carry exactly one order"
+                result = run_sync_apply(
+                    Path(args[2]), paths, listed_orders_path=Path(args[4])
+                ).to_dict()
+            else:
+                assert args[2] == "--listed-orders"
+                phase = {"sync-dry-run": run_sync_dry_run, "scan-prepare": run_scan_prepare}[
+                    args[1]
+                ]
+                result = phase(Path(args[3]), paths).to_dict()
+        except HistorySyncError as exc:
+            raise Stop(f"CLI {args[0]} {args[1]} exit 1: {exc}") from exc
         if out:
             drill.write(out, result)
         return result
@@ -168,7 +263,7 @@ def run_walk(
         outcome: Any = exc
     else:
         outcome = None
-    assert page.opened == [LIST_URL]
+    assert page.opened[:1] == [LIST_URL] and all(u.startswith(ORDER_URL) for u in page.opened[1:])
     # Strict pinned tab on every browser command of the history walk (no recovery path).
     assert page.recover_flags and not any(page.recover_flags)
     assert all(timeout <= drill.STALL_SECONDS for timeout in page.settle_timeouts)
@@ -183,6 +278,20 @@ def listed(work: Path) -> list[dict[str, str]]:
 
 def enumeration(work: Path) -> dict[str, Any]:
     return json.loads((work / "enumeration.json").read_text())
+
+
+def scan_apply(work: Path) -> dict[str, Any]:
+    return json.loads((work / "scan-apply.json").read_text())
+
+
+def applied_ids(page: FakeList) -> list[str]:
+    """Order IDs of the single-order sync-apply calls, in call order."""
+    ids = []
+    for call in page.cli_calls:
+        if call[1] == "sync-apply":
+            proposal = validate_order_scan(json.loads(Path(call[2]).read_text()))
+            ids.append(proposal.orders[0].source_order_id)
+    return ids
 
 
 def test_list_without_entries_stops_as_missing_identity(
@@ -225,11 +334,14 @@ def test_walk_lists_every_order_newest_first_after_two_settled_passes(
 
 
 def test_leading_zero_ids_and_day_first_dates_are_preserved(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, home: GrossyPaths
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    home: GrossyPaths,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     page = FakeList(["05/11/2026"])
     work, outcome, _ = run_walk(tmp_path, monkeypatch, home, page)
-    assert isinstance(outcome, Stop) and "per_order_scan_not_available" in str(outcome)
+    assert outcome is None  # one unknown order scanned and applied; the script ran to its end
     assert listed(work) == [
         {
             "source_order_id": "000000900",
@@ -240,15 +352,59 @@ def test_leading_zero_ids_and_day_first_dates_are_preserved(
     prepared = json.loads((work / "scan-prepare.json").read_text())
     assert prepared["status"] == "ready" and prepared["unknown_order_count"] == 1
     assert prepared["unknown_orders"][0]["source_order_id"] == "000000900"
+    # The order-scan proposal keeps the leading-zero ID, the listed ISO date and its DD/MM/YYYY
+    # label; the order page is never read for a date.
+    scan = json.loads((work / "order-scan-001.json").read_text())
+    assert scan["schema_name"] == "grossy.history.order-scan.v1" and scan["schema_version"] == 1
+    (order,) = scan["orders"]
+    assert order["source_order_id"] == "000000900" and order["order_date"] == "2026-11-05"
+    assert order["displayed_label"] == "05/11/2026"
+    assert order["navigation_url"] == ORDER_URL + "000000900"
+    assert [p["product_id"] for p in order["products"]] == [
+        product_id("000000900", j) for j in range(3)
+    ]
+    assert order["products"][0] == {
+        "product_id": "790000",
+        "canonical_url": "https://www.ab.gr/en/eshop/Food/item-790000/p/790000",
+        "title": "Product 790000",
+        "brand": "Brand",
+    }
+    assert applied_ids(page) == ["000000900"]
+    assert _imported_ids(home.database_file) == {"000000900"}
+    assert scan_apply(work) == {
+        "status": "complete",
+        "reason": "all_unknown_orders_applied",
+        "mode": "default",
+        "unknown_order_count": 1,
+        "applied_order_count": 1,
+        "last_imported_order_id": "000000900",
+    }
+    # Privacy: no source order ID or URL on stdout.
+    out = capsys.readouterr().out
+    assert "000000900" not in out and "ab.gr" not in out and "order 1/1" in out
 
 
-def test_default_walk_stops_at_first_imported_order(
+def test_zero_unknown_orders_apply_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, home: GrossyPaths
+) -> None:
+    _seed_imported(home.database_file, [order_id(i) for i in range(3)])
+    page = FakeList(["01/10/2026"] * 3)
+    work, outcome, _ = run_walk(tmp_path, monkeypatch, home, page)
+    assert isinstance(outcome, SystemExit) and outcome.code == 0
+    assert page.opened == [LIST_URL]  # no order page opened
+    assert applied_ids(page) == [] and not (work / "scan-apply.json").exists()
+    assert json.loads((work / "scan-prepare.json").read_text())["status"] == "no-op"
+    assert _imported_ids(home.database_file) == {order_id(i) for i in range(3)}
+
+
+def test_default_walk_stops_at_first_imported_order_and_applies_each_unknown_order(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, home: GrossyPaths
 ) -> None:
     _seed_imported(home.database_file, [order_id(i) for i in range(12, 25)])
-    page = FakeList(["01/10/2026"] * 25)
+    # Many unknown orders; the newest renders 19 cards over two lazy loads (three bottom passes).
+    page = FakeList(["01/10/2026"] * 25, products={order_id(0): cards(order_id(0), 19)})
     work, outcome, _ = run_walk(tmp_path, monkeypatch, home, page)
-    assert isinstance(outcome, Stop) and "per_order_scan_not_available" in str(outcome)
+    assert outcome is None
     assert [o["source_order_id"] for o in listed(work)] == [order_id(i) for i in range(13)]
     result = enumeration(work)
     assert result["status"] == "complete"
@@ -259,6 +415,104 @@ def test_default_walk_stops_at_first_imported_order(
     prepared = json.loads((work / "scan-prepare.json").read_text())
     assert prepared["unknown_order_count"] == 12
     assert prepared["unknown_orders"][0]["source_order_id"] == order_id(11)  # oldest first
+    # Each unknown order was opened, scanned, validated and applied newest first, exactly once
+    # and as its own sync-apply call; the result names the last imported ID.
+    assert page.opened[1:] == [ORDER_URL + order_id(i) for i in range(12)]
+    assert applied_ids(page) == [order_id(i) for i in range(12)]
+    phases = [c[1] for c in page.cli_calls if c[1] in ("scan-validate", "sync-apply")]
+    assert phases == ["scan-validate", "sync-apply"] * 12
+    assert _imported_ids(home.database_file) == {order_id(i) for i in range(25)}
+    first = json.loads((work / "order-scan-001.json").read_text())["orders"][0]
+    assert len(first["products"]) == 19
+    assert json.loads((work / "sync-apply-012.json").read_text())["imported_orders"] == 1
+    assert scan_apply(work) == {
+        "status": "complete",
+        "reason": "all_unknown_orders_applied",
+        "mode": "default",
+        "unknown_order_count": 12,
+        "applied_order_count": 12,
+        "last_imported_order_id": order_id(11),
+    }
+
+
+def test_interruption_leaves_exactly_the_applied_orders_and_full_rerun_imports_the_rest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, home: GrossyPaths
+) -> None:
+    dates = ["01/10/2026"] * 5
+    # Authentication loss while opening the third order page: two orders are already durable.
+    page = FakeList(dates, fail_open=order_id(2))
+    work, outcome, _ = run_walk(tmp_path, monkeypatch, home, page, work_name="w1")
+    assert isinstance(outcome, Stop) and str(outcome) == "open:authentication_or_challenge"
+    assert applied_ids(page) == [order_id(0), order_id(1)]
+    assert _imported_ids(home.database_file) == {order_id(0), order_id(1)}
+    assert not (work / "order-scan-003.json").exists()
+    progress = scan_apply(work)
+    assert progress["status"] == "in_progress" and progress["applied_order_count"] == 2
+    assert progress["last_imported_order_id"] == order_id(1)
+
+    # A following default run stops at the newest imported ID: no resumption, no replay.
+    page2 = FakeList(dates)
+    work2, outcome2, _ = run_walk(tmp_path, monkeypatch, home, page2, work_name="w2")
+    assert isinstance(outcome2, SystemExit) and outcome2.code == 0
+    assert page2.opened == [LIST_URL] and applied_ids(page2) == []
+    assert enumeration(work2)["ended"] == "stopped_at_known_order"
+    assert enumeration(work2)["last_known_order_id"] == order_id(0)
+    assert _imported_ids(home.database_file) == {order_id(0), order_id(1)}
+
+    # A separately authorized --full rerun skips the two imported IDs and imports the rest.
+    page3 = FakeList(dates)
+    work3, outcome3, _ = run_walk(tmp_path, monkeypatch, home, page3, "--full", work_name="w3")
+    assert outcome3 is None
+    assert enumeration(work3)["known_order_count"] == 2
+    assert page3.opened[1:] == [ORDER_URL + order_id(i) for i in (2, 3, 4)]
+    assert applied_ids(page3) == [order_id(2), order_id(3), order_id(4)]
+    assert _imported_ids(home.database_file) == {order_id(i) for i in range(5)}
+    assert scan_apply(work3)["status"] == "complete"
+    assert scan_apply(work3)["last_imported_order_id"] == order_id(4)
+
+
+def test_missing_canonical_link_stops_the_order_with_nothing_applied(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, home: GrossyPaths
+) -> None:
+    broken = cards(order_id(1))
+    broken[1] = card(product_id(order_id(1), 1), link=False)
+    page = FakeList(["01/10/2026"] * 3, products={order_id(1): broken})
+    work, outcome, _ = run_walk(tmp_path, monkeypatch, home, page)
+    assert isinstance(outcome, Stop) and str(outcome).startswith(
+        "product_link_missing: order 2 of 3"
+    )
+    assert applied_ids(page) == [order_id(0)]
+    assert _imported_ids(home.database_file) == {order_id(0)}
+    assert not (work / "order-scan-002.json").exists()
+    assert scan_apply(work) == {
+        "status": "partial",
+        "reason": "product_link_missing",
+        "mode": "default",
+        "unknown_order_count": 3,
+        "applied_order_count": 1,
+        "last_imported_order_id": order_id(0),
+        "scan_sequence": 2,
+    }
+
+
+def test_order_page_stall_ends_the_run_with_a_partial_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, home: GrossyPaths
+) -> None:
+    page = FakeList(["01/10/2026"] * 3, order_stall=frozenset({order_id(1)}))
+    work, outcome, clock = run_walk(tmp_path, monkeypatch, home, page)
+    assert isinstance(outcome, Stop) and str(outcome).startswith("order_scan_stalled: order 2 of 3")
+    assert applied_ids(page) == [order_id(0)]
+    assert _imported_ids(home.database_file) == {order_id(0)}
+    assert page.current.scrolls == 20 and clock.now >= 30  # only the 30 s stall rule ended it
+    assert scan_apply(work) == {
+        "status": "partial",
+        "reason": "stall_rule",
+        "mode": "default",
+        "unknown_order_count": 3,
+        "applied_order_count": 1,
+        "last_imported_order_id": order_id(0),
+        "scan_sequence": 2,
+    }
 
 
 def test_full_walk_skips_imported_orders_and_continues(

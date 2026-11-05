@@ -1,5 +1,5 @@
 """History sync: discover-prepare, reservation-history enumeration newest first, listed-orders v2
-proposal, sync-dry-run, scan-prepare.
+proposal, sync-dry-run, scan-prepare, then one scan-validate and sync-apply per unknown order.
 
 Usage: history_sync.py [--dry-run] [--full]
 The walk collects order-details anchors until two consecutive settled bottom passes add nothing.
@@ -10,8 +10,14 @@ CLI sync-dry-run phase, never SQL. Every browser command uses the strict pinned 
 authentication loss, CAPTCHA, route drift or target loss stops with no retry and no tab adoption.
 List identity is at least one rendered order entry with its order-details anchor; no verified
 empty-list state exists yet, so a list without entries stops as missing identity (fail closed).
+Each unknown order, newest first, is opened on its order-details page, scrolled to two settled
+bottom passes, built into its own order-scan proposal, validated and applied as one sync-apply
+transaction (with recurrence learning) before the next order is opened. Imported IDs are the only
+checkpoint: an interrupted run leaves exactly the orders applied so far, and a later run neither
+resumes nor replays. Order-page dates are never read; the order date comes from the listed entry.
 Outputs in the work dir: discover-prepare.json, listed-orders.json, enumeration.json, dry-run.json,
-scan-prepare.json. Private: never print source IDs/URLs.
+scan-prepare.json, order-scan-NNN.json, scan-validate-NNN.json, sync-apply-NNN.json (NNN is the
+scan sequence number, not the order ID) and scan-apply.json. Private: never print source IDs/URLs.
 """
 
 import os
@@ -46,6 +52,30 @@ ENTRIES_JS = (
 )
 HREF_RE = re.compile(r"^(?:https://www\.ab\.gr)?/my-account/order\?id=(\d+)$")
 DATE_RE = re.compile(r"^(\d{2})/(\d{2})/(\d{4})$")
+ORDER_PATH = "/my-account/order"
+# Canonical product link rendered on an order card (task 01: /en/eshop/<category-path>/p/<id>).
+PRODUCT_HREF_RE = re.compile(r"^(?:https://www\.ab\.gr)?/(?:(?:en|el)/)?eshop/[^?#\s]+/p/(\d+)$")
+
+
+def order_route_js(sid):
+    """Guard: the pinned tab shows the order-details page of exactly this order."""
+    return (
+        'if(location.pathname!=="' + ORDER_PATH + '"||new URLSearchParams(location.search).get('
+        '"id")!=="' + sid + '")throw Error("unexpected_route");'
+    )
+
+
+def cards_js(sid):
+    """Rendered non-carousel product cards: every /p/ link href, product-name and product-brand
+    text. Dates on the order page are never read (month-first rendering)."""
+    return (
+        order_route_js(sid)
+        + 'return [...document.querySelectorAll("[data-testid=product-block]")].filter(e=>v(e)&&!e'
+        '.closest("[data-testid=product-carousel-container]")).map(c=>({hrefs:[...c.querySelectorA'
+        'll("a[href*=\'/p/\']")].map(a=>a.getAttribute("href").split(/[?#]/)[0]),names:[...c.que'
+        'rySelectorAll("[data-testid=product-name]")].map(e=>e.innerText.trim()),brands:[...c.que'
+        'rySelectorAll("[data-testid=product-brand]")].map(e=>e.innerText.trim())}));'
+    )
 
 
 def listed_proposal(orders):
@@ -160,4 +190,127 @@ print("scan-prepare:", sp["status"], "unknown", sp.get("unknown_order_count"))
 if not sp.get("unknown_order_count"):
     print("history up to date (no-op summary written)")
     sys.exit(0)
-stop("per_order_scan_not_available: unknown orders listed in scan-prepare.json")
+
+# Per-order scan and apply, newest first (walk order). Each order is its own sync-apply
+# transaction; imported IDs are the only checkpoint, so a stop here leaves exactly the orders
+# applied so far and names the last imported ID in scan-apply.json.
+unknown_ids = {o["source_order_id"] for o in sp["unknown_orders"]}
+pending = [o for o in listed if o["source_order_id"] in unknown_ids]
+if len(pending) != len(unknown_ids):
+    stop("scan_prepare_unknown_orders_not_listed")
+imported = []  # applied order IDs in apply order (newest first)
+
+
+def scan_result(status, reason, **extra):
+    write(
+        "scan-apply.json",
+        {
+            "status": status,
+            "reason": reason,
+            "mode": result["mode"],
+            "unknown_order_count": len(pending),
+            "applied_order_count": len(imported),
+            "last_imported_order_id": imported[-1] if imported else None,
+            **extra,
+        },
+    )
+
+
+def scan_order(order, seq):
+    """Open the order page, walk it to two settled bottom passes and return (walk, products).
+    A card without exactly one canonical /p/<id> link or without a product name stops the run
+    with nothing applied for this order."""
+    sid, tag = order["source_order_id"], f"order-{seq:03d}"
+    products = {}  # product_id -> scanned product, first-seen order
+
+    def collect():
+        new = 0
+        for card in drill.evaluate(cards_js(sid), tag, recover=False):
+            links = {m.group(1): m for m in map(PRODUCT_HREF_RE.match, card["hrefs"]) if m}
+            if len(links) != 1:
+                scan_result("partial", "product_link_missing", scan_sequence=seq)
+                stop(
+                    f"product_link_missing: order {seq} of {len(pending)}, partial result in "
+                    "scan-apply.json"
+                )
+            if len(card["names"]) != 1 or not card["names"][0]:
+                scan_result("partial", "product_card_malformed", scan_sequence=seq)
+                stop(f"product_card_malformed: order {seq} of {len(pending)}")
+            pid, m = next(iter(links.items()))
+            href = m.group(0)
+            product = {
+                "product_id": pid,
+                "canonical_url": href
+                if href.startswith("https://")
+                else "https://www.ab.gr" + href,
+                "title": card["names"][0],
+                "brand": card["brands"][0]
+                if len(card["brands"]) == 1 and card["brands"][0]
+                else None,
+            }
+            if pid not in products:
+                products[pid] = product
+                new += 1
+            elif products[pid] != product:
+                stop(f"inconsistent_product_card: order {seq} of {len(pending)}")
+        return new
+
+    drill.browser(["open", order["navigation_url"]], tag, recover=False)
+    drill.wait(
+        order_route_js(sid) + 'return document.readyState==="complete"&&document.querySelectorAll("'
+        '[data-testid=my-account-order-details-container]").length===1;',
+        tag=tag,
+        recover=False,
+    )
+    drill.settle_page(tag, recover=False, timeout=drill.STALL_SECONDS)
+    walk = drill.walk_to_settled_bottom(collect, tag)
+    drill.evaluate(order_route_js(sid) + "return true;", tag, recover=False)
+    return walk, list(products.values())
+
+
+for seq, order in enumerate(pending, 1):
+    walk, products = scan_order(order, seq)
+    if walk["ended"] == "stalled":
+        scan_result("partial", "stall_rule", scan_sequence=seq)
+        stop(
+            f"order_scan_stalled: order {seq} of {len(pending)}, partial result in scan-apply.json"
+        )
+    if not products:
+        scan_result("partial", "order_products_missing", scan_sequence=seq)
+        stop(f"order_products_missing: order {seq} of {len(pending)}")
+    year, month, day = order["order_date"].split("-")
+    name = f"order-scan-{seq:03d}.json"
+    write(
+        name,
+        {
+            "schema_name": "grossy.history.order-scan.v1",
+            "schema_version": 1,
+            "generated_at": drill.now(),
+            "orders": [
+                {
+                    "source_order_id": order["source_order_id"],
+                    "displayed_label": f"{day}/{month}/{year}",
+                    "order_date": order["order_date"],
+                    "navigation_url": order["navigation_url"],
+                    "products": products,
+                }
+            ],
+        },
+    )
+    path = str(D / name)
+    drill.grossy("history", "scan-validate", path, out=f"scan-validate-{seq:03d}.json")
+    ap = drill.grossy(
+        "history", "sync-apply", path, "--listed-orders", lo, out=f"sync-apply-{seq:03d}.json"
+    )
+    if ap["status"] != "applied" or ap["imported_orders"] != 1:
+        scan_result("partial", "apply_not_confirmed", scan_sequence=seq)
+        stop(f"apply_not_confirmed: order {seq} of {len(pending)}")
+    imported.append(order["source_order_id"])
+    scan_result("in_progress", "applied", scan_sequence=seq)
+    print(
+        f"order {seq}/{len(pending)}: {len(products)} products, {walk['passes']} bottom passes, "
+        f"applied ({ap['new_products']} new products)",
+        flush=True,
+    )
+scan_result("complete", "all_unknown_orders_applied")
+print(f"history sync complete: {len(imported)} orders applied")

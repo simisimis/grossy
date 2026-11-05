@@ -13,9 +13,10 @@ Deterministic phases that never open a browser (PRD 10.3.9):
   unknown orders it writes the sanitized no-op synchronization summary
   (FR-28) and reports ``no-op``.
 - ``scan-validate``: deterministic validation of an order-scan proposal.
-- ``sync-apply``: atomic one-transaction import of every accepted unknown
-  order (FR-25); a failed discovery, scan, validation, or application imports
-  none of the batch (FR-26), and re-applying is idempotent (FR-27).
+- ``sync-apply``: atomic one-transaction import of the scanned orders, any
+  non-empty subset of the unknown set (one order per call in the per-order
+  skill loop) (FR-25); a failed discovery, scan, validation, or application
+  imports none of the call (FR-26), and re-applying is idempotent (FR-27).
 
 Sanitized reports (FR-28, FR-29) are written atomically and omit source order
 IDs.
@@ -501,9 +502,11 @@ def run_sync_apply(
     When ``listed_orders_path`` is supplied (FR-10.3.6, FR-23, FR-24), the
     scan's order identities are bound to the discovered unknown set: every
     scanned order must appear in the listed-orders discovery with matching
-    date and navigation URL, and the scan must contain exactly the unknown
-    orders (listed minus already-imported). This prevents partial scans or
-    unlisted IDs from being committed (PRD FR-26, FR-10.3.6).
+    date and navigation URL and must not be imported already. The scan may
+    cover any non-empty subset of the unknown orders (listed minus
+    already-imported), so the skill applies one order per call and the
+    imported IDs are the only checkpoint. Unlisted or already-imported IDs
+    are never committed (PRD FR-26, FR-10.3.6).
     """
     data = _load_json(proposal_path)
     proposal = _validate_scan_or_fail(data)
@@ -538,16 +541,10 @@ def run_sync_apply(
                 expected_unknown = listed_ids - imported
                 scan_ids = {o.source_order_id for o in proposal.orders}
 
-                # FR-23: the scan must contain exactly the unknown orders.
-                missing = expected_unknown - scan_ids
+                # FR-23: every scanned order must be one of the unknown orders; the
+                # scan may cover a subset of them (one order per call).
                 unlisted = scan_ids - listed_ids
                 already_imported = scan_ids & imported
-                if missing:
-                    raise HistorySyncError(
-                        f"order-scan proposal is missing {len(missing)} "
-                        f"expected unknown order(s) from the listed-orders "
-                        f"discovery; the scan must cover the full unknown set"
-                    )
                 if unlisted:
                     raise HistorySyncError(
                         f"order-scan proposal contains {len(unlisted)} order(s) "
@@ -557,9 +554,9 @@ def run_sync_apply(
                 if already_imported:
                     raise HistorySyncError(
                         f"order-scan proposal contains {len(already_imported)} "
-                        f"already-imported order(s); a scan must cover exactly the "
-                        f"unknown orders from the listed-orders discovery and must "
-                        f"not re-scan known orders"
+                        f"already-imported order(s); a scan must cover only unknown "
+                        f"orders from the listed-orders discovery and must not "
+                        f"re-scan known orders"
                     )
 
                 # Verify metadata consistency between listed and scan.

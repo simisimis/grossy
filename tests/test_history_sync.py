@@ -922,10 +922,10 @@ class TestSyncApply:
         assert result.stats.listed_order_count == 6
         assert result.stats.unknown_order_count == 4
 
-    def test_apply_with_listed_orders_rejects_partial_scan(
+    def test_apply_with_listed_orders_accepts_subset_of_unknown(
         self, initialized_home: GrossyPaths, tmp_path: Path
     ) -> None:
-        """A scan missing some unknown orders is rejected (FR-26)."""
+        """A scan covering only some unknown orders applies them (per-order apply)."""
         # Scan only 2 of the 6 unknown orders on a fresh DB.
         orders = [
             _scanned_order("1001", "2026-09-20", ["11"]),
@@ -934,9 +934,47 @@ class TestSyncApply:
         scan_path = _write(tmp_path, "scan.json", _scan_payload(orders))
         listed_path = _write(tmp_path, "listed.json", _window_listed())
 
-        with pytest.raises(HistorySyncError, match="missing 4 expected unknown order"):
-            run_sync_apply(scan_path, initialized_home, listed_orders_path=listed_path)
-        assert _imported_ids(initialized_home.database_file) == set()
+        result = run_sync_apply(scan_path, initialized_home, listed_orders_path=listed_path)
+        assert result.status == "applied" and result.stats.imported_orders == 2
+        assert result.stats.listed_order_count == 6
+        assert (
+            result.stats.unknown_order_count == 6
+        )  # the discovery's unknown count, not the scan's
+        assert _imported_ids(initialized_home.database_file) == {"1001", "1002"}
+
+    def test_sequential_single_order_applies_against_one_discovery(
+        self, initialized_home: GrossyPaths, tmp_path: Path
+    ) -> None:
+        """Two single-order applies bound to the same listed-orders discovery both succeed, each
+        as its own transaction with recurrence learning; a third apply of an ID imported by the
+        first call is rejected and imports nothing."""
+        listed_path = _write(tmp_path, "listed.json", _window_listed())
+        first = _write(
+            tmp_path, "s1.json", _scan_payload([_scanned_order("1006", "2026-09-25", ["11"])])
+        )
+        second = _write(
+            tmp_path, "s2.json", _scan_payload([_scanned_order("1005", "2026-09-24", ["11"])])
+        )
+
+        r1 = run_sync_apply(first, initialized_home, listed_orders_path=listed_path)
+        assert r1.status == "applied" and r1.stats.imported_orders == 1
+        assert r1.stats.unknown_order_count == 6
+        assert _imported_ids(initialized_home.database_file) == {"1006"}
+        r2 = run_sync_apply(second, initialized_home, listed_orders_path=listed_path)
+        assert r2.status == "applied" and r2.stats.imported_orders == 1
+        assert r2.stats.unknown_order_count == 5
+        assert _imported_ids(initialized_home.database_file) == {"1005", "1006"}
+        # Recurrence learning ran inside each apply: the product now counts two purchase orders.
+        row = _product_row(initialized_home.database_file, "11")
+        assert row is not None and row[2] == 2
+
+        replay = _write(
+            tmp_path, "s3.json", _scan_payload([_scanned_order("1006", "2026-09-25", ["12"])])
+        )
+        with pytest.raises(HistorySyncError, match="already-imported order"):
+            run_sync_apply(replay, initialized_home, listed_orders_path=listed_path)
+        assert _imported_ids(initialized_home.database_file) == {"1005", "1006"}
+        assert _product_row(initialized_home.database_file, "12") is None
 
     def test_apply_with_listed_orders_rejects_unlisted_order(
         self, initialized_home: GrossyPaths, tmp_path: Path
@@ -964,9 +1002,9 @@ class TestSyncApply:
     ) -> None:
         """P1 regression: a scan of known (already-imported) orders is rejected.
 
-        The scan must cover exactly the unknown orders; scanning all six
-        listed orders when two are already imported must fail closed and
-        import nothing (FR-23, FR-26).
+        The scan must cover only unknown orders; scanning all six listed
+        orders when two are already imported must fail closed and import
+        nothing (FR-23, FR-26).
         """
         _seed_imported(initialized_home.database_file, ["1001", "1002"])
 
