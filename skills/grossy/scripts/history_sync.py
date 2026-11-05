@@ -65,6 +65,17 @@ def order_route_js(sid):
     )
 
 
+def heading_js(sid):
+    """Distinct digit strings of the details headings (shape ``Order NNNNNNNNN``) rendered
+    inside the order-details container; order-page identity beyond the route ID."""
+    return (
+        order_route_js(sid)
+        + 'return [...new Set([...document.querySelectorAll("[data-testid=my-account-order-detail'
+        's-container] *")].map(e=>(e.innerText||"").trim()).filter(t=>/^Order\\s+\\d+$/.test(t)).'
+        'map(t=>t.replace(/\\D/g,"")))];'
+    )
+
+
 def cards_js(sid):
     """Rendered non-carousel product cards: every /p/ link href, product-name and product-brand
     text. Dates on the order page are never read (month-first rendering)."""
@@ -262,14 +273,38 @@ def scan_order(order, seq):
         tag=tag,
         recover=False,
     )
+    headings = drill.evaluate(heading_js(sid), tag, recover=False)
+    if not headings:
+        scan_result("partial", "order_heading_missing", scan_sequence=seq)
+        stop(f"order_heading_missing: order {seq} of {len(pending)}")
+    if headings != [sid]:
+        scan_result("partial", "order_heading_mismatch", scan_sequence=seq)
+        stop(f"order_heading_mismatch: order {seq} of {len(pending)}")
     drill.settle_page(tag, recover=False, timeout=drill.STALL_SECONDS)
     walk = drill.walk_to_settled_bottom(collect, tag)
     drill.evaluate(order_route_js(sid) + "return true;", tag, recover=False)
     return walk, list(products.values())
 
 
+def scan_order_recording_browser_stops(order, seq):
+    """Run ``scan_order``; a browser-level stop (authentication loss, CAPTCHA, route drift,
+    target loss) mid-order is first recorded in scan-apply.json, then stops as before."""
+    live_stop = drill.stop
+
+    def recording_stop(reason):
+        drill.stop = live_stop
+        scan_result("stopped", reason, scan_sequence=seq)
+        live_stop(reason)
+
+    drill.stop = recording_stop
+    try:
+        return scan_order(order, seq)
+    finally:
+        drill.stop = live_stop
+
+
 for seq, order in enumerate(pending, 1):
-    walk, products = scan_order(order, seq)
+    walk, products = scan_order_recording_browser_stops(order, seq)
     if walk["ended"] == "stalled":
         scan_result("partial", "stall_rule", scan_sequence=seq)
         stop(

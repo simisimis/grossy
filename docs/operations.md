@@ -96,13 +96,14 @@ the executable responds; it does not authorize browser work. A local nonzero
 result must be resolved before a workflow. Missing authentication requires the user to log in manually in headed
 Brave; no automated credentials or 2FA.
 
-For signed-in history navigation, use the owner-verified public overview URL:
-`https://www.ab.gr/customerhub/quick-shop/orders`. Navigate directly through
+For signed-in history navigation, use the reservation-history list:
+`https://www.ab.gr/en/my-account/reservation-history`. Navigate directly through
 agent-browser and verify the rendered route. Do not assume the homepage is a
 safe intermediate route: supervised smoke encountered a stale checkout tab.
 Pin the intended tab and verify its rendered route. Stop on checkout during
-history inspection or another unexpected route; do not inspect individual orders
-unless the bounded history-scan step has its own approval.
+history inspection or another unexpected route; order-details pages
+(`/my-account/order?id=<numeric-string>`) are opened only by the approved
+history sync for its unknown orders.
 
 AB.gr links its full cart to `https://www.ab.gr/checkout`. The owner has approved
 an exception for coordinator read-only cart-list inspection there. Read only
@@ -113,7 +114,7 @@ the basket in the browser); removals need confirmation; checkout progression
 remains prohibited.
 
 The coordinator must separately supervise rendered checks of authentication,
-six dated history controls and a whole-cart read. Record these separately from
+the rendered reservation-history list and a whole-cart read. Record these separately from
 CLI doctor output. No worker/reviewer runs even a read-only live browser check.
 See [smoke-test.md](smoke-test.md).
 
@@ -137,6 +138,7 @@ or `grossy history sync` commands:
 ```text
 /skill:grossy history sync --dry-run
 /skill:grossy history sync
+/skill:grossy history sync --full
 /skill:grossy weekly plan [--skip-history-sync]
 /skill:grossy weekly reroll <run-id> <recipeN> --from <class-list|all>
 /skill:grossy weekly add <run-id> <recipe-list|all>
@@ -176,37 +178,57 @@ Class lists use meat,fish,poultry,vegetarian; slots use recipe1..recipe4.
 `just weekly-add RUN_ID=<id> RECIPES=<list|all>` invoke Pi and are operational,
 not validation targets. Do not use unrestricted wrappers for bounded smoke.
 
-The observed history selector has six dated options plus All orders. The owner
-reports date-specific products and a combined All orders view, with more products
-loading on scroll. This describes observed behavior, not a verified client-side
-filter: hiding cards, fetching new results and navigation remain unverified.
-The owner additionally reports dated selections at
-`/customerhub/quick-shop/orders?id=<numeric-order-id>` and aggregate selection at
-`?id=LAST_ORDERS_PRODUCTS` (equivalent to the bare overview). Preserve each dated
-URL's exact source ID; do not fabricate paths or treat the aggregate token as an
-order. Grossy accepts exactly one raw numeric `id` on that canonical route,
-matching `source_order_id` exactly in both listed/scanned proposals, including
-leading zeros. It rejects aggregate/empty IDs, duplicate/extra/encoded parameters,
-fragments and mismatches; other query-bearing routes remain unsupported. Legacy
-safe queryless order paths remain compatible, but the bare overview is not an
-individual order. Do not strip identity-bearing query parameters.
-No AB.gr frontend source/concrete live adapter or internal loading mechanism
-has been verified; check selected identity/result before approved scans.
-History dry-run expands this dropdown and reads its six dated controls only,
-excluding All orders; no date selection, union-product extraction or lazy-loading
-scrolls. Stable source IDs must come from rendered evidence, not dates/list indexes.
-Approved scans select each exact identity-bound date and stabilize its filtered
-list with two bottom passes yielding no new product IDs. Normal sync scans
-only unknown listed orders oldest first, stabilizes each by two bottom passes
-with no new IDs, then applies the entire accepted batch transactionally. Counts
-are diagnostics, not historical quantities. A mismatch warns; missing stable IDs,
-UI drift, authentication loss or a failed phase stops the batch.
+### History sync flow
 
-The exact history phases are discover-prepare, sync-dry-run `--listed-orders`,
-scan-prepare `--listed-orders`, scan-validate, and sync-apply `--listed-orders
-<listed.json> <scan.json>`. Retain the validated discovery proposal for
-`weekly plan-prepare --listed-orders <listed.json>`; only an explicit
-`--skip-history-sync` waives comparison. Then baseline-apply persists the whole
+`live.sh history [--dry-run] [--full]` (skill `history sync`) walks the
+reservation-history list newest first on the pinned tab. Each entry is one
+`li[data-testid=my-account-orders-item]` with one order-details anchor
+(`/my-account/order?id=<numeric-string>`) and one `DD/MM/YYYY` date, the only
+date source. IDs are numeric strings with leading zeros. The walk scrolls to
+the bottom until two consecutive settled bottom passes add nothing. The only
+safety stop is the stall rule: no new content and no bottom reached for 30 s
+ends the run with an explicit partial result (`enumeration.json`,
+`reason: stall_rule`); there is no scroll-count or global-time ceiling.
+By default the walk stops at the first already-imported order (asked through
+sync-dry-run, never SQL); `--full` skips imported orders and walks the whole
+list. Zero rendered entries stop with `list_identity_missing`: a genuinely
+empty reservation history cannot sync until an empty-list state is verified.
+
+The walk writes the `grossy.history.listed-orders.v2` proposal (any order
+count). The exact CLI phases are discover-prepare, sync-dry-run
+`--listed-orders`, scan-prepare `--listed-orders` (the unknown orders of this
+walk; `--dry-run` stops before it), then per unknown order, newest first:
+open its order-details page, require the route ID, the details container and a
+`Order NNNNNNNNN` heading whose digits equal the requested ID
+(`order_heading_missing`/`order_heading_mismatch` otherwise), scan to two
+settled bottom passes, write a one-order `grossy.history.order-scan.v1`
+proposal, scan-validate, and sync-apply `--listed-orders <listed.json>
+<scan.json>`. Each order is its own transaction including recurrence learning;
+imported IDs are the only checkpoint. A card without a canonical `/p/<id>`
+link, a stall or an unconfirmed apply ends the run as `partial` with nothing
+applied for that order; a browser-level stop (authentication loss, CAPTCHA,
+route drift, pinned tab lost) records `stopped` with its reason.
+`scan-apply.json` names `last_imported_order_id`. Counts are diagnostics, not
+historical quantities. No retry, no tab adoption, no continuation after a
+failed phase.
+
+### Backfill procedure (`--full`)
+
+A `--full` run needs its own explicit approval, by the coordinator with the
+owner watching: `live.sh start --history-only`, then `live.sh history --full`
+(optionally `--dry-run` first to count unknown orders). It imports every
+unknown order in the list, skipping imported ones. If it stops (stall,
+missing canonical link, browser-level stop), the orders applied so far are
+durable and `scan-apply.json` names the last imported ID. Resuming is never
+automatic: a following default run stops at the newest imported order, and
+the remaining older orders need a separately authorized `--full` run. Record
+sanitized counts only.
+
+Retain the validated listed-orders proposal for
+`weekly plan-prepare --listed-orders <listed.json>`: history is fresh only when
+the default walk found no unknown order (empty unknown set, including zero
+listed orders); an unknown order fails the plan closed until synced. Only an
+explicit `--skip-history-sync` waives comparison. Then baseline-apply persists the whole
 cart. Stage1 recurring-preflight returns at most one positive action. Stage
 consent (granted at plan-prepare) authorizes each addition without per-action
 user prompt; `grossy weekly action-check <run-id> <mutation-manifest.json>`

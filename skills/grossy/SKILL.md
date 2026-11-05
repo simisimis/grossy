@@ -69,7 +69,7 @@ report, never bypass it.
 
 | Skill command | Script steps |
 | --- | --- |
-| `history sync [--dry-run]` | `live.sh start --history-only`, then `live.sh history [--dry-run]` |
+| `history sync [--dry-run] [--full]` | `live.sh start --history-only`, then `live.sh history [--dry-run] [--full]` |
 | `weekly plan` | `start` → **stop for owner's manual delivery-slot selection** → `slot-ready` (only after owner reports ready) → `history` → `stage1` → `recurring` → **stop for basket review** → `advance` → `recipes` → write matches spec → `matches <spec>` → **present options, wait for the owner's pick** |
 | `weekly add <run-id> <list>` | `live.sh recipe-add <list>` (runs `selection-apply` with the owner's exact choice) |
 | `weekly reroll`, `remove`, `finish`, `abandon`, `resume` | `live.sh grossy weekly ...` for the CLI phase; browser reads for resume/removal use the shared modules |
@@ -81,87 +81,98 @@ If a procedure changes on AB.gr, fix the script and this file together.
 
 ## Commands
 
-### `history sync [--dry-run]`
+### `history sync [--dry-run] [--full]`
 
-Synchronize the six currently observable dated AB.gr orders.
+Import every AB.gr order listed in the reservation history that is not yet
+imported, newest first, each as its own transaction. There is no fixed order
+count. `live.sh history [--dry-run] [--full]` runs the whole sequence.
 
 **Phase sequence:**
 
 1. `grossy history discover-prepare`
-2. Agent navigates directly to the AB.gr order-history overview using
-   `agent-browser`: `https://www.ab.gr/customerhub/quick-shop/orders`.
-   The owner verified this public overview route in the signed-in headed browser.
-   Do not use the homepage as a history-navigation shortcut. Smoke encountered
-   a stale checkout tab; pin the intended tab and verify its rendered route before
-   extracting anything. Unexpected checkout, login, challenges or another route
-   require a stop; the approved cart-list-only exception below does not cover history. This overview URL does not authorize opening individual orders.
-3. On the overview, expand the **All orders dropdown/filter** below the Orders
-   selection. Do not confuse its label with a page heading or assume a locator
-   without checking the rendered control. The verified opener is the unique
-   visible `[role=combobox] h2` labelled All orders; verify uniqueness, label,
-   pinned tab/route and `aria-expanded` before clicking. Clicking the whole
-   combobox's center did not open the popup reliably. The supervised check found seven
-   options (six dates plus All orders); their button markup does not establish
-   navigation semantics. The owner reports URL-backed selections:
-   `/customerhub/quick-shop/orders?id=<numeric-order-id>` for a date and
-   `?id=LAST_ORDERS_PRODUCTS` (or the bare overview) for All orders. This supplies
-   a genuine ID candidate, not proof of how products load internally. Never
-   treat LAST_ORDERS_PRODUCTS as an individual order. Grossy accepts exactly
-   one raw numeric `id` on this canonical route and binds it to the exact source
-   ID in listed and scanned proposals; preserve leading zeros. Empty/aggregate,
-   duplicate/extra/encoded parameters, fragments and mismatched IDs fail closed. During discovery inspect only the dropdown controls:
-   do not select a date, scroll/load the union's products or extract their contents.
-   The dated `button[role=option]` controls carry the stable numeric source order
-   ID in their DOM `id`; each has a DD/MM/YYYY label, sometimes with a count suffix.
-   Extract the date only; never infer identity or purchased quantity from that suffix.
-   Obtain IDs from these rendered attributes, not list position or a date-derived
-   guess. Derive the selection URL from this verified ID and the owner-observed
-   exact query route above, not fabricated per-order paths;
-   the dated URL must retain its observed numeric `id` and match the source ID.
-   Do not substitute the bare aggregate overview or invent per-order paths.
-   If stable identity cannot be bound to a date option, stop before proposal/apply.
-4. Agent emits a `grossy.history.listed-orders.v1` proposal JSON.
-5. `grossy history sync-dry-run --listed-orders <proposal.json>`
-6. If `--dry-run`, stop here.
-7. `grossy history scan-prepare --listed-orders <proposal.json>`
-   - Returns the exact unknown orders oldest first. It opens no order and
-     inspects no product contents.
+2. Enumeration walk on the pinned tab: open
+   `https://www.ab.gr/en/my-account/reservation-history`, verify the rendered
+   route, then scroll to the bottom repeatedly until two consecutive settled
+   bottom passes add no new entry. Each entry is
+   `li[data-testid=my-account-orders-item]` with exactly one
+   `a[data-testid=order-details-button]` whose href is
+   `/my-account/order?id=<numeric-string>` and one
+   `p[data-testid=my-account-orders-item-date]` (`DD/MM/YYYY`, the only date
+   source). IDs stay numeric strings with leading zeros. The `view-in-quickshop`
+   control is never used. A malformed or inconsistent entry stops the run.
+   - Positive list identity is at least one rendered entry with its
+     order-details anchor. Zero rendered entries stop with
+     `list_identity_missing` (fail closed): no verified empty-list state exists,
+     so a genuinely empty reservation history cannot sync yet (known limit).
+   - "Already imported" is asked through `grossy history sync-dry-run
+     --listed-orders <batch.json>` on each rendered batch, never SQL. By
+     default the walk stops at the first already-imported order (older entries
+     are dropped); with `--full` it skips imported orders and walks the whole
+     list. `--full` is a separately authorized backfill, never automatic.
+   - Stall rule: no new content and no bottom reached for 30 s ends the run as
+     `partial` with `reason: stall_rule` in `enumeration.json`. There is no
+     scroll-count or global-time ceiling and no other safety stop.
+3. The walk writes the `grossy.history.listed-orders.v2` proposal
+   (`listed-orders.json`, any order count) and `enumeration.json` (`mode`,
+   `ended`, `bottom_passes`, `listed_order_count`, `known_order_count`,
+   `last_known_order_id`, `last_imported_order_id`).
+4. `grossy history sync-dry-run --listed-orders <listed-orders.json>`
+5. If `--dry-run`, stop here.
+6. `grossy history scan-prepare --listed-orders <listed-orders.json>`
+   - Returns the unknown orders of this walk. It opens no order and inspects
+     no product contents.
    - If it reports `unknown_order_count == 0` (status `no-op`), it has
      written the sanitized no-op synchronization summary report; stop.
-8. For each unknown order in the `unknown_orders` list returned by
-   `scan-prepare` (already oldest first):
-   - Select the exact dated option bound to that stable source ID. Verify the
-     resulting selected date/identity and rendered route before reading products;
-     stop if the expected per-order view cannot be established. Do not assume
-     separate pages/URLs or a client-side filtering mechanism. All orders is
-     never a substitute for a dated order scan.
-   - Agent scrolls the filtered product list to the bottom, allowing lazy-loaded
-     cards to render, until two consecutive bottom passes reveal no new product
-     IDs. Re-establish identity/stabilization for each approved unknown order.
-   - Agent extracts only schema-authorized product facts. The supervised scan
-     verified rendered `[data-testid="product-block"]` cards, canonical numeric
-     `/p/<id>` links, `[data-testid="product-name"]` title and
-     `[data-testid="product-brand"]` brand. Each visible card must bind to one
-     product ID and a nonempty title. Read these fields from the card; the product
-     link may be an empty image overlay, so do not use its text as the title.
-     Recheck selected URL ID/date before every pass. Allow lazy loading after
-     small scroll increments; retain seen identities across passes, then require
-     two no-new-ID bottom passes. Optional price/package/category/count facts
-     stay null unless observed, not guessed from product names or other orders.
-   - Scan exactly this set: `sync-apply` rejects scans that are missing
-     unknown orders, contain out-of-window orders, or re-scan
-     already-imported orders.
-9. Agent emits a `grossy.history.order-scan.v1` proposal JSON.
-10. `grossy history scan-validate <proposal.json>`
-11. `grossy history sync-apply --listed-orders <listed-proposal.json> <proposal.json>`
+7. For each unknown order, newest first, on the same pinned tab:
+   - Open its `navigation_url`; require route `/my-account/order` with
+     `id` equal to the source ID, exactly one
+     `[data-testid=my-account-order-details-container]`, and a details heading
+     `Order NNNNNNNNN` inside it whose digits equal the requested ID. A missing
+     heading stops with `order_heading_missing`; any other digits stop with
+     `order_heading_mismatch`; nothing on that page is read.
+   - Walk to two consecutive settled bottom passes that add no new product ID
+     (same stall rule). Read only non-carousel `[data-testid=product-block]`
+     cards: exactly one canonical `/p/<id>` link, `[data-testid=product-name]`
+     title (nonempty) and `[data-testid=product-brand]`. Order-page dates are
+     never read; the order date and label come from the listed entry.
+   - A card without exactly one canonical link stops the run with
+     `product_link_missing`, nothing applied for that order and the remaining
+     unknown orders left for a separately authorized `--full` run; it does not
+     skip to the next order (known limit).
+   - Emit a one-order `grossy.history.order-scan.v1` proposal
+     (`order-scan-NNN.json`), then
+     `grossy history scan-validate <order-scan-NNN.json>` and
+     `grossy history sync-apply --listed-orders <listed-orders.json>
+     <order-scan-NNN.json>`. Import and recurrence learning share one
+     transaction. Only `status: applied` with `imported_orders == 1` counts;
+     anything else stops with `apply_not_confirmed`.
+   - `scan-apply.json` records progress after each order (`status`, `reason`,
+     `mode`, `unknown_order_count`, `applied_order_count`,
+     `last_imported_order_id`, `scan_sequence`): `in_progress`/`applied`
+     between orders, `complete`/`all_unknown_orders_applied` at the end,
+     `partial` with the script's reason, or `stopped` with the browser-level
+     stop reason when authentication loss, CAPTCHA, route drift or target loss
+     interrupted an order.
 
-**Stop conditions:**
+Imported order IDs are the only checkpoint. An interrupted run leaves exactly
+the orders applied so far; a later default run stops at the newest imported ID
+and neither resumes nor replays. Older unknown orders need a separately
+authorized `--full` run. Human summaries carry counts only; never print source
+IDs or URLs.
 
-- Missing stable product ID on any card → fail closed, import nothing.
-- Anti-bot or CAPTCHA → stop immediately; no bypass.
+**Stop conditions (no retry, no tab adoption, no continuation after a failed
+phase):**
+
 - Authentication loss → stop; direct user to manual login.
-- Fewer/more than six dated orders or ambiguous UI → fail; report UI drift.
-- Displayed-count mismatch → warn; use stabilized unique product IDs.
+- Anti-bot or CAPTCHA → stop immediately; no bypass.
+- Route drift (list or order page not on its expected route) or the pinned
+  tab unavailable → stop.
+- Missing list identity (`list_identity_missing`), malformed or inconsistent
+  entry → stop before any proposal.
+- Heading mismatch or missing heading on an order page → stop, nothing read.
+- Missing canonical product link, malformed card, stall → stop with a partial
+  result in `scan-apply.json` (or `enumeration.json` during the walk).
+- Nonzero CLI phase exit → stop; nothing half-applied.
 
 ### `weekly plan [--skip-history-sync]`
 
@@ -194,6 +205,8 @@ do not fabricate retrospective confirmation for an already-prepared run.
    new work directory and loses the owner's slot-readiness handoff. Stop on any failure.
 2. `grossy weekly plan-prepare --listed-orders <listed-proposal.json>`, or
    `grossy weekly plan-prepare --skip-history-sync` for an explicit skip.
+   History is fresh only when the default walk's `grossy.history.listed-orders.v2`
+   proposal has no unknown order; an unknown order fails closed until synced.
    Local history alone is not comparison evidence. These CLI phases never browse.
    This CLI never browses. No CLI phase launches a browser.
 3. Agent reads the current cart using `agent-browser`.

@@ -296,8 +296,9 @@ def _seed_product(
     )
 
 
-def _listed_orders_6(base_id: int = 100001) -> dict[str, Any]:
-    """Build a valid 6-order listed-orders proposal (numeric IDs)."""
+def _listed_orders(count: int = 6, base_id: int = 100001) -> dict[str, Any]:
+    """Build a valid listed-orders v2 proposal of ``count`` orders (numeric IDs,
+    any count including zero), as the default reservation-history walk writes it."""
     return {
         "schema_name": "grossy.history.listed-orders.v2",
         "schema_version": 2,
@@ -308,15 +309,15 @@ def _listed_orders_6(base_id: int = 100001) -> dict[str, Any]:
                 "order_date": f"2026-01-{(i + 1):02d}",
                 "navigation_url": f"https://www.ab.gr/my-account/order?id={base_id + i}",
             }
-            for i in range(6)
+            for i in range(count)
         ],
     }
 
 
-def _write_listed_orders(paths: GrossyPaths) -> Path:
-    """Provide six currently listed IDs independently of the imported DB rows."""
+def _write_listed_orders(paths: GrossyPaths, count: int = 6) -> Path:
+    """Provide the currently listed IDs independently of the imported DB rows."""
     path = paths.config_dir / "listed-test.json"
-    path.write_text(json.dumps(_listed_orders_6()), encoding="utf-8")
+    path.write_text(json.dumps(_listed_orders(count)), encoding="utf-8")
     path.chmod(0o600)
     return path
 
@@ -357,6 +358,40 @@ class TestPlanPrepare:
         result = run_plan_prepare(paths, skip_history_sync=True)
         assert result["status"] == "success"
         assert result["history_sync_status"] == "skipped"
+
+    def test_skip_history_sync_bypasses_an_unknown_order(self, tmp_path: Path) -> None:
+        """The explicit bypass records ``skipped`` even when the walk lists an unknown
+        order; it never claims freshness (PRD FR11)."""
+        paths = _initialized(tmp_path, orders=0)
+        listed_path = _write_listed_orders(paths, count=1)
+        result = run_plan_prepare(paths, skip_history_sync=True, listed_orders_path=listed_path)
+        assert result["history_sync_status"] == "skipped"
+        assert _query(
+            paths,
+            "SELECT history_sync_status FROM planner_runs WHERE run_id = ?",
+            (result["run_id"],),
+        ) == [("skipped",)]
+
+    @pytest.mark.parametrize("listed,imported", [(0, 0), (0, 3), (1, 1), (25, 25)])
+    def test_fresh_when_the_default_walk_found_no_unknown_order(
+        self, tmp_path: Path, listed: int, imported: int
+    ) -> None:
+        """History is fresh when the listed-orders v2 proposal of the default walk, of
+        any order count including zero, has an empty unknown set (PRD FR11)."""
+        paths = _initialized(tmp_path, orders=imported)
+        listed_path = _write_listed_orders(paths, count=listed)
+        result = run_plan_prepare(paths, listed_orders_path=listed_path)
+        assert result["history_sync_status"] == "success"
+
+    @pytest.mark.parametrize("listed,imported", [(1, 0), (6, 5), (25, 24)])
+    def test_not_fresh_while_the_walk_lists_an_unknown_order(
+        self, tmp_path: Path, listed: int, imported: int
+    ) -> None:
+        paths = _initialized(tmp_path, orders=imported)
+        listed_path = _write_listed_orders(paths, count=listed)
+        with pytest.raises(WeeklyPlanError, match=f"history sync incomplete: {listed - imported} "):
+            run_plan_prepare(paths, listed_orders_path=listed_path)
+        _assert_no_run_state(paths)
 
     def test_history_check_fails_when_no_orders(self, tmp_path: Path) -> None:
         paths = _initialized(tmp_path, orders=0)

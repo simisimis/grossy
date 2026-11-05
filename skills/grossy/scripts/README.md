@@ -19,10 +19,10 @@ print source order IDs or URLs; counts only.
 
 | Step | Script | Effect |
 | --- | --- | --- |
-| `start [--reuse]` | `live_start.py` | New 0700 work dir, pointer file, headed Brave pinned on the order-history overview, pending manual-slot receipt. `--reuse` rebinds and preserves this directory's readiness state. |
+| `start [--reuse]` | `live_start.py` | New 0700 work dir, pointer file, headed Brave pinned on the reservation-history list, pending manual-slot receipt. `--reuse` rebinds and preserves this directory's readiness state. |
 | *(owner selects delivery day/time manually; agent ends turn and waits)* | | No further browser activity, history sync, availability checks or prefill. |
 | `slot-ready` | `slot_ready.py` | Only after the owner's explicit "slot selected" report: record readiness locally without inspecting slot details or touching the browser/cart. |
-| `history [--dry-run]` | `history_sync.py` | discover-prepare, six dated controls, listed proposal, sync-dry-run, scan-prepare, bounded scan of unknown orders, scan-validate, sync-apply. |
+| `history [--dry-run] [--full]` | `history_sync.py` | discover-prepare, reservation-history enumeration walk newest first (two settled bottom passes; 30 s stall rule; default stops at the first imported order, `--full` skips it), `grossy.history.listed-orders.v2` proposal, sync-dry-run, scan-prepare, then per unknown order: heading-checked order page, settled scan, one-order scan-validate and sync-apply transaction. Progress in `enumeration.json` and `scan-apply.json` (`last_imported_order_id`). |
 | `stage1 [--skip-history-sync]` | `plan_stage1.py` | plan-prepare, identity-bound whole-cart baseline, baseline-apply, recurring facts (alternatives for unavailable primaries), first recurring-preflight summary. |
 | `recurring [max]` | `recurring_add.py` | Recurring prefill loop under stage consent: reread, preflight twice, intent, action-check, one click, identity-bound readback, recurring-observe; ends with the zero-addition intent (`awaiting-basket-review`). |
 | *(owner reviews basket in the browser)* | | |
@@ -35,8 +35,10 @@ print source order IDs or URLs; counts only.
 | `grossy weekly finish <run-id>` | | Local closure after the owner reviewed the cart. |
 | `status` | `status.py` | Work dir, run id, lifecycle, verified quantities, pending-intent markers. |
 
-Standalone history sync uses `start --history-only` then `history [--dry-run]`;
-that mode cannot authorize weekly preparation or prefill. Weekly history, stage1,
+Standalone history sync uses `start --history-only` then `history [--dry-run]
+[--full]`; that mode cannot authorize weekly preparation or prefill. `--full`
+is a separately authorized backfill: an interrupted run is never resumed
+automatically, and a default run stops at the newest imported order. Weekly history, stage1,
 recurring, advance, recipes, matches and recipe-add fail before phase/browser
 activity unless the private
 `delivery-slot-readiness.json` receipt is confirmed. It stores no delivery details.

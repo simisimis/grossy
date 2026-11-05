@@ -129,6 +129,8 @@ def test_skill_safety_and_recovery_contract() -> None:
     for required in (
         "grossy.cart.observation.v1",
         "grossy.cart.mutation-manifest.v1",
+        "grossy.history.listed-orders.v2",
+        "grossy.history.order-scan.v1",
         "schema_name",
         "schema_version",
         "awaiting-recipe-selection",

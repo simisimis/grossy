@@ -398,14 +398,14 @@ def _check_history_sync(
 ) -> str:
     """Perform the lightweight listed-ID comparison for history sync (FR-30).
 
-    When a listed-orders proposal path is provided, validates it and computes
-    the set difference (listed minus imported, FR-9). If the unknown set is
-    empty, history sync is "success" (all listed orders are already imported).
-    If the unknown set is non-empty, history sync is "failed" (there are
-    un-imported listed orders that must be synchronized before planning).
+    History is fresh only when the default reservation-history walk found no
+    unknown order: the ``grossy.history.listed-orders.v2`` proposal it wrote
+    (any order count, including zero) is validated and its listed-minus-imported
+    set difference (FR-9) must be empty. A non-empty unknown set fails closed:
+    those orders must be synchronized before planning.
 
-    Without listed-order evidence, planning fails closed even when local
-    purchase history exists. Only an explicit skip bypasses this check.
+    Without a proposal, planning fails closed even when local purchase history
+    exists. Only the explicit ``--skip-history-sync`` bypass avoids this check.
 
     Returns the history_sync_status string. Raises WeeklyPlanError on
     validation failure (fail closed, FR-31).
@@ -438,8 +438,9 @@ def _check_history_sync(
         # Fail closed: there are un-imported listed orders.
         raise WeeklyPlanError(
             f"history sync incomplete: {len(unknown)} listed order(s) not yet "
-            "imported; run 'grossy history sync-apply' first, or use "
-            "--skip-history-sync to explicitly skip the check"
+            "imported; complete the history sync (scan-validate and sync-apply "
+            "per unknown order) first, or use --skip-history-sync to explicitly "
+            "skip the check"
         )
 
     raise WeeklyPlanError(
@@ -1188,11 +1189,12 @@ def run_plan_prepare(
 
     Enforces one-active-run (PRD FR-113, 12.1.8). Performs the lightweight
     history-sync check unless ``skip_history_sync`` is True (FR-30): when
-    ``listed_orders_path`` is provided, validates the proposal and computes
-    the listed-minus-imported set difference (FR-9); a non-empty unknown set
-    fails closed (FR-31: sync failure stops before cart mutation). When no
-    listed-orders path is provided, fails closed; imported history alone
-    cannot prove a current listed-ID comparison.
+    ``listed_orders_path`` names the listed-orders v2 proposal of the default
+    reservation-history walk, validates it and computes the listed-minus-imported
+    set difference (FR-9); history is fresh only when that unknown set is
+    empty, otherwise the plan fails closed (FR-31: sync failure stops before
+    cart mutation). When no listed-orders path is provided, fails closed;
+    imported history alone cannot prove a current listed-ID comparison.
 
     Returns a versioned JSON-serializable dict on success.
     Raises :class:`WeeklyPlanError` on failure.

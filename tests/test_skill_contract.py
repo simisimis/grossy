@@ -51,7 +51,7 @@ def test_invocation_documents_unknown_input_stop(skill_content: str) -> None:
     ("heading", "phases"),
     [
         (
-            "history sync [--dry-run]",
+            "history sync [--dry-run] [--full]",
             [
                 "grossy history discover-prepare",
                 "grossy history sync-dry-run",

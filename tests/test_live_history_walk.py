@@ -102,10 +102,12 @@ class FakeList:
     """Reservation-history list plus the order-details pages the script opens from it.
 
     ``products`` maps an order ID to its rendered cards (default: three linked cards per
-    order). ``busy``: the network never idles, so no pass settles. ``order_stall``: those order
-    pages never reach the bottom. ``fail_open``: opening that order's page stops as an
-    authentication challenge. Every seam records the ``recover`` flag it was called with and
-    the settle timeouts it was given."""
+    order). ``headings``: the ``Order NNNNNNNNN`` heading digit strings an order page renders
+    (default: exactly its own ID). ``busy``: the network never idles, so no pass settles.
+    ``order_stall``: those order pages never reach the bottom. ``fail_open``: opening that
+    order's page stops as an authentication challenge. ``fail_scroll``: the pinned tab is lost
+    on the first scroll of that order's page. Every seam records the ``recover`` flag it was
+    called with and the settle timeouts it was given."""
 
     def __init__(
         self,
@@ -114,16 +116,21 @@ class FakeList:
         stall: bool = False,
         busy: bool = False,
         products: dict[str, list[dict[str, list[str]]]] | None = None,
+        headings: dict[str, list[str]] | None = None,
         order_stall: frozenset[str] = frozenset(),
         fail_open: str | None = None,
+        fail_scroll: str | None = None,
     ) -> None:
         self.entries = [(order_id(i), date) for i, date in enumerate(dates)]
         self.list = LazyPage(self.entries, stall=stall)
         self.current = self.list
+        self.current_sid: str | None = None  # order ID of the open order page, if any
         self.busy = busy
         self.products = products or {}
+        self.headings = headings or {}
         self.order_stall = order_stall
         self.fail_open = fail_open
+        self.fail_scroll = fail_scroll
         self.opened: list[str] = []
         self.recover_flags: list[bool] = []
         self.settle_timeouts: list[float] = []
@@ -140,7 +147,7 @@ class FakeList:
         if args[0] == "open":
             self.opened.append(args[1])
             if args[1] == LIST_URL:
-                self.current = self.list
+                self.current, self.current_sid = self.list, None
             else:
                 assert args[1].startswith(ORDER_URL)
                 sid = args[1].removeprefix(ORDER_URL)
@@ -149,6 +156,7 @@ class FakeList:
                 self.current = LazyPage(
                     self.products.get(sid, cards(sid)), stall=sid in self.order_stall
                 )
+                self.current_sid = sid
         return ""
 
     def settle_page(self, tag: str = "settle", recover: bool = True, timeout: float = 40) -> bool:
@@ -164,6 +172,8 @@ class FakeList:
 
         self.recover_flags.append(recover)
         if body == live_common.SCROLL_BOTTOM_JS:
+            if self.current_sid is not None and self.current_sid == self.fail_scroll:
+                live_common.stop("exact_task_tab_unavailable")
             self.current.scroll()
             return True
         if body == live_common.AT_BOTTOM_JS:
@@ -177,6 +187,9 @@ class FakeList:
         if "product-block" in body:
             assert self.current is not self.list, "order read on the list page"
             return self.current.visible()
+        if "order-details-container] *" in body:
+            assert self.current_sid is not None, "heading read on the list page"
+            return self.headings.get(self.current_sid, [self.current_sid])
         if 'readyState==="complete"' in body or body.endswith("return true;"):
             return True
         pytest.fail("unexpected page read: " + body[:80])
@@ -446,9 +459,16 @@ def test_interruption_leaves_exactly_the_applied_orders_and_full_rerun_imports_t
     assert applied_ids(page) == [order_id(0), order_id(1)]
     assert _imported_ids(home.database_file) == {order_id(0), order_id(1)}
     assert not (work / "order-scan-003.json").exists()
-    progress = scan_apply(work)
-    assert progress["status"] == "in_progress" and progress["applied_order_count"] == 2
-    assert progress["last_imported_order_id"] == order_id(1)
+    # The browser-level stop reason is recorded in scan-apply.json, not only on the STOP line.
+    assert scan_apply(work) == {
+        "status": "stopped",
+        "reason": "open:authentication_or_challenge",
+        "mode": "default",
+        "unknown_order_count": 5,
+        "applied_order_count": 2,
+        "last_imported_order_id": order_id(1),
+        "scan_sequence": 3,
+    }
 
     # A following default run stops at the newest imported ID: no resumption, no replay.
     page2 = FakeList(dates)
@@ -487,6 +507,61 @@ def test_missing_canonical_link_stops_the_order_with_nothing_applied(
     assert scan_apply(work) == {
         "status": "partial",
         "reason": "product_link_missing",
+        "mode": "default",
+        "unknown_order_count": 3,
+        "applied_order_count": 1,
+        "last_imported_order_id": order_id(0),
+        "scan_sequence": 2,
+    }
+
+
+def test_pinned_tab_loss_during_an_order_walk_records_the_stop_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, home: GrossyPaths
+) -> None:
+    page = FakeList(["01/10/2026"] * 3, fail_scroll=order_id(1))
+    work, outcome, _ = run_walk(tmp_path, monkeypatch, home, page)
+    assert isinstance(outcome, Stop) and str(outcome) == "exact_task_tab_unavailable"
+    assert applied_ids(page) == [order_id(0)]
+    assert _imported_ids(home.database_file) == {order_id(0)}
+    assert not (work / "order-scan-002.json").exists()
+    assert scan_apply(work) == {
+        "status": "stopped",
+        "reason": "exact_task_tab_unavailable",
+        "mode": "default",
+        "unknown_order_count": 3,
+        "applied_order_count": 1,
+        "last_imported_order_id": order_id(0),
+        "scan_sequence": 2,
+    }
+
+
+@pytest.mark.parametrize(
+    "headings,reason",
+    [
+        pytest.param([order_id(0)], "order_heading_mismatch", id="other-order"),
+        pytest.param([order_id(1), order_id(0)], "order_heading_mismatch", id="two-headings"),
+        pytest.param([], "order_heading_missing", id="no-heading"),
+    ],
+)
+def test_order_heading_must_name_the_requested_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    home: GrossyPaths,
+    headings: list[str],
+    reason: str,
+) -> None:
+    # The route ID matches, but the details heading inside the container does not name exactly
+    # this order: stop before any card is read, with nothing applied for this order.
+    page = FakeList(["01/10/2026"] * 3, headings={order_id(1): headings})
+    work, outcome, _ = run_walk(tmp_path, monkeypatch, home, page)
+    assert isinstance(outcome, Stop) and str(outcome) == f"{reason}: order 2 of 3"
+    assert page.current.scrolls == 0  # the mismatched page was never walked
+    assert applied_ids(page) == [order_id(0)]
+    assert _imported_ids(home.database_file) == {order_id(0)}
+    assert not (work / "order-scan-002.json").exists()
+    assert scan_apply(work) == {
+        "status": "partial",
+        "reason": reason,
         "mode": "default",
         "unknown_order_count": 3,
         "applied_order_count": 1,

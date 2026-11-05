@@ -68,16 +68,14 @@ uses the sanitized template below.
 ### 1. Authenticated read-only doctor
 
 **Operation:** authorize local `grossy doctor`, then separately authorize coordinator
-rendered authentication, supported history-controls visibility and whole-cart-read
-checks through agent-browser. For history, navigate directly to
-`https://www.ab.gr/customerhub/quick-shop/orders` and verify that overview route;
-do not open the homepage as an intermediate step or enter individual orders.
-Expand the All orders dropdown/filter to reveal six dated options plus the
-aggregate option. The owner reports date-specific products and an All orders
-combined view; whether this uses filtering, fetching or navigation is unverified.
-Inspect controls only, without scrolling/loading or extracting union products.
-Opening this popup is read-only; selecting an option
-is outside step 1. Verify the pinned tab's route before inspection. The owner
+rendered authentication, rendered reservation-history list visibility and
+whole-cart-read checks through agent-browser. For history, navigate directly to
+`https://www.ab.gr/en/my-account/reservation-history` and verify that rendered
+route; do not open the homepage as an intermediate step or open individual
+order-details pages. Confirm that at least one order entry with its order-details
+anchor and date is rendered. Inspect the list read-only, without scrolling/loading
+further entries, activating any entry control or extracting order identities.
+Verify the pinned tab's route before inspection. The owner
 has separately approved `/checkout` for its cart list only: navigate directly
 there for the whole-cart read, without checkout progression or cart writes.
 Stop on another route or unexpected private-section exposure. CLI doctor has no live adapter and
@@ -88,41 +86,56 @@ status/counts. Record manual authentication as yes/no, not account identity.
 **Stop:** local failures, missing tools, profile permissions, authentication/UI
 ambiguity. **Confirmation:** explicit read-only scope approval before live inspection.
 
-### 2. Observable-six history dry-run
+### 2. History dry-run enumeration walk
 
-**Operation:** authorize `/skill:grossy history sync --dry-run`: discover-prepare,
-rendered six-control extraction, private listed proposal and sync-dry-run
-`--listed-orders <listed.json>`. Expand the All orders dropdown to inspect its
-six dated filter options; bind each to rendered stable numeric source identity.
-Observed dated URL shape is `/customerhub/quick-shop/orders?id=<numeric-order-id>`;
-the aggregate token LAST_ORDERS_PRODUCTS is excluded. Retain the numeric ID and
-match it exactly to source identity, preserving leading zeros; do not strip
-queries or invent paths. The CLI accepts only one raw numeric `id` on that exact
-route; aggregate/empty/extra/duplicate/encoded parameters and fragments fail.
-Do not select a date/aggregate option, scroll/load products or extract union contents.
+**Operation:** authorize `/skill:grossy history sync --dry-run` (`live.sh history
+--dry-run`): discover-prepare, the enumeration walk on the pinned
+reservation-history list, the private `grossy.history.listed-orders.v2` proposal
+and sync-dry-run `--listed-orders <listed.json>`. The walk scrolls newest first
+until two consecutive settled bottom passes add no new entry; by default it stops
+at the first already-imported order. Each entry binds exactly one order-details
+anchor `/my-account/order?id=<numeric-string>` and one day-first (`DD/MM/YYYY`)
+list date, the only date source. IDs stay numeric strings with leading zeros,
+matched exactly to source identity; do not strip queries or invent paths. A
+malformed or inconsistent entry stops the walk. Do not open order-details pages,
+activate any entry control or read product contents. The stall rule (no new
+content and no bottom reached for 30 s) ends the walk with a partial result.
 
-**Effect/evidence:** listed count six, unknown count, dated-controls validation,
-no contents read/no cart change. IDs stay in the private proposal only.
-**Stop:** any count/identity/date/route ambiguity. **Confirmation:** read-only approval;
+**Effect/evidence:** listed count, known count, unknown count, enumeration
+result (complete or partial), no contents read/no cart change. IDs stay in the
+private proposal only.
+**Stop:** any identity/date/route ambiguity, zero rendered entries
+(`list_identity_missing`) or stall. **Confirmation:** read-only approval;
 no permission to perform step 3 is implied.
 
-### 3. Bounded history synchronization (local-state mutation)
+### 3. Per-order history synchronization (local-state mutation)
 
-**Operation:** present unknown count, then obtain confirmation to scan/apply exactly
-that currently listed unknown set (maximum six). scan-prepare gives oldest-first
-unknowns; select each exact identity-bound dated option and verify the selected
-identity/route and resulting per-order view before scanning its products. Allow lazy-loaded cards to render, then
-require two consecutive bottom passes revealing no new product IDs. Do not
-scan the All orders union or assume separate order pages. scan-validate then sync-apply `--listed-orders <listed.json>
-<scan.json>`. If there are no unknowns, record no-op summary, no invented import.
+**Operation:** present the listed and unknown counts, then obtain confirmation for
+one default `/skill:grossy history sync` run (`live.sh history`, not `--full`):
+fresh discover-prepare, walk and sync-dry-run as in step 2, then scan-prepare
+`--listed-orders <listed.json>` for the unknown orders of this walk. For each
+unknown order, newest first, on the same pinned tab: open its order-details page,
+require the route ID and the `Order NNNNNNNNN` heading digits to equal the
+requested ID, allow lazy-loaded cards to render, require two consecutive settled
+bottom passes revealing no new product IDs, scan-validate the one-order proposal,
+then sync-apply `--listed-orders <listed.json> <scan.json>` as its own
+transaction. Imported IDs are the only checkpoint; no batch is formed. The stall
+rule (30 s) ends the run with a partial result naming `last_imported_order_id`;
+a card without a canonical `/p/<id>` link also ends the run with nothing applied
+for that order and does not skip to the next. `--full` is a separately authorized
+backfill that skips known IDs; it is outside this smoke. If there are no
+unknowns, record the no-op summary, no invented import.
 
-**Effect/evidence:** batch counts, product-presence count, stabilization result,
-displayed-count warnings, sanitized summary checksum and idempotent dry-run count
+**Effect/evidence:** listed/unknown/applied counts, per-order product-presence
+count, stabilization result, final `scan-apply.json` status (complete, partial
+or stopped), sanitized summary checksum and idempotent dry-run unknown count
 zero. Binary presence only; never infer purchased units.
-**Stop:** any missing stable product identity/failed scan; import none of the batch.
-A displayed-count discrepancy warns, not discards stabilized IDs.
-**Confirmation:** “Apply this bounded history batch to local SQLite?” separately
-from discovery; this does not authorize any cart mutation.
+**Stop:** heading mismatch, missing canonical link, stall, unconfirmed apply or
+any browser-level stop; orders applied so far stay imported, nothing is retried
+or resumed, and remaining older unknown orders need a separately authorized
+`--full` run.
+**Confirmation:** “Apply unknown orders one by one to local SQLite?” separately
+from discovery, once per run; this does not authorize any cart mutation.
 
 ### 4. Cart baseline read (no cart mutation)
 
