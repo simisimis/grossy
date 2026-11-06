@@ -165,6 +165,14 @@ def test_start_opens_browser_without_history_or_prefill(
     opened = [call for call in calls if "open" in call]
     assert len(opened) == 1
     assert "--headed" in opened[0] and "--profile" in opened[0] and "--pin-tab" in opened[0]
+    # Owner-verified clean launch: no startup New Tab page, no crash-restore bubble, no first run.
+    launch_args = opened[0][opened[0].index("--args") + 1]
+    assert launch_args.split(",") == [
+        "--no-startup-window",
+        "--disable-session-crashed-bubble",
+        "--hide-crash-restore-bubble",
+        "--no-first-run",
+    ]
     assert not (work / "plan-prepare.json").exists()
 
 

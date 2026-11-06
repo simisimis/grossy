@@ -894,8 +894,15 @@ When the owner closes the browser window, the pinned tab disappears and the next
 agent-browser call may leave only a bare `about:blank` tab without the profile.
 If the pinned target is missing and every remaining tab is `about:blank`, close
 the session browser, relaunch headed Brave with the Grossy profile
-(`--headed --executable-path <brave> --profile <ab-profile> --pin-tab open
-https://www.ab.gr/checkout`), bind the new tab and continue. If any other tab is
+(`--headed --executable-path <brave> --profile <ab-profile> --args
+<BRAVE_LAUNCH_ARGS> --pin-tab open https://www.ab.gr/checkout`), bind the new tab
+and continue. Every headed launch passes the same raw Chromium flags through
+`--args` (`--no-startup-window,--disable-session-crashed-bubble,
+--hide-crash-restore-bubble,--no-first-run`, owner-verified 2026-11-06): no Brave
+startup New Tab page beside the agent's tab, no "Restore pages?" bubble after an
+unclean exit, no first-run UI. Playwright adds `--password-store=basic`; a manual
+Brave start on the same profile must pass that flag too, or cookies written by one
+side are unreadable by the other. If any other tab is
 present, stop: never adopt a tab the agent did not open.
 
 Basket-review advance with owner edits: bind every checkout line to a product page.

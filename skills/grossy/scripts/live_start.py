@@ -102,6 +102,9 @@ else:
         subprocess.run(
             ["agent-browser", "--session", SESSION, "close"], capture_output=True, text=True
         )
+    # Imported here: live_common binds to live-current.txt, which exists only from this point.
+    from live_common import BRAVE_LAUNCH_ARGS
+
     p = subprocess.run(
         [
             "agent-browser",
@@ -112,6 +115,8 @@ else:
             str(BRAVE),
             "--profile",
             str(PROFILE),
+            "--args",
+            BRAVE_LAUNCH_ARGS,
             "--pin-tab",
             "open",
             START_URL,

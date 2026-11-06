@@ -60,6 +60,17 @@ PROFILE = (
     / "ab-profile"
 )
 BRAVE = pathlib.Path.home() / ".nix-profile" / "bin" / "brave"
+# Raw Chromium flags for every headed Brave launch (owner-verified 2026-11-06): no Brave startup
+# New Tab page beside the agent's tab, no "Restore pages?" bubble after an unclean exit, no
+# first-run UI. Passed through agent-browser --args; the same list is used by every launch site.
+BRAVE_LAUNCH_ARGS = ",".join(
+    [
+        "--no-startup-window",
+        "--disable-session-crashed-bubble",
+        "--hide-crash-restore-bubble",
+        "--no-first-run",
+    ]
+)
 
 
 def _tabs():
@@ -96,6 +107,8 @@ def recover_closed_window():
             str(BRAVE),
             "--profile",
             str(PROFILE),
+            "--args",
+            BRAVE_LAUNCH_ARGS,
             "--pin-tab",
             "open",
             "https://www.ab.gr/checkout",
