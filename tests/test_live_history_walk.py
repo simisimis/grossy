@@ -45,10 +45,16 @@ def product_id(sid: str, index: int) -> str:
     return f"7{sid[-3:]}{index:02d}"
 
 
-def card(pid: str, *, link: bool = True, brand: str = "Brand") -> dict[str, list[str]]:
-    """One rendered order-page product card as the script's cards_js reports it."""
-    hrefs = [f"/en/eshop/Food/item-{pid}/p/{pid}"] if link else ["/en/eshop/Food"]
-    return {"hrefs": hrefs, "names": [f"Product {pid}"], "brands": [brand]}
+GENERIC_HREF = "/en/eshop/Food"  # a substituted-product tile links to a category, not /p/<id>
+
+
+def card(
+    pid: str, *, link: bool = True, brand: str = "Brand", names: list[str] | None = None
+) -> dict[str, list[str]]:
+    """One rendered order-page product tile as the script's cards_js reports it."""
+    hrefs = [f"/en/eshop/Food/item-{pid}/p/{pid}"] if link else [GENERIC_HREF]
+    names = [f"Product {pid}"] if names is None else names
+    return {"hrefs": hrefs, "names": names, "brands": [brand]}
 
 
 def cards(sid: str, count: int = 3) -> list[dict[str, list[str]]]:
@@ -73,12 +79,19 @@ class FakeClock:
 class LazyPage:
     """A page rendering 10 items on open, then 10 more per settled bottom pass.
 
-    ``stall``: the bottom is never reached (content keeps the page longer than the viewport)."""
+    ``stall``: the bottom is never reached (content keeps the page longer than the viewport).
+    ``late``: indexes of product tiles rendered without their canonical link until the first
+    bottom pass has settled (a tile still loading)."""
 
-    def __init__(self, items: list[Any], *, stall: bool = False) -> None:
+    def __init__(
+        self, items: list[Any], *, stall: bool = False, late: frozenset[int] = frozenset()
+    ) -> None:
         self.items = items
         self.rendered = min(10, len(items))
         self.stall = stall
+        self.late = late
+        self.loaded = False  # late tiles carry their link once a scrolled pass has settled
+        self.linkless_reads = 0  # reads that showed at least one late tile without its link
         self.scrolls = 0
         self.at_bottom = False
         self.scrolled = False  # lazy loading is triggered by a scroll and lands on settle
@@ -89,13 +102,21 @@ class LazyPage:
         self.at_bottom = not self.stall
 
     def settle(self) -> None:
-        if self.scrolled and self.rendered < len(self.items):
-            self.rendered = min(len(self.items), self.rendered + 10)
-            self.at_bottom = False  # the page grew below the scroll position
+        if self.scrolled:
+            self.loaded = True
+            if self.rendered < len(self.items):
+                self.rendered = min(len(self.items), self.rendered + 10)
+                self.at_bottom = False  # the page grew below the scroll position
         self.scrolled = False
 
     def visible(self) -> list[Any]:
-        return self.items[: self.rendered]
+        if self.loaded or not any(i < self.rendered for i in self.late):
+            return self.items[: self.rendered]
+        self.linkless_reads += 1
+        return [
+            {**item, "hrefs": [GENERIC_HREF]} if i in self.late else item
+            for i, item in enumerate(self.items[: self.rendered])
+        ]
 
 
 class FakeList:
@@ -104,10 +125,14 @@ class FakeList:
     ``products`` maps an order ID to its rendered cards (default: three linked cards per
     order). ``headings``: the ``Order NNNNNNNNN`` heading digit strings an order page renders
     (default: exactly its own ID). ``busy``: the network never idles, so no pass settles.
-    ``order_stall``: those order pages never reach the bottom. ``fail_open``: opening that
+    ``order_stall``: those order pages never reach the bottom. ``late``: per order ID, the tile
+    indexes that are linkless until the first bottom pass settles. ``fail_open``: opening that
     order's page stops as an authentication challenge. ``fail_scroll``: the pinned tab is lost
-    on the first scroll of that order's page. Every seam records the ``recover`` flag it was
-    called with and the settle timeouts it was given."""
+    on the first scroll of that order's page. ``fail_route_check``: the route guard that follows
+    that order's settled tile read fails (route drift after the read). Every seam records the
+    ``recover`` flag it was called with and the settle timeouts it was given; ``order_pages``
+    keeps every opened order page by ID and ``progress`` every ``scan-apply.json`` record in
+    write order."""
 
     def __init__(
         self,
@@ -118,8 +143,10 @@ class FakeList:
         products: dict[str, list[dict[str, list[str]]]] | None = None,
         headings: dict[str, list[str]] | None = None,
         order_stall: frozenset[str] = frozenset(),
+        late: dict[str, frozenset[int]] | None = None,
         fail_open: str | None = None,
         fail_scroll: str | None = None,
+        fail_route_check: str | None = None,
     ) -> None:
         self.entries = [(order_id(i), date) for i, date in enumerate(dates)]
         self.list = LazyPage(self.entries, stall=stall)
@@ -129,8 +156,13 @@ class FakeList:
         self.products = products or {}
         self.headings = headings or {}
         self.order_stall = order_stall
+        self.late = late or {}
+        self.order_pages: dict[str, LazyPage] = {}
+        self.progress: list[dict[str, Any]] = []
         self.fail_open = fail_open
         self.fail_scroll = fail_scroll
+        self.fail_route_check = fail_route_check
+        self.tiles_read = False  # the open order page's settled tile read has happened
         self.opened: list[str] = []
         self.recover_flags: list[bool] = []
         self.settle_timeouts: list[float] = []
@@ -154,9 +186,13 @@ class FakeList:
                 if sid == self.fail_open:
                     live_common.stop("open:authentication_or_challenge")
                 self.current = LazyPage(
-                    self.products.get(sid, cards(sid)), stall=sid in self.order_stall
+                    self.products.get(sid, cards(sid)),
+                    stall=sid in self.order_stall,
+                    late=self.late.get(sid, frozenset()),
                 )
+                self.order_pages[sid] = self.current
                 self.current_sid = sid
+                self.tiles_read = False
         return ""
 
     def settle_page(self, tag: str = "settle", recover: bool = True, timeout: float = 40) -> bool:
@@ -186,10 +222,18 @@ class FakeList:
             ]
         if "product-block" in body:
             assert self.current is not self.list, "order read on the list page"
-            return self.current.visible()
+            tiles = self.current.visible()
+            if body.endswith(".length;"):
+                return len(tiles)
+            self.tiles_read = True
+            return tiles
         if "order-details-container] *" in body:
             assert self.current_sid is not None, "heading read on the list page"
             return self.headings.get(self.current_sid, [self.current_sid])
+        if body.endswith("return true;") and self.tiles_read:
+            if self.current_sid is not None and self.current_sid == self.fail_route_check:
+                live_common.stop("eval:browser_command_error")
+            return True
         if 'readyState==="complete"' in body or body.endswith("return true;"):
             return True
         pytest.fail("unexpected page read: " + body[:80])
@@ -260,6 +304,13 @@ def run_walk(
             drill.write(out, result)
         return result
 
+    real_write = drill.write
+
+    def write(name: str, payload: Any) -> None:
+        if name == "scan-apply.json":
+            page.progress.append(json.loads(json.dumps(payload)))
+        real_write(name, payload)
+
     for key, value in {
         "time": clock,
         "stop": stop,
@@ -267,6 +318,7 @@ def run_walk(
         "browser": page.browser,
         "evaluate": page.evaluate,
         "settle_page": page.settle_page,
+        "write": write,
     }.items():
         monkeypatch.setattr(drill, key, value)
     monkeypatch.setattr(sys, "argv", ["history_sync.py", *args])
@@ -391,10 +443,12 @@ def test_leading_zero_ids_and_day_first_dates_are_preserved(
         "unknown_order_count": 1,
         "applied_order_count": 1,
         "last_imported_order_id": "000000900",
+        "skipped_tile_total": 0,
     }
-    # Privacy: no source order ID or URL on stdout.
+    # Privacy: no source order ID or URL on stdout; the per-order line carries counts only.
     out = capsys.readouterr().out
-    assert "000000900" not in out and "ab.gr" not in out and "order 1/1" in out
+    assert "000000900" not in out and "ab.gr" not in out
+    assert "order 1/1: 3 products, 0 skipped tiles, 2 bottom passes, applied" in out
 
 
 def test_zero_unknown_orders_apply_nothing(
@@ -445,6 +499,7 @@ def test_default_walk_stops_at_first_imported_order_and_applies_each_unknown_ord
         "unknown_order_count": 12,
         "applied_order_count": 12,
         "last_imported_order_id": order_id(11),
+        "skipped_tile_total": 0,
     }
 
 
@@ -467,7 +522,9 @@ def test_interruption_leaves_exactly_the_applied_orders_and_full_rerun_imports_t
         "unknown_order_count": 5,
         "applied_order_count": 2,
         "last_imported_order_id": order_id(1),
+        "skipped_tile_total": 0,
         "scan_sequence": 3,
+        "skipped_tile_count": 0,
     }
 
     # A following default run stops at the newest imported ID: no resumption, no replay.
@@ -491,27 +548,131 @@ def test_interruption_leaves_exactly_the_applied_orders_and_full_rerun_imports_t
     assert scan_apply(work3)["last_imported_order_id"] == order_id(4)
 
 
-def test_missing_canonical_link_stops_the_order_with_nothing_applied(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, home: GrossyPaths
+def scanned_product_ids(work: Path, seq: int) -> list[str]:
+    scan = json.loads((work / f"order-scan-{seq:03d}.json").read_text())
+    return [p["product_id"] for p in scan["orders"][0]["products"]]
+
+
+def test_tile_linkless_before_settling_is_imported_after_the_walk(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    home: GrossyPaths,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    broken = cards(order_id(1))
-    broken[1] = card(product_id(order_id(1), 1), link=False)
-    page = FakeList(["01/10/2026"] * 3, products={order_id(1): broken})
+    # The second order's middle tile has no canonical link until the first bottom pass settles.
+    # The walk measures progress by tile count only and tiles are read once after settling, so
+    # the still-loading tile neither stops the run nor counts as skipped.
+    page = FakeList(["01/10/2026"] * 3, late={order_id(1): frozenset({1})})
+    work, outcome, _ = run_walk(tmp_path, monkeypatch, home, page)
+    assert outcome is None
+    assert page.order_pages[order_id(1)].linkless_reads >= 1  # the transient state was rendered
+    assert applied_ids(page) == [order_id(i) for i in range(3)]
+    assert scanned_product_ids(work, 2) == [product_id(order_id(1), j) for j in range(3)]
+    assert scan_apply(work)["status"] == "complete" and scan_apply(work)["skipped_tile_total"] == 0
+    out = capsys.readouterr().out
+    assert "order 2/3: 3 products, 0 skipped tiles, 2 bottom passes, applied" in out
+
+
+def test_linkless_tile_after_settling_is_skipped_and_counted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    home: GrossyPaths,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # A substituted-product tile keeps a generic URL after the page has settled: it carries no
+    # identity, so the order is applied without it and the tile is reported as a count only.
+    substituted = cards(order_id(1))
+    substituted[1] = card(product_id(order_id(1), 1), link=False)
+    page = FakeList(["01/10/2026"] * 3, products={order_id(1): substituted})
+    work, outcome, _ = run_walk(tmp_path, monkeypatch, home, page)
+    assert outcome is None
+    assert applied_ids(page) == [order_id(i) for i in range(3)]
+    assert _imported_ids(home.database_file) == {order_id(i) for i in range(3)}
+    assert scanned_product_ids(work, 2) == [product_id(order_id(1), j) for j in (0, 2)]
+    assert page.progress[1] == {
+        "status": "in_progress",
+        "reason": "applied",
+        "mode": "default",
+        "unknown_order_count": 3,
+        "applied_order_count": 2,
+        "last_imported_order_id": order_id(1),
+        "skipped_tile_total": 1,
+        "scan_sequence": 2,
+        "skipped_tile_count": 1,
+    }
+    assert page.progress[2]["skipped_tile_count"] == 0  # the third order skipped nothing
+    assert scan_apply(work) == {
+        "status": "complete",
+        "reason": "all_unknown_orders_applied",
+        "mode": "default",
+        "unknown_order_count": 3,
+        "applied_order_count": 3,
+        "last_imported_order_id": order_id(2),
+        "skipped_tile_total": 1,
+    }
+    out = capsys.readouterr().out
+    assert "order 2/3: 2 products, 1 skipped tile, 2 bottom passes, applied" in out
+
+
+@pytest.mark.parametrize(
+    "tiles,skipped",
+    [
+        pytest.param([card("1", link=False), card("2", link=False)], 2, id="all-linkless"),
+        pytest.param([], 0, id="no-tiles"),
+    ],
+)
+def test_zero_identifiable_tiles_stop_the_run_with_nothing_applied(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    home: GrossyPaths,
+    tiles: list[dict[str, list[str]]],
+    skipped: int,
+) -> None:
+    page = FakeList(["01/10/2026"] * 3, products={order_id(1): tiles})
     work, outcome, _ = run_walk(tmp_path, monkeypatch, home, page)
     assert isinstance(outcome, Stop) and str(outcome).startswith(
-        "product_link_missing: order 2 of 3"
+        "no_identifiable_products: order 2 of 3"
     )
     assert applied_ids(page) == [order_id(0)]
     assert _imported_ids(home.database_file) == {order_id(0)}
     assert not (work / "order-scan-002.json").exists()
     assert scan_apply(work) == {
         "status": "partial",
-        "reason": "product_link_missing",
+        "reason": "no_identifiable_products",
         "mode": "default",
         "unknown_order_count": 3,
         "applied_order_count": 1,
         "last_imported_order_id": order_id(0),
+        "skipped_tile_total": skipped,
         "scan_sequence": 2,
+        "skipped_tile_count": skipped,
+    }
+
+
+@pytest.mark.parametrize(
+    "names", [[], [""], ["Product A", "Product B"]], ids=["none", "empty", "two"]
+)
+def test_linked_tile_with_malformed_name_still_stops(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, home: GrossyPaths, names: list[str]
+) -> None:
+    malformed = cards(order_id(1))
+    malformed[2] = card(product_id(order_id(1), 2), names=names)
+    page = FakeList(["01/10/2026"] * 3, products={order_id(1): malformed})
+    work, outcome, _ = run_walk(tmp_path, monkeypatch, home, page)
+    assert isinstance(outcome, Stop) and str(outcome) == "product_card_malformed: order 2 of 3"
+    assert applied_ids(page) == [order_id(0)]
+    assert _imported_ids(home.database_file) == {order_id(0)}
+    assert not (work / "order-scan-002.json").exists()
+    assert scan_apply(work) == {
+        "status": "partial",
+        "reason": "product_card_malformed",
+        "mode": "default",
+        "unknown_order_count": 3,
+        "applied_order_count": 1,
+        "last_imported_order_id": order_id(0),
+        "skipped_tile_total": 0,
+        "scan_sequence": 2,
+        "skipped_tile_count": 0,
     }
 
 
@@ -531,7 +692,35 @@ def test_pinned_tab_loss_during_an_order_walk_records_the_stop_reason(
         "unknown_order_count": 3,
         "applied_order_count": 1,
         "last_imported_order_id": order_id(0),
+        "skipped_tile_total": 0,
         "scan_sequence": 2,
+        "skipped_tile_count": 0,
+    }
+
+
+def test_route_drift_after_the_settled_read_records_the_order_skipped_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, home: GrossyPaths
+) -> None:
+    # The second order's tiles (one identifiable, one linkless) are read, then the route check
+    # that follows the read fails. The stop record must carry the count already added to the
+    # running total, and nothing is applied for that order.
+    tiles = [card(product_id(order_id(1), 0)), card(product_id(order_id(1), 1), link=False)]
+    page = FakeList(["01/10/2026"] * 3, products={order_id(1): tiles}, fail_route_check=order_id(1))
+    work, outcome, _ = run_walk(tmp_path, monkeypatch, home, page)
+    assert isinstance(outcome, Stop) and str(outcome) == "eval:browser_command_error"
+    assert applied_ids(page) == [order_id(0)]
+    assert _imported_ids(home.database_file) == {order_id(0)}
+    assert not (work / "order-scan-002.json").exists()
+    assert scan_apply(work) == {
+        "status": "stopped",
+        "reason": "eval:browser_command_error",
+        "mode": "default",
+        "unknown_order_count": 3,
+        "applied_order_count": 1,
+        "last_imported_order_id": order_id(0),
+        "skipped_tile_total": 1,
+        "scan_sequence": 2,
+        "skipped_tile_count": 1,
     }
 
 
@@ -566,7 +755,9 @@ def test_order_heading_must_name_the_requested_order(
         "unknown_order_count": 3,
         "applied_order_count": 1,
         "last_imported_order_id": order_id(0),
+        "skipped_tile_total": 0,
         "scan_sequence": 2,
+        "skipped_tile_count": 0,
     }
 
 
@@ -586,7 +777,9 @@ def test_order_page_stall_ends_the_run_with_a_partial_result(
         "unknown_order_count": 3,
         "applied_order_count": 1,
         "last_imported_order_id": order_id(0),
+        "skipped_tile_total": 0,
         "scan_sequence": 2,
+        "skipped_tile_count": 0,
     }
 
 

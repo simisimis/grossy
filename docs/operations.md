@@ -204,12 +204,16 @@ open its order-details page, require the route ID, the details container and a
 settled bottom passes, write a one-order `grossy.history.order-scan.v1`
 proposal, scan-validate, and sync-apply `--listed-orders <listed.json>
 <scan.json>`. Each order is its own transaction including recurrence learning;
-imported IDs are the only checkpoint. A card without a canonical `/p/<id>`
-link, a stall or an unconfirmed apply ends the run as `partial` with nothing
-applied for that order; a browser-level stop (authentication loss, CAPTCHA,
-route drift, pinned tab lost) records `stopped` with its reason.
-`scan-apply.json` names `last_imported_order_id`. Counts are diagnostics, not
-historical quantities. No retry, no tab adoption, no continuation after a
+imported IDs are the only checkpoint. Tiles are read once after the page has
+settled: a tile without a canonical `/p/<id>` link (for example a substituted
+product with a generic URL) carries no identity, is skipped and reported as a
+count only (`skipped_tile_count`, running `skipped_tile_total`); the order is
+still applied with its identifiable products. Zero identifiable tiles
+(`no_identifiable_products`), a malformed linked tile, a stall or an
+unconfirmed apply end the run as `partial` with nothing applied for that
+order; a browser-level stop (authentication loss, CAPTCHA, route drift, pinned
+tab lost) records `stopped` with its reason. `scan-apply.json` names
+`last_imported_order_id`. Counts are diagnostics, not historical quantities. No retry, no tab adoption, no continuation after a
 failed phase.
 
 ### Backfill procedure (`--full`)
@@ -217,9 +221,10 @@ failed phase.
 A `--full` run needs its own explicit approval, by the coordinator with the
 owner watching: `live.sh start --history-only`, then `live.sh history --full`
 (optionally `--dry-run` first to count unknown orders). It imports every
-unknown order in the list, skipping imported ones. If it stops (stall,
-missing canonical link, browser-level stop), the orders applied so far are
-durable and `scan-apply.json` names the last imported ID. Resuming is never
+unknown order in the list, skipping imported ones. Tiles without a canonical
+link are skipped and counted, never a stop. If it stops (stall, zero
+identifiable tiles, malformed linked tile, browser-level stop), the orders
+applied so far are durable and `scan-apply.json` names the last imported ID. Resuming is never
 automatic: a following default run stops at the newest imported order, and
 the remaining older orders need a separately authorized `--full` run. Record
 sanitized counts only.

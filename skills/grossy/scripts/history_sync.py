@@ -11,8 +11,11 @@ authentication loss, CAPTCHA, route drift or target loss stops with no retry and
 List identity is at least one rendered order entry with its order-details anchor; no verified
 empty-list state exists yet, so a list without entries stops as missing identity (fail closed).
 Each unknown order, newest first, is opened on its order-details page, scrolled to two settled
-bottom passes, built into its own order-scan proposal, validated and applied as one sync-apply
-transaction (with recurrence learning) before the next order is opened. Imported IDs are the only
+bottom passes (progress measured by visible tile count only), read once, built into its own
+order-scan proposal from its identifiable tiles, validated and applied as one sync-apply
+transaction (with recurrence learning) before the next order is opened. Tiles without a canonical
+/p/<id> link (for example substituted products with a generic URL) are skipped and counted; an
+order with zero identifiable tiles stops the run. Imported IDs are the only
 checkpoint: an interrupted run leaves exactly the orders applied so far, and a later run neither
 resumes nor replays. Order-page dates are never read; the order date comes from the listed entry.
 Outputs in the work dir: discover-prepare.json, listed-orders.json, enumeration.json, dry-run.json,
@@ -76,16 +79,30 @@ def heading_js(sid):
     )
 
 
+# Visible non-carousel product tiles on the order page.
+TILES_JS = (
+    '[...document.querySelectorAll("[data-testid=product-block]")].filter(e=>v(e)&&!e.closest("'
+    '[data-testid=product-carousel-container]"))'
+)
+
+
+def tile_count_js(sid):
+    """Walk progress measure: the number of visible tiles. No link or name rule applies mid-walk
+    because a tile that is still loading may not carry its link yet."""
+    return order_route_js(sid) + "return " + TILES_JS + ".length;"
+
+
 def cards_js(sid):
-    """Rendered non-carousel product cards: every /p/ link href, product-name and product-brand
-    text. Dates on the order page are never read (month-first rendering)."""
+    """Settled read of every tile: every /p/ link href, product-name and product-brand text.
+    Dates on the order page are never read (month-first rendering)."""
     return (
         order_route_js(sid)
-        + 'return [...document.querySelectorAll("[data-testid=product-block]")].filter(e=>v(e)&&!e'
-        '.closest("[data-testid=product-carousel-container]")).map(c=>({hrefs:[...c.querySelectorA'
-        'll("a[href*=\'/p/\']")].map(a=>a.getAttribute("href").split(/[?#]/)[0]),names:[...c.que'
-        'rySelectorAll("[data-testid=product-name]")].map(e=>e.innerText.trim()),brands:[...c.que'
-        'rySelectorAll("[data-testid=product-brand]")].map(e=>e.innerText.trim())}));'
+        + "return "
+        + TILES_JS
+        + '.map(c=>({hrefs:[...c.querySelectorAll("a[href*=\'/p/\']")].map(a=>a.getAttribute("hr'
+        'ef").split(/[?#]/)[0]),names:[...c.querySelectorAll("[data-testid=product-name]")].map(e'
+        '=>e.innerText.trim()),brands:[...c.querySelectorAll("[data-testid=product-brand]")].map('
+        "e=>e.innerText.trim())}));"
     )
 
 
@@ -210,42 +227,54 @@ pending = [o for o in listed if o["source_order_id"] in unknown_ids]
 if len(pending) != len(unknown_ids):
     stop("scan_prepare_unknown_orders_not_listed")
 imported = []  # applied order IDs in apply order (newest first)
+skipped_total = [0]  # tiles without a canonical link over every order read so far
 
 
-def scan_result(status, reason, **extra):
-    write(
-        "scan-apply.json",
-        {
-            "status": status,
-            "reason": reason,
-            "mode": result["mode"],
-            "unknown_order_count": len(pending),
-            "applied_order_count": len(imported),
-            "last_imported_order_id": imported[-1] if imported else None,
-            **extra,
-        },
-    )
+def scan_result(status, reason, seq=None, skipped=0):
+    """Progress record; ``seq`` and ``skipped`` (tiles skipped on that order) describe the
+    current order while one is open."""
+    record = {
+        "status": status,
+        "reason": reason,
+        "mode": result["mode"],
+        "unknown_order_count": len(pending),
+        "applied_order_count": len(imported),
+        "last_imported_order_id": imported[-1] if imported else None,
+        "skipped_tile_total": skipped_total[0],
+    }
+    if seq is not None:
+        record.update(scan_sequence=seq, skipped_tile_count=skipped)
+    write("scan-apply.json", record)
 
 
-def scan_order(order, seq):
-    """Open the order page, walk it to two settled bottom passes and return (walk, products).
-    A card without exactly one canonical /p/<id> link or without a product name stops the run
-    with nothing applied for this order."""
+def scan_order(order, seq, skipped_now):
+    """Open the order page, walk it to two settled bottom passes measured by visible tile count,
+    then read every tile once. Returns (walk, products, skipped_tile_count). A tile without
+    exactly one canonical /p/<id> link carries no identity and is skipped and counted; a linked
+    tile without exactly one nonempty name, or duplicate IDs with differing data, stop the run
+    with nothing applied for this order. ``skipped_now`` (one-element list) receives this
+    order's skipped count as soon as the settled read completes, so a browser stop after the
+    read still reports it."""
     sid, tag = order["source_order_id"], f"order-{seq:03d}"
-    products = {}  # product_id -> scanned product, first-seen order
+    seen = [0]
 
     def collect():
-        new = 0
-        for card in drill.evaluate(cards_js(sid), tag, recover=False):
-            links = {m.group(1): m for m in map(PRODUCT_HREF_RE.match, card["hrefs"]) if m}
+        count = drill.evaluate(tile_count_js(sid), tag, recover=False)
+        new = max(0, count - seen[0])
+        seen[0] = max(seen[0], count)
+        return new
+
+    def read_tiles():
+        products = {}  # product_id -> scanned product, first-seen order
+        skipped = 0
+        for tile in drill.evaluate(cards_js(sid), tag, recover=False):
+            links = {m.group(1): m for m in map(PRODUCT_HREF_RE.match, tile["hrefs"]) if m}
             if len(links) != 1:
-                scan_result("partial", "product_link_missing", scan_sequence=seq)
-                stop(
-                    f"product_link_missing: order {seq} of {len(pending)}, partial result in "
-                    "scan-apply.json"
-                )
-            if len(card["names"]) != 1 or not card["names"][0]:
-                scan_result("partial", "product_card_malformed", scan_sequence=seq)
+                skipped += 1
+                continue
+            if len(tile["names"]) != 1 or not tile["names"][0]:
+                skipped_total[0] += skipped
+                scan_result("partial", "product_card_malformed", seq, skipped)
                 stop(f"product_card_malformed: order {seq} of {len(pending)}")
             pid, m = next(iter(links.items()))
             href = m.group(0)
@@ -254,17 +283,20 @@ def scan_order(order, seq):
                 "canonical_url": href
                 if href.startswith("https://")
                 else "https://www.ab.gr" + href,
-                "title": card["names"][0],
-                "brand": card["brands"][0]
-                if len(card["brands"]) == 1 and card["brands"][0]
+                "title": tile["names"][0],
+                "brand": tile["brands"][0]
+                if len(tile["brands"]) == 1 and tile["brands"][0]
                 else None,
             }
             if pid not in products:
                 products[pid] = product
-                new += 1
             elif products[pid] != product:
+                skipped_total[0] += skipped
+                scan_result("partial", "inconsistent_product_card", seq, skipped)
                 stop(f"inconsistent_product_card: order {seq} of {len(pending)}")
-        return new
+        skipped_total[0] += skipped
+        skipped_now[0] = skipped
+        return list(products.values()), skipped
 
     drill.browser(["open", order["navigation_url"]], tag, recover=False)
     drill.wait(
@@ -275,44 +307,52 @@ def scan_order(order, seq):
     )
     headings = drill.evaluate(heading_js(sid), tag, recover=False)
     if not headings:
-        scan_result("partial", "order_heading_missing", scan_sequence=seq)
+        scan_result("partial", "order_heading_missing", seq)
         stop(f"order_heading_missing: order {seq} of {len(pending)}")
     if headings != [sid]:
-        scan_result("partial", "order_heading_mismatch", scan_sequence=seq)
+        scan_result("partial", "order_heading_mismatch", seq)
         stop(f"order_heading_mismatch: order {seq} of {len(pending)}")
     drill.settle_page(tag, recover=False, timeout=drill.STALL_SECONDS)
     walk = drill.walk_to_settled_bottom(collect, tag)
+    if walk["ended"] == "stalled":
+        return walk, [], 0  # nothing is read from a page that never settled
+    products, skipped = read_tiles()
     drill.evaluate(order_route_js(sid) + "return true;", tag, recover=False)
-    return walk, list(products.values())
+    return walk, products, skipped
 
 
 def scan_order_recording_browser_stops(order, seq):
     """Run ``scan_order``; a browser-level stop (authentication loss, CAPTCHA, route drift,
     target loss) mid-order is first recorded in scan-apply.json, then stops as before."""
     live_stop = drill.stop
+    skipped_now = [0]  # this order's skipped tiles once read; 0 before the settled read
 
     def recording_stop(reason):
         drill.stop = live_stop
-        scan_result("stopped", reason, scan_sequence=seq)
+        scan_result("stopped", reason, seq, skipped_now[0])
         live_stop(reason)
 
     drill.stop = recording_stop
     try:
-        return scan_order(order, seq)
+        return scan_order(order, seq, skipped_now)
     finally:
         drill.stop = live_stop
 
 
 for seq, order in enumerate(pending, 1):
-    walk, products = scan_order_recording_browser_stops(order, seq)
+    walk, products, skipped = scan_order_recording_browser_stops(order, seq)
     if walk["ended"] == "stalled":
-        scan_result("partial", "stall_rule", scan_sequence=seq)
+        scan_result("partial", "stall_rule", seq)
         stop(
             f"order_scan_stalled: order {seq} of {len(pending)}, partial result in scan-apply.json"
         )
     if not products:
-        scan_result("partial", "order_products_missing", scan_sequence=seq)
-        stop(f"order_products_missing: order {seq} of {len(pending)}")
+        # Zero identifiable tiles on a settled page: page markup drift suspected, fail closed.
+        scan_result("partial", "no_identifiable_products", seq, skipped)
+        stop(
+            f"no_identifiable_products: order {seq} of {len(pending)}, partial result in "
+            "scan-apply.json"
+        )
     year, month, day = order["order_date"].split("-")
     name = f"order-scan-{seq:03d}.json"
     write(
@@ -338,12 +378,13 @@ for seq, order in enumerate(pending, 1):
         "history", "sync-apply", path, "--listed-orders", lo, out=f"sync-apply-{seq:03d}.json"
     )
     if ap["status"] != "applied" or ap["imported_orders"] != 1:
-        scan_result("partial", "apply_not_confirmed", scan_sequence=seq)
+        scan_result("partial", "apply_not_confirmed", seq, skipped)
         stop(f"apply_not_confirmed: order {seq} of {len(pending)}")
     imported.append(order["source_order_id"])
-    scan_result("in_progress", "applied", scan_sequence=seq)
+    scan_result("in_progress", "applied", seq, skipped)
     print(
-        f"order {seq}/{len(pending)}: {len(products)} products, {walk['passes']} bottom passes, "
+        f"order {seq}/{len(pending)}: {len(products)} products, {skipped} skipped "
+        f"tile{'' if skipped == 1 else 's'}, {walk['passes']} bottom passes, "
         f"applied ({ap['new_products']} new products)",
         flush=True,
     )

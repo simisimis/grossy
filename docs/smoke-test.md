@@ -116,24 +116,25 @@ fresh discover-prepare, walk and sync-dry-run as in step 2, then scan-prepare
 `--listed-orders <listed.json>` for the unknown orders of this walk. For each
 unknown order, newest first, on the same pinned tab: open its order-details page,
 require the route ID and the `Order NNNNNNNNN` heading digits to equal the
-requested ID, allow lazy-loaded cards to render, require two consecutive settled
-bottom passes revealing no new product IDs, scan-validate the one-order proposal,
-then sync-apply `--listed-orders <listed.json> <scan.json>` as its own
-transaction. Imported IDs are the only checkpoint; no batch is formed. The stall
-rule (30 s) ends the run with a partial result naming `last_imported_order_id`;
-a card without a canonical `/p/<id>` link also ends the run with nothing applied
-for that order and does not skip to the next. `--full` is a separately authorized
-backfill that skips known IDs; it is outside this smoke. If there are no
-unknowns, record the no-op summary, no invented import.
+requested ID, allow lazy-loaded tiles to render, require two consecutive settled
+bottom passes revealing no new tile, then read the tiles once: a tile without a
+canonical `/p/<id>` link (for example a substituted product with a generic URL)
+is skipped and reported as a count only; zero identifiable tiles end the run
+(`no_identifiable_products`). Scan-validate the one-order proposal, then
+sync-apply `--listed-orders <listed.json> <scan.json>` as its own transaction.
+Imported IDs are the only checkpoint; no batch is formed. The stall rule (30 s)
+ends the run with a partial result naming `last_imported_order_id`. `--full` is
+a separately authorized backfill that skips known IDs; it is outside this smoke.
+If there are no unknowns, record the no-op summary, no invented import.
 
 **Effect/evidence:** listed/unknown/applied counts, per-order product-presence
-count, stabilization result, final `scan-apply.json` status (complete, partial
-or stopped), sanitized summary checksum and idempotent dry-run unknown count
-zero. Binary presence only; never infer purchased units.
-**Stop:** heading mismatch, missing canonical link, stall, unconfirmed apply or
-any browser-level stop; orders applied so far stay imported, nothing is retried
-or resumed, and remaining older unknown orders need a separately authorized
-`--full` run.
+and skipped-tile counts, stabilization result, final `scan-apply.json` status
+(complete, partial or stopped), sanitized summary checksum and idempotent
+dry-run unknown count zero. Binary presence only; never infer purchased units.
+**Stop:** heading mismatch, zero identifiable tiles, malformed linked tile,
+stall, unconfirmed apply or any browser-level stop; orders applied so far stay
+imported, nothing is retried or resumed, and remaining older unknown orders need
+a separately authorized `--full` run.
 **Confirmation:** “Apply unknown orders one by one to local SQLite?” separately
 from discovery, once per run; this does not authorize any cart mutation.
 

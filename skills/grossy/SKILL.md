@@ -130,15 +130,21 @@ count. `live.sh history [--dry-run] [--full]` runs the whole sequence.
      `Order NNNNNNNNN` inside it whose digits equal the requested ID. A missing
      heading stops with `order_heading_missing`; any other digits stop with
      `order_heading_mismatch`; nothing on that page is read.
-   - Walk to two consecutive settled bottom passes that add no new product ID
-     (same stall rule). Read only non-carousel `[data-testid=product-block]`
-     cards: exactly one canonical `/p/<id>` link, `[data-testid=product-name]`
-     title (nonempty) and `[data-testid=product-brand]`. Order-page dates are
-     never read; the order date and label come from the listed entry.
-   - A card without exactly one canonical link stops the run with
-     `product_link_missing`, nothing applied for that order and the remaining
-     unknown orders left for a separately authorized `--full` run; it does not
-     skip to the next order (known limit).
+   - Walk to two consecutive settled bottom passes that add no new visible
+     non-carousel `[data-testid=product-block]` tile (same stall rule); no
+     link or name rule applies mid-walk. After settling, read every tile once:
+     exactly one canonical `/p/<id>` link plus a nonempty
+     `[data-testid=product-name]` (brand optional) identifies a product.
+     Order-page dates are never read; the order date and label come from the
+     listed entry.
+   - A tile without a canonical link (for example a substituted product with a
+     generic URL) carries no identity: it is skipped and reported as a count
+     only (`skipped_tile_count`, running `skipped_tile_total`); the order is
+     still applied with its identifiable products. A linked tile with a
+     malformed name stops with `product_card_malformed`; duplicate IDs with
+     differing data stop with `inconsistent_product_card`. Zero identifiable
+     tiles on a settled page stop with `no_identifiable_products` (markup
+     drift suspected), nothing applied for that order.
    - Emit a one-order `grossy.history.order-scan.v1` proposal
      (`order-scan-NNN.json`), then
      `grossy history scan-validate <order-scan-NNN.json>` and
@@ -148,7 +154,8 @@ count. `live.sh history [--dry-run] [--full]` runs the whole sequence.
      anything else stops with `apply_not_confirmed`.
    - `scan-apply.json` records progress after each order (`status`, `reason`,
      `mode`, `unknown_order_count`, `applied_order_count`,
-     `last_imported_order_id`, `scan_sequence`): `in_progress`/`applied`
+     `last_imported_order_id`, `skipped_tile_total`, `scan_sequence`,
+     `skipped_tile_count`): `in_progress`/`applied`
      between orders, `complete`/`all_unknown_orders_applied` at the end,
      `partial` with the script's reason, or `stopped` with the browser-level
      stop reason when authentication loss, CAPTCHA, route drift or target loss
@@ -170,8 +177,9 @@ phase):**
 - Missing list identity (`list_identity_missing`), malformed or inconsistent
   entry → stop before any proposal.
 - Heading mismatch or missing heading on an order page → stop, nothing read.
-- Missing canonical product link, malformed card, stall → stop with a partial
+- Zero identifiable tiles, malformed linked tile, stall → stop with a partial
   result in `scan-apply.json` (or `enumeration.json` during the walk).
+  Unidentifiable tiles alone never stop the run; they are counted.
 - Nonzero CLI phase exit → stop; nothing half-applied.
 
 ### `weekly plan [--skip-history-sync]`
