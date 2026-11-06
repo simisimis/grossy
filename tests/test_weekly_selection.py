@@ -158,7 +158,7 @@ def test_argument_order_selection_matrix(
     "case,quantity,status",
     [
         ("shared", 3, "passing"),
-        ("credit-once", 2, "passing"),
+        ("credit-once", 0, "passing"),
         ("multipack", 2, "passing"),
         ("kg-conversion", 2, "passing"),
         ("weighed", 3, "passing"),
@@ -247,6 +247,30 @@ def test_current_conversion_and_policy_matrix(
             assert i["retail_quantity"] == quantity and i["assumptions"]
 
 
+@pytest.mark.parametrize(
+    "cart,credit,quantity",
+    [({"111": 1}, "100", 0), ({}, "0", 2)],
+    ids=["positive-credit-satisfies", "zero-credit-keeps-full-quantity"],
+)
+def test_recipe_preflight_positive_credit_satisfies_without_top_up(
+    home: GrossyPaths, cart: dict[str, int], credit: str, quantity: int
+) -> None:
+    """One rice pack against a two-pack target is satisfied (missing 0), never topped up."""
+    rid = plan(home, second=False)
+    accepted = run_recipe_preflight(home, rid, observation(cart))
+    (decision,) = accepted["decisions"]
+    assert decision["status"] == "passing"
+    (ingredient,) = decision["ingredients"]
+    assert ingredient["consolidated_target"] == "150"
+    assert ingredient["consolidated_cart_credit"] == credit
+    assert ingredient["retail_quantity"] == quantity
+    assert accepted["manifest"]["additions"] == (
+        [{"product_id": "111", "canonical_url": url("111"), "quantity": 2, "price_eur": "2.00"}]
+        if quantity
+        else []
+    )
+
+
 class FakeCart(AdditiveCartAdapter):
     def __init__(self, paths: GrossyPaths, fail: str | None = None) -> None:
         self.paths, self.fail = paths, fail
@@ -308,7 +332,8 @@ def test_intent_readback_repeat_and_resume(home: GrossyPaths, failure: str | Non
         with pytest.raises(WeeklyPlanError):
             run_recipe_preflight(home, rid, observation())
         result = apply_recipes(home, rid, adapter, lambda _: True, resume=True)
-        assert adapter.actions == [("111", 1), ("222", 2)]
+        # The partially landed rice is covered by its positive credit; only beans remain.
+        assert adapter.actions == [("222", 2)]
     else:
         result = apply_recipes(home, rid, adapter, lambda _: True)
         if failure:
@@ -316,8 +341,10 @@ def test_intent_readback_repeat_and_resume(home: GrossyPaths, failure: str | Non
             assert stored(home, "SELECT lifecycle FROM planner_runs")[0][0] == "partial-failure"
             result = apply_recipes(home, rid, adapter, lambda _: True, resume=True)
     assert result["status"] == "success"
-    assert adapter.cart == {"111": 2, "222": 2}
-    assert adapter.reads >= 6
+    assert adapter.cart == (
+        {"111": 1, "222": 2} if failure == "interrupt" else {"111": 2, "222": 2}
+    )
+    assert adapter.reads >= (5 if failure == "interrupt" else 6)
     assert stored(home, "SELECT lifecycle FROM planner_runs")[0][0] == "awaiting-user-verification"
     assert stored(home, "SELECT last_purchase_date FROM product_families") == history
     assert (
@@ -331,7 +358,8 @@ def test_intent_readback_repeat_and_resume(home: GrossyPaths, failure: str | Non
     assert apply_recipes(home, rid, adapter, lambda _: True)["status"] == "success"
     assert adapter.actions == actions
     data = report(home, rid)
-    assert data["budget"]["verified_recipe_eur"] == "8.00"
+    # Interrupt: the one landed rice pack is reconciled as verified, plus two beans.
+    assert data["budget"]["verified_recipe_eur"] == ("6.00" if failure == "interrupt" else "8.00")
     assert data["recipe_mutation_evidence"] and data["recurring_mutation_evidence"]
     assert all(p.stat().st_mode & 0o777 == 0o600 for p in home.run_dir(rid).glob("report.*"))
 
@@ -365,8 +393,9 @@ def test_autonomous_multi_recipe_prefill_credits_edited_cart_and_repeats(
     adapter = FakeCart(home)
     adapter.cart = dict(edited)
     assert apply_recipes(home, rid, adapter)["status"] == "success"
-    assert sorted(adapter.actions) == [("111", 1), ("222", 2)]
-    assert adapter.cart == {"111": 2, "222": 2, "333": 1}
+    # The owner's single rice pack covers the rice recipe; only beans are added.
+    assert sorted(adapter.actions) == [("222", 2)]
+    assert adapter.cart == {"111": 1, "222": 2, "333": 1}
     assert stored(home, "SELECT lifecycle FROM planner_runs")[0][0] == "awaiting-user-verification"
     checks = [
         json.loads(r[0])
@@ -380,10 +409,10 @@ def test_autonomous_multi_recipe_prefill_credits_edited_cart_and_repeats(
         "SELECT checksum FROM run_mutation_manifests WHERE stage='recipe' "
         "AND json_array_length(manifest_json,'$.additions')=1 ORDER BY id",
     )
-    assert [(c["stage"], c["consent_row_id"]) for c in checks] == [("recipe", consent)] * 2
+    assert [(c["stage"], c["consent_row_id"]) for c in checks] == [("recipe", consent)]
     assert [c["manifest_checksum"] for c in checks] == [r[0] for r in recipe_manifests]
     assert apply_recipes(home, rid, adapter)["status"] == "success"
-    assert sorted(adapter.actions) == [("111", 1), ("222", 2)]
+    assert sorted(adapter.actions) == [("222", 2)]
     assert "999" not in adapter.cart
 
 

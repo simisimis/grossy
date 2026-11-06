@@ -76,6 +76,8 @@ if missing_urls:
     stop("missing_urls:" + ",".join(missing_urls))
 print("selected slots:", chosen, "| recipe product identities to track:", len(RECIPE))
 EXP_FILE = D / "verified-cart-quantities.json"
+UNBOUND_FILE = D / recurring_cart.UNBOUND_RECORD
+PAGE_BOUND_FILE = D / recurring_cart.PAGE_BOUND_RECORD
 STALE = 240
 cache = {}
 
@@ -98,11 +100,31 @@ def read(pid, qty):
 
 
 def refresh(expected, skip=()):
+    # Products outside the expected lines are read without a quantity gate: a positive in-cart
+    # quantity on such a page is evidence the product is already present, not a stop.
     for pid in list(dict.fromkeys([*expected, *RECIPE])):
         if pid in skip:
             continue
         if pid not in cache or time.time() - cache[pid]["read_at"] > STALE:
-            read(pid, expected.get(pid, 0))
+            read(pid, expected.get(pid))
+
+
+def recorded_unbound():
+    return json.loads(UNBOUND_FILE.read_text()) if UNBOUND_FILE.exists() else []
+
+
+def recorded_page_bound():
+    return json.loads(PAGE_BOUND_FILE.read_text()) if PAGE_BOUND_FILE.exists() else {}
+
+
+def bind_present(expected, pre):
+    """Recipe product pages showing an in-cart quantity outside the expected lines bind their
+    recorded unbound rows by page evidence and join the expected lines before the anchoring
+    preflight; the CLI then reports the ingredient satisfied without a write or action-check."""
+    for pid in [p for p in RECIPE if p not in expected and cache[p]["quantity"] > 0]:
+        cart_bind.bind_page_row(cache[pid], pre)
+        expected[pid] = cache[pid]["quantity"]
+        write(EXP_FILE.name, expected)
 
 
 def read_unavailable(pid, url):
@@ -115,11 +137,13 @@ def read_unavailable(pid, url):
 
 def checkout_check(expected, tag, protected=()):
     """Identity-bound checkout readback. Returns the buyable quantities (confirmed unavailable
-    lines excluded)."""
+    lines excluded); the unbound rows must equal the recorded list."""
     c = cart_bind.checkout_rows(tag)
     try:
         recurring_cart.bind_unavailable_rows(c, cache, KNOWN, read_unavailable)
-        remaining = recurring_cart.reconcile(c, expected, cache, protected)
+        remaining = recurring_cart.reconcile(
+            c, expected, cache, protected, recorded_unbound(), recorded_page_bound()
+        )
     except ValueError as exc:
         write(tag + "-checkout-diagnostic.json", {"reason": str(exc), "row_count": len(c["rows"])})
         stop(str(exc))
@@ -243,6 +267,7 @@ for _ in range(MAX):
         k += 1
         pre = f"recipe-{sum(1 for p in expected if p in RECIPE) + 1:02d}r{k}"
     refresh(expected)
+    bind_present(expected, pre)
     checkout_check(expected, pre + "-pre")
     o1 = observation(expected)
     write(pre + "-cart-1.json", o1)
@@ -250,10 +275,13 @@ for _ in range(MAX):
         "recipe-preflight", pre + "-cart-1.json", "grossy.weekly.recipe-preflight.v1", "accepted"
     )
     if r1["manifest"]["additions"]:
-        read(
-            r1["manifest"]["additions"][0]["product_id"],
-            expected.get(r1["manifest"]["additions"][0]["product_id"], 0),
-        )
+        target = r1["manifest"]["additions"][0]["product_id"]
+        read(target, expected.get(target))
+        if target not in expected and cache[target]["quantity"] > 0:
+            # Every recipe product was read fresh before the preflight above, which anchored the
+            # CLI's recipe cart; a quantity appearing since is a mid-run cart change, not a
+            # pre-existing row. Stop before intent, action-check and any write; records stay.
+            stop("recipe_product_present_after_anchor:" + target)
     o2 = observation(expected)
     write(pre + "-cart-2.json", o2)
     r2 = phase(

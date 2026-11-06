@@ -530,15 +530,50 @@ class TestBaselineApply:
 class TestRecurringResolution:
     """Tests for YAML/learned recurring item resolution."""
 
-    def test_yaml_staple_positive_delta(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize(
+        "cart,credited,missing,status",
+        [(["1111111"], 1, 0, "skipped"), (["9999999"], 0, 2, "pending")],
+        ids=["positive-credit-covers", "zero-credit-keeps-full-quantity"],
+    )
+    def test_yaml_staple_positive_credit_covers_without_top_up(
+        self, tmp_path: Path, cart: list[str], credited: int, missing: int, status: str
+    ) -> None:
+        """Basket quantity 1 against target 2 is covered (missing 0), never topped up."""
         paths = _initialized(tmp_path)
-        result = _apply(paths, _plan(paths), ["1111111"], [1])
+        result = _apply(paths, _plan(paths), cart, [1])
         (item,) = _items(result, product_id="1111111", category="breakfast")
         assert item["source_type"] == "yaml"
         assert item["intended_quantity"] == 2
-        assert item["credited_quantity"] == 1
-        assert item["missing_delta"] == 1
-        assert item["status"] == "pending"
+        assert item["credited_quantity"] == credited
+        assert item["missing_delta"] == missing
+        assert item["status"] == status
+        if credited:
+            assert "satisfied; retained excess preserved" in item["rationale"]
+        else:
+            assert "missing delta 2" in item["rationale"]
+
+    @pytest.mark.parametrize(
+        "cart,credited,missing,status",
+        [(["7063312"], 1, 0, "skipped"), (["5555555"], 0, 2, "pending")],
+        ids=["positive-credit-covers", "zero-credit-keeps-full-quantity"],
+    )
+    def test_learned_family_positive_credit_covers_without_top_up(
+        self, tmp_path: Path, cart: list[str], credited: int, missing: int, status: str
+    ) -> None:
+        """Learned family resolution applies the same covered threshold as YAML staples."""
+        paths = _initialized(tmp_path)
+        _seed_family(paths, "fam-bananas", "7063312")
+        _execute(
+            paths, "UPDATE products SET typical_quantity = 2 WHERE retailer_product_id = '7063312'"
+        )
+        result = _apply(paths, _plan(paths), cart, [1])
+        (item,) = _items(result, family_id="fam-bananas")
+        assert item["source_type"] == "learned"
+        assert item["product_id"] == "7063312"
+        assert item["intended_quantity"] == 2
+        assert item["credited_quantity"] == credited
+        assert item["missing_delta"] == missing
+        assert item["status"] == status
 
     def test_excess_is_preserved_with_no_negative_delta(self, tmp_path: Path) -> None:
         """Preview deltas are never negative (FR-121, FR-122)."""
@@ -665,7 +700,7 @@ class TestRecurringResolution:
         (item,) = _items(result, family_id="fam-credit")
         credited = 1 if approval == "approved" else 0
         assert item["credited_quantity"] == credited
-        assert item["missing_delta"] == 2 - credited
+        assert item["missing_delta"] == (0 if credited else 2)
 
     def test_yaml_learned_same_family_consolidates(self, tmp_path: Path) -> None:
         paths = _initialized(tmp_path)

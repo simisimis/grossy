@@ -1,8 +1,9 @@
-"""Basket-review advance: identity-bind every checkout line after the owner's manual edits,
-then `weekly advance`.
+"""Basket-review advance: identity-bind the checkout lines after the owner's manual edits,
+re-record the unbound rows, then `weekly advance`.
 
 Usage: advance.py
-Reports unavailable / removed / re-bound / added lines separately. Read-only in the browser.
+Reports unavailable / removed / re-bound / added / unbound lines separately. Read-only in the
+browser.
 """
 
 import json
@@ -12,6 +13,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import cart_bind
 import live_common as drill
+import recurring_cart
 from live_common import D, stop, write
 from slot_gate import require_ready
 
@@ -37,7 +39,20 @@ for f in sorted(drill.BASE.glob("live-*/matching-prepare.json")):
             },
         )
 
-obs, bound, unavailable, searched = cart_bind.bind_cart(KNOWN, "advance")
+previous_unbound = (
+    json.loads((D / recurring_cart.UNBOUND_RECORD).read_text())
+    if (D / recurring_cart.UNBOUND_RECORD).exists()
+    else []
+)
+page_bound = (
+    json.loads((D / recurring_cart.PAGE_BOUND_RECORD).read_text())
+    if (D / recurring_cart.PAGE_BOUND_RECORD).exists()
+    else {}
+)
+# The basket-review barrier is where owner edits are accepted: both records are re-recorded.
+obs, bound, unavailable, searched, unbound = cart_bind.bind_cart(
+    KNOWN, "advance", page_bound=page_bound
+)
 write("advance-cart.json", obs)
 write(
     "advance-bound.json",
@@ -106,4 +121,11 @@ changed = [
 ]
 if changed:
     print("quantity changed by owner:", changed)
+print(
+    "unbound rows re-recorded (left as is, no credit):",
+    [(u["brand"], u["name"], u["quantity"]) for u in unbound],
+    "| changed since previous record:",
+    sorted(map(recurring_cart.unbound_key, previous_unbound))
+    != sorted(map(recurring_cart.unbound_key, unbound)),
+)
 write("verified-cart-quantities.json", {p: r["quantity"] for p, r in bound.items()})

@@ -34,6 +34,18 @@ automatic expansion of this smoke allowance.
   quantity greater than one, but only one exact product identity. If other missing
   actions exist, do not hide them, edit accepted manifests, disable families
   implicitly, or add them. Stop for separately reviewed scope/policy approval.
+- The basket may be non-empty at the start; that is a normal start, not a
+  stop. Checkout rows the scripts cannot bind to a product page are recorded
+  as unbound rows in the private work directory (`unbound-rows.json`), ignored
+  by the CLI (no credit) and never removed or adjusted; a later checkout read
+  that differs from that record stops with `checkout_unbound_rows_changed`.
+  The one exception is the owner basket-review barrier (step 5.5), where
+  `advance.py` re-records the unbound rows from the fresh observation because
+  owner edits are accepted there. A planned product already in the basket is
+  covered (missing 0, no top-up) and is not one of the missing actions; if it
+  sits in an unbound row the scripts bind that row by page evidence without a
+  write. Pre-existing items, bound or unbound, are never removed or adjusted by
+  the smoke.
 - Only vegetarian spicy-bean-burgers is bundled. Other seeds are controlled missing.
   An unavailable/empty slot or no safe single-action recipe is a blocker, not
   permission to source/generate recipes during smoke. Record missing evidence;
@@ -146,7 +158,8 @@ from discovery, once per run; this does not authorize any cart mutation.
 then `weekly baseline-apply <run-id> <cart.json>`.
 
 **Effect/evidence:** run ID/lifecycle, baseline line count/quantities/subtotal,
-positive recurring preview, no cart changes. Baseline/excess must be preserved.
+unbound row count (recorded as read, no credit), positive recurring preview, no
+cart changes. Baseline/excess and unbound rows must be preserved.
 **Stop:** competing run, stale/ambiguous identity, unexplained drift or history failure.
 **Confirmation:** explicitly approve local run/baseline persistence; **no cart-write
 approval** yet. Preview must fit the one-recurring-action smoke bound.
@@ -177,8 +190,9 @@ quantity, price), and intent uses the freshly accepted manifest.
 **Stop:** any discrepancy/failure; do not compensate. After this **one** action,
 stop additions. Fresh preflight must show zero remaining additions to persist a
 zero-addition recurring-intent (local-state only, no browser write). After
-completion the run enters `awaiting-basket-review` (step 5.5). If nonempty, stop
-before further additions outside this smoke; do not claim Stage1 complete.
+completion the run enters `awaiting-basket-review` (step 5.5). If positive
+missing deltas remain, stop before further additions outside this smoke; do not
+claim Stage1 complete.
 **Confirmation:** explicit exact-action user approval for this one specific
 addition (product, delta, price). The bounded smoke retains per-action approval
 until owner acceptance of the autonomous stage-consent workflow; stage consent
@@ -195,7 +209,8 @@ user provides a fresh whole-cart observation and runs
 basis and transitions to `recurring-apply`. Without advance, recipes-apply fails
 closed. The advance observation must be fresh (within five minutes). Manual review
 edits are expected differences from the last verified observation; explicit advance
-accepts them rather than treating them as drift.
+accepts them rather than treating them as drift (`advance.py` re-records the
+unbound rows here, see Preconditions).
 **Stop:** stale, incomplete/failed or ambiguous cart evidence (any non-`readback`
 `mutation_result` is rejected), or an unexpected/invalid lifecycle.
 **Confirmation:** User explicitly invokes advance; no automatic transition.
@@ -275,9 +290,9 @@ reconciled state, remaining positive-delta count, removed quantities not restore
 no automatic cart write. These preparation/reconciliation phases persist local
 audit state; include that effect in the approval. If zero missing, accepted
 zero-addition completion is local
-only. If nonempty, **stop without intent/write**: the one-recurring/one-recipe
-allowance is exhausted; additional live actions need a new separately reviewed
-approval outside this smoke. A refusal/attention result is recorded honestly,
+only. If positive missing deltas remain, **stop without intent/write**: the
+one-recurring/one-recipe allowance is exhausted; additional live actions need a
+new separately reviewed approval outside this smoke. A refusal/attention result is recorded honestly,
 not overridden or described as successful recovery.
 **Stop:** stale/incomplete evidence, baseline loss/unrelated changes or outstanding
 removal. If interruption unexpectedly follows a durable intent, do not replay it;

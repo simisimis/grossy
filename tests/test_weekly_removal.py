@@ -34,8 +34,9 @@ def added(paths: GrossyPaths) -> str:
 
     from grossy.browser.mutation import apply_recurring
 
-    fake = FakeAdditiveCart(paths, {"111": 1, "999": 8})
+    fake = FakeAdditiveCart(paths, {"999": 8})
     assert apply_recurring(paths, run_id, fake, lambda _: True)["status"] == "success"
+    assert fake.quantities == {"111": 3, "222": 1, "999": 8}
     # Complete Stage1 with an empty established-recipe proposal through public phase.
     from test_weekly_recipes import proposal as empty_recipe_options
 
@@ -71,16 +72,18 @@ class FakeRemoval(RemovalCartAdapter):
 def test_default_bounds_audit_and_no_restoration(home: GrossyPaths) -> None:
     run_id = added(home)
     fake = FakeRemoval({"111": 3, "222": 1, "999": 8})
-    with pytest.raises(WeeklyPlanError, match="attribution"):
-        run_removal_preflight(home, run_id, observation(fake.quantities), product="111", quantity=3)
+    # Every unit of 111 is run-attributed (a product already in the basket is never
+    # added), so over-requesting fails on the cart bound before attribution.
+    with pytest.raises(WeeklyPlanError, match="bounded by current cart"):
+        run_removal_preflight(home, run_id, observation(fake.quantities), product="111", quantity=4)
     assert apply_removal(home, run_id, fake, lambda _: True, product="111")["status"] == "success"
-    assert fake.quantities == {"111": 1, "222": 1, "999": 8} and len(fake.writes) == 1
+    assert fake.quantities == {"111": 0, "222": 1, "999": 8} and len(fake.writes) == 1
     assert rows(
         home,
         "SELECT authorized_quantity,run_attributed_quantity,preexisting_quantity,"
         "confirmed FROM run_removals",
-    ) == [(2, 2, 0, 1)]
-    with pytest.raises(WeeklyPlanError, match="positive"):
+    ) == [(3, 3, 0, 1)]
+    with pytest.raises(WeeklyPlanError, match="present in current cart"):
         run_removal_preflight(home, run_id, observation(fake.quantities), product="111")
     with pytest.raises(WeeklyPlanError, match="restored"):
         run_resume_prepare(home, run_id, observation(fake.quantities))
@@ -243,7 +246,7 @@ def test_stale_cart_deny_revocation_and_replayed_intent(home: GrossyPaths) -> No
         "manifest"
     ]
     run_removal_intent(home, run_id, manifest, confirmed=True)
-    after = observation({"111": 1, "222": 1, "999": 8})
+    after = observation({"222": 1, "999": 8})
     after["mutation_result"] = {"manifest_checksum": manifest["checksum"], "outcome": "readback"}
     assert run_removal_observe(home, run_id, after)["status"] == "success"
     manifest["generated_at"] = observation({})["generated_at"]
@@ -274,10 +277,11 @@ def test_removal_does_not_block_unrelated_recipe_and_history_unchanged(
         for table in ("source_orders", "source_order_products", "product_families")
     }
     before = recipe_obs(cart.cart)
-    manifest = run_removal_preflight(home, run_id, before, product="111", quantity=1)["manifest"]
+    # Remove every rice pack: any remaining pack would cover the recipe instead.
+    manifest = run_removal_preflight(home, run_id, before, product="111", quantity=2)["manifest"]
     run_removal_intent(home, run_id, manifest, confirmed=True)
     if applied:
-        cart.cart["111"] -= 1
+        cart.cart["111"] -= 2
     after = recipe_obs(cart.cart)
     after["mutation_result"] = {"manifest_checksum": manifest["checksum"], "outcome": "readback"}
     result = run_removal_observe(home, run_id, after)
@@ -430,7 +434,7 @@ def test_unattempted_report_failure_safe_no_effect_reconciliation(
         run_removal_intent(home, run_id, manifest, confirmed=True)
     renewed = run_removal_preflight(home, run_id, reread, product="111")["manifest"]
     assert renewed["checksum"] != manifest["checksum"]
-    assert renewed["run_attributed_quantity"] == 2
+    assert renewed["run_attributed_quantity"] == 3
 
 
 def test_abandon_and_report_recovery_work_with_broken_policy(home: GrossyPaths) -> None:
@@ -460,11 +464,12 @@ def test_shared_recipe_credit_cannot_undo_removal(home: GrossyPaths) -> None:
     run_id = plan(home, shared=True)
     cart = FakeCart(home)
     assert apply_recipes(home, run_id, cart, lambda _: True)["status"] == "success"
+    # Remove every shared rice pack: any remaining pack would cover both recipes.
     manifest = run_removal_preflight(
-        home, run_id, recipe_obs(cart.cart), product="111", quantity=1
+        home, run_id, recipe_obs(cart.cart), product="111", quantity=3
     )["manifest"]
     run_removal_intent(home, run_id, manifest, confirmed=True)
-    cart.cart["111"] -= 1
+    cart.cart["111"] -= 3
     after = recipe_obs(cart.cart)
     after["mutation_result"] = {"manifest_checksum": manifest["checksum"], "outcome": "readback"}
     run_removal_observe(home, run_id, after)

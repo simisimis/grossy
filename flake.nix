@@ -40,7 +40,7 @@
           {
             default = pyPkgs.buildPythonApplication {
               pname = "grossy";
-              version = "0.4.0";
+              version = "0.5.0";
               src = buildSource pkgs;
               pyproject = true;
               nativeBuildInputs = [ pyPkgs.setuptools ];

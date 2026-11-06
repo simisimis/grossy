@@ -387,7 +387,8 @@ def recipe_plan(
                         "cart credit includes explicit agent estimates for non-comparable "
                         "package units; not an observed package fact"
                     )
-            missing = max(Decimal(0), target - credit)
+            # Any positive cart credit satisfies the ingredient; never top up.
+            missing = Decimal(0) if credit > 0 else target
             quantity = int(
                 (missing / Decimal(sample["base_size"])).to_integral_value(rounding=ROUND_CEILING)
             )

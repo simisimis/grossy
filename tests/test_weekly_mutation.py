@@ -87,7 +87,7 @@ def home(tmp_path: Path) -> GrossyPaths:
 
 def prepare(paths: GrossyPaths, quantities: dict[str, int] | None = None) -> str:
     run_id = str(run_plan_prepare(paths, skip_history_sync=True)["run_id"])
-    run_baseline_apply(paths, run_id, observation(quantities or {"111": 1, "999": 8}))
+    run_baseline_apply(paths, run_id, observation(quantities or {"999": 8}))
     return run_id
 
 
@@ -227,7 +227,7 @@ def test_changed_yaml_preferred_family_member_requires_replanning(home: GrossyPa
     first = config["staples"]["breakfast"][0]
     first.update(product_id="333", product_url=url("333"), allow_substitution=False)
     home.config_file.write_text(yaml.safe_dump(config))
-    fake = FakeAdditiveCart(home, {"111": 1, "999": 8})
+    fake = FakeAdditiveCart(home, {"999": 8})
     with pytest.raises(WeeklyPlanError, match="stale recurring YAML target"):
         apply_recurring(home, run_id, fake, lambda manifest: True)
     assert not fake.writes
@@ -311,19 +311,50 @@ class FakeAdditiveCart(AdditiveCartAdapter):
 
 def test_positive_delta_success_retry_and_reports(home: GrossyPaths) -> None:
     run_id = prepare(home)
-    fake = FakeAdditiveCart(home, {"111": 1, "999": 8})
+    fake = FakeAdditiveCart(home, {"999": 8})
     assert apply_recurring(home, run_id, fake, lambda manifest: True)["status"] == "success"
-    assert fake.writes == [("111", 2), ("222", 1)]
+    assert fake.writes == [("111", 3), ("222", 1)]
     assert fake.quantities == {"111": 3, "222": 1, "999": 8}
     assert apply_recurring(home, run_id, fake, lambda manifest: True)["status"] == "success"
-    assert fake.writes == [("111", 2), ("222", 1)]
+    assert fake.writes == [("111", 3), ("222", 1)]
     report = json.loads((home.run_dir(run_id) / "report.json").read_text())
-    assert report["budget"]["verified_recurring_eur"] == "6.00"
+    assert report["budget"]["verified_recurring_eur"] == "8.00"
     assert report["budget"]["resulting_total_eur"] == "24.00"
-    assert report["baseline"][1]["quantity"] == 8
+    assert report["baseline"][0]["quantity"] == 8
     assert report["recurring_mutation_evidence"]
     assert "Recurring mutation evidence" in (home.run_dir(run_id) / "report.md").read_text()
     assert rows(home, "SELECT purchase_order_count FROM products") == [(0,), (0,), (0,)]
+
+
+@pytest.mark.parametrize("credit", ["exact", "approved-alternative"])
+def test_positive_credit_marks_cart_covered_without_top_up(home: GrossyPaths, credit: str) -> None:
+    """Basket quantity 1 against target 2 is covered (missing 0); zero credit keeps the
+    full intended quantity missing."""
+    config = yaml.safe_load(home.config_file.read_text())
+    config["staples"]["breakfast"][0].update(quantity=2)
+    if credit == "approved-alternative":
+        seed_yaml_family(home)
+        config["staples"]["breakfast"][0].update(
+            allow_substitution=True, approved_alternative_product_ids=["333"]
+        )
+    home.config_file.write_text(yaml.safe_dump(config))
+    cart = {"111" if credit == "exact" else "333": 1, "999": 8}
+    run_id = prepare(home, cart)
+    assert rows(
+        home,
+        "SELECT p.retailer_product_id,i.intended_quantity,i.credited_quantity,i.missing_delta,"
+        "i.status FROM run_recurring_items i JOIN products p ON p.id=i.product_id "
+        "ORDER BY p.retailer_product_id",
+    ) == [("111", 2, 1, 0, "skipped"), ("222", 1, 0, 1, "pending")]
+    accepted = run_recurring_preflight(home, run_id, observation(cart))
+    assert {"product_id": "111", "status": "cart-covered"} in accepted["decisions"]
+    assert accepted["manifest"]["additions"] == [
+        {"product_id": "222", "canonical_url": url("222"), "quantity": 1, "price_eur": "2.00"}
+    ]
+    fake = FakeAdditiveCart(home, cart)
+    assert apply_recurring(home, run_id, fake, lambda manifest: True)["status"] == "success"
+    assert fake.writes == [("222", 1)]
+    assert fake.quantities == {**cart, "222": 1}
 
 
 @pytest.mark.parametrize("failure", ["before", "after", "mismatch", "readback"])
@@ -331,9 +362,9 @@ def test_failure_stops_without_compensation_and_resume_credits_live_cart(
     home: GrossyPaths, failure: str
 ) -> None:
     run_id = prepare(home)
-    fake = FakeAdditiveCart(home, {"111": 1, "999": 8}, failure)
+    fake = FakeAdditiveCart(home, {"999": 8}, failure)
     assert apply_recurring(home, run_id, fake, lambda manifest: True)["status"] == "error"
-    assert fake.writes == [("111", 2)]
+    assert fake.writes == [("111", 3)]
     assert rows(home, "SELECT lifecycle FROM planner_runs") == [("partial-failure",)]
     assert len(rows(home, "SELECT observed_json FROM run_mutation_observations")) == 2
     fake.failure, fake.fail_readback = "", False
@@ -342,7 +373,7 @@ def test_failure_stops_without_compensation_and_resume_credits_live_cart(
         == "success"
     )
     expected = (
-        [("111", 2), ("111", 2), ("222", 1)] if failure == "before" else [("111", 2), ("222", 1)]
+        [("111", 3), ("111", 3), ("222", 1)] if failure == "before" else [("111", 3), ("222", 1)]
     )
     assert fake.writes == expected
     assert fake.quantities["999"] == 8
@@ -351,7 +382,7 @@ def test_failure_stops_without_compensation_and_resume_credits_live_cart(
 
 def test_owner_denial_and_unexpected_cart_stop_before_write(home: GrossyPaths) -> None:
     run_id = prepare(home)
-    fake = FakeAdditiveCart(home, {"111": 1, "999": 8})
+    fake = FakeAdditiveCart(home, {"999": 8})
     assert apply_recurring(home, run_id, fake, lambda manifest: False)["status"] == "cancelled"
     assert not fake.writes and not rows(home, "SELECT id FROM run_mutation_manifests")
     fake.quantities["999"] = 9
@@ -365,7 +396,7 @@ def test_interrupted_intent_is_not_reauthorized_and_resume_adds_only_remaining(
     home: GrossyPaths,
 ) -> None:
     run_id = prepare(home)
-    accepted = run_recurring_preflight(home, run_id, observation({"111": 1, "999": 8}))
+    accepted = run_recurring_preflight(home, run_id, observation({"999": 8}))
     manifest = accepted["manifest"]
     run_recurring_intent(home, run_id, manifest)
     with pytest.raises(WeeklyPlanError, match="already persisted"):
@@ -373,7 +404,10 @@ def test_interrupted_intent_is_not_reauthorized_and_resume_adds_only_remaining(
     with pytest.raises(WeeklyPlanError, match="resume"):
         run_recurring_preflight(home, run_id, observation({"111": 2, "999": 8}))
     resumed = run_resume_prepare(home, run_id, observation({"111": 2, "999": 8}))
-    assert resumed["manifest"]["additions"][0]["quantity"] == 1
+    # The partially landed 111 is covered by its positive credit; only 222 remains.
+    assert resumed["manifest"]["additions"] == [
+        {"product_id": "222", "canonical_url": url("222"), "quantity": 1, "price_eur": "2.00"}
+    ]
     run_recurring_intent(home, run_id, resumed["manifest"])
     assert len(rows(home, "SELECT id FROM run_mutation_manifests")) == 2
 
@@ -383,7 +417,7 @@ def test_interrupted_intent_is_not_reauthorized_and_resume_adds_only_remaining(
 )
 def test_manifest_rejection_has_no_authorization(home: GrossyPaths, case: str) -> None:
     run_id = prepare(home)
-    manifest = run_recurring_preflight(home, run_id, observation({"111": 1, "999": 8}))["manifest"]
+    manifest = run_recurring_preflight(home, run_id, observation({"999": 8}))["manifest"]
     if case == "checksum":
         manifest["checksum"] = "0" * 64
     elif case == "negative":
@@ -420,7 +454,7 @@ def test_manifest_rejection_has_no_authorization(home: GrossyPaths, case: str) -
 )
 def test_current_fact_policy_matrix(home: GrossyPaths, case: str) -> None:
     run_id = prepare(home)
-    data = observation({"111": 1, "999": 8})
+    data = observation({"999": 8})
     fact = data["recurring_product_facts"][0]
     error = False
     if case == "absent":
@@ -460,7 +494,7 @@ def test_current_fact_policy_matrix(home: GrossyPaths, case: str) -> None:
 
 def test_blacklist_change_after_preflight_and_writer_lock_reject_intent(home: GrossyPaths) -> None:
     run_id = prepare(home)
-    manifest = run_recurring_preflight(home, run_id, observation({"111": 1, "999": 8}))["manifest"]
+    manifest = run_recurring_preflight(home, run_id, observation({"999": 8}))["manifest"]
     with WriterLock(home.state_dir), pytest.raises(LockHeldError):
         run_recurring_intent(home, run_id, manifest)
     change(
@@ -500,7 +534,7 @@ def test_cli_phases_and_observation_checksum_stop(
     monkeypatch.setenv("XDG_STATE_HOME", str(home.state_dir.parent))
     run_id = prepare(home)
     file = home.state_dir / "observation.json"
-    file.write_text(json.dumps(observation({"111": 1, "999": 8})))
+    file.write_text(json.dumps(observation({"999": 8})))
     runner = CliRunner()
     preflight = runner.invoke(app, ["weekly", "recurring-preflight", run_id, str(file)])
     assert preflight.exit_code == 0, preflight.stdout
@@ -521,7 +555,7 @@ def test_cli_phases_and_observation_checksum_stop(
 
 def test_resume_refuses_unrelated_change_without_removal(home: GrossyPaths) -> None:
     run_id = prepare(home)
-    manifest = run_recurring_preflight(home, run_id, observation({"111": 1, "999": 8}))["manifest"]
+    manifest = run_recurring_preflight(home, run_id, observation({"999": 8}))["manifest"]
     run_recurring_intent(home, run_id, manifest)
     before = rows(home, "SELECT manifest_json FROM run_mutation_manifests")
     with pytest.raises(WeeklyPlanError, match="unexplained"):
@@ -541,17 +575,17 @@ def test_unavailable_primary_substitution_is_credited_without_promotion(
     )
     home.config_file.write_text(yaml.safe_dump(config))
     run_id = prepare(home)
-    data = observation({"111": 1, "999": 8})
+    data = observation({"999": 8})
     data["recurring_product_facts"][0]["availability"] = "unavailable"
     manifest = run_recurring_preflight(home, run_id, data)["manifest"]
     assert manifest["additions"] == (
-        [{"product_id": "333", "canonical_url": url("333"), "quantity": 2, "price_eur": "2.00"}]
+        [{"product_id": "333", "canonical_url": url("333"), "quantity": 3, "price_eur": "2.00"}]
         if allowed
         else []
     )
     run_recurring_intent(home, run_id, manifest)
     if allowed:
-        readback = observation({"111": 1, "333": 2, "999": 8})
+        readback = observation({"333": 3, "999": 8})
         readback["recurring_product_facts"][0]["availability"] = "unavailable"
         readback["mutation_result"] = {
             "manifest_checksum": manifest["checksum"],
@@ -563,7 +597,11 @@ def test_unavailable_primary_substitution_is_credited_without_promotion(
         yaml.safe_load(home.config_file.read_text())["staples"]["breakfast"][0]["product_id"]
         == "111"
     )
-    assert rows(home, "SELECT product_id,intended_quantity FROM run_recurring_items") == [(1, 3)]
+    assert rows(
+        home,
+        "SELECT p.retailer_product_id,i.intended_quantity FROM run_recurring_items i "
+        "JOIN products p ON p.id=i.product_id",
+    ) == [("111", 3)]
 
 
 @pytest.mark.parametrize(
@@ -581,7 +619,7 @@ def test_unavailable_primary_substitution_is_credited_without_promotion(
 )
 def test_closed_observation_and_manifest_boundary(home: GrossyPaths, case: str) -> None:
     run_id = prepare(home)
-    data = observation({"111": 1, "999": 8})
+    data = observation({"999": 8})
     if case in ("bool-version", "string-version"):
         manifest = run_recurring_preflight(home, run_id, data)["manifest"]
         manifest["schema_version"] = True if case == "bool-version" else "1"
@@ -613,7 +651,7 @@ def test_confirmation_reread_change_and_report_failure_never_reach_browser_write
     home: GrossyPaths, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     run_id = prepare(home)
-    fake = FakeAdditiveCart(home, {"111": 1, "999": 8})
+    fake = FakeAdditiveCart(home, {"999": 8})
 
     def owner_confirms_but_cart_changes(manifest: dict[str, Any]) -> bool:
         fake.quantities["999"] = 9
@@ -622,7 +660,7 @@ def test_confirmation_reread_change_and_report_failure_never_reach_browser_write
     with pytest.raises(WeeklyPlanError, match="unexpected cart"):
         apply_recurring(home, run_id, fake, owner_confirms_but_cart_changes)
     assert not fake.writes
-    manifest = run_recurring_preflight(home, run_id, observation({"111": 1, "999": 8}))["manifest"]
+    manifest = run_recurring_preflight(home, run_id, observation({"999": 8}))["manifest"]
 
     def broken_report(*args: Any, **kwargs: Any) -> None:
         raise OSError("fake disk failure")
@@ -640,7 +678,7 @@ def test_recurring_records_are_in_existing_private_export_inventory(home: Grossy
     from grossy.db.backup import db_export
 
     run_id = prepare(home)
-    manifest = run_recurring_preflight(home, run_id, observation({"111": 1, "999": 8}))["manifest"]
+    manifest = run_recurring_preflight(home, run_id, observation({"999": 8}))["manifest"]
     run_recurring_intent(home, run_id, manifest)
     destination = home.state_dir / "export.json"
     db_export(home.database_file, destination)
@@ -677,7 +715,7 @@ def test_resume_requires_fresh_complete_evidence_without_clearing_intent(
     home: GrossyPaths, evidence: str
 ) -> None:
     run_id = prepare(home)
-    fake = FakeAdditiveCart(home, {"111": 1, "999": 8}, "readback")
+    fake = FakeAdditiveCart(home, {"999": 8}, "readback")
     assert apply_recurring(home, run_id, fake, lambda manifest: True)["status"] == "error"
     if evidence == "recorded-incomplete":
         data = json.loads(
@@ -696,7 +734,7 @@ def test_resume_requires_fresh_complete_evidence_without_clearing_intent(
     assert {table: rows(home, f"SELECT * FROM {table}") for table in before} == before
     with pytest.raises(WeeklyPlanError, match="resume"):
         run_recurring_preflight(home, run_id, observation(fake.quantities))
-    assert fake.writes == [("111", 2)]
+    assert fake.writes == [("111", 3)]
 
 
 def test_contradictory_current_price_cannot_authorize_hard_limit_bypass(home: GrossyPaths) -> None:
@@ -724,7 +762,7 @@ def test_intent_expires_with_source_facts_not_acceptance_clock(
             return clock
 
     monkeypatch.setattr("grossy.weekly.mutation.datetime", Clock)
-    data = observation({"111": 1, "999": 8})
+    data = observation({"999": 8})
     data["generated_at"] = (clock - timedelta(seconds=299)).isoformat()
     manifest = run_recurring_preflight(home, run_id, data)["manifest"]
     clock += timedelta(seconds=2)
@@ -1065,7 +1103,8 @@ def test_verified_item_becomes_unavailable_other_items_finish(
 def test_unavailable_does_not_waive_evidence_or_other_cart_drift(
     home: GrossyPaths, problem: str
 ) -> None:
-    run_id = prepare(home)
+    # The baseline holds 111 so its absence from the reread is drift unless forgiven.
+    run_id = prepare(home, {"111": 1, "999": 8})
     data = unavailable_observation({"999": 8})
     if problem == "unknown":
         data["recurring_product_facts"][0]["availability"] = "unknown"
@@ -1094,6 +1133,27 @@ def test_unavailable_fact_for_non_recurring_line_is_still_drift(home: GrossyPath
     )
     with pytest.raises(WeeklyPlanError, match="needs-attention|unexpected cart change"):
         run_recurring_preflight(home, run_id, data)
+
+
+def test_preflight_accepts_page_bound_line_for_run_known_recurring_identity(
+    home: GrossyPaths,
+) -> None:
+    """A planned recurring product first reported after baseline (its checkout row bound by
+    product-page evidence in the scripts) is credited as covered, not treated as drift."""
+    run_id = prepare(home, {"999": 8})
+    first = run_recurring_preflight(home, run_id, observation({"999": 8}))
+    assert first["remaining_addition_count"] == 2  # 111 and 222 both planned
+    second = run_recurring_preflight(home, run_id, observation({"999": 8, "222": 1}))
+    assert second["status"] == "accepted"
+    assert {"product_id": "222", "status": "cart-covered"} in second["decisions"]
+    assert [a["product_id"] for a in second["manifest"]["additions"]] == ["111"]
+    assert second["remaining_addition_count"] == 1
+    assert rows(home, "SELECT lifecycle FROM planner_runs") != [("needs-attention",)]
+    # Every other difference is still drift: an unknown new line and a changed known quantity.
+    for drift in ({"999": 8, "555": 1}, {"999": 9, "222": 1}):
+        with pytest.raises(WeeklyPlanError, match="unexpected cart change"):
+            run_recurring_preflight(home, run_id, observation(drift))
+    assert not rows(home, "SELECT id FROM run_mutation_manifests")
 
 
 def test_preflight_reports_unregistered_alternatives_as_unresolved(home: GrossyPaths) -> None:

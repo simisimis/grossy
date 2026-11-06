@@ -178,17 +178,17 @@ def recipe_stage_run(paths: GrossyPaths) -> str:
 
 
 def positive_run(paths: GrossyPaths) -> str:
-    """A planned run whose baseline (111: 1) sits below the recurring target (111: 5)."""
+    """A planned run whose baseline holds no 111 against the recurring target (111: 5)."""
     configure_staples(paths, {"111": 5})
     run_id = str(run_plan_prepare(paths, skip_history_sync=True)["run_id"])
-    run_baseline_apply(paths, run_id, observation({"111": 1, "999": 8}))
+    run_baseline_apply(paths, run_id, observation({"999": 8}))
     return run_id
 
 
 def positive_intent(paths: GrossyPaths) -> tuple[str, dict[str, Any]]:
-    """Persist one recurring addition intent (111: 1 -> 5) and return its manifest."""
+    """Persist one recurring addition intent (111: 0 -> 5) and return its manifest."""
     run_id = positive_run(paths)
-    manifest = run_recurring_preflight(paths, run_id, observation({"111": 1, "999": 8}))["manifest"]
+    manifest = run_recurring_preflight(paths, run_id, observation({"999": 8}))["manifest"]
     assert run_recurring_intent(paths, run_id, manifest)["status"] == "persisted"
     return run_id, manifest
 
@@ -426,7 +426,7 @@ def test_action_check_binds_pending_manifest_and_is_single_use(home: GrossyPaths
 def test_action_check_after_attempted_readback_is_rejected(home: GrossyPaths) -> None:
     """A partial readback leaves the intent pending but never re-authorizes its write."""
     run_id, manifest = positive_intent(home)
-    failed = readback(manifest, {"111": 1, "999": 8}, outcome="failed")
+    failed = readback(manifest, {"999": 8}, outcome="failed")
     assert run_recurring_observe(home, run_id, failed)["status"] == "error"
     with pytest.raises(WeeklyPlanError):
         run_action_check(home, run_id, manifest)
@@ -434,7 +434,7 @@ def test_action_check_after_attempted_readback_is_rejected(home: GrossyPaths) ->
 
 @pytest.mark.parametrize(
     "cart,status,failure_class",
-    [({"111": 1, "999": 8}, "error", "partial"), ({"111": 5, "999": 8}, "success", "none")],
+    [({"999": 8}, "error", "partial"), ({"111": 5, "999": 8}, "success", "none")],
     ids=["unchanged-cart", "completed-cart"],
 )
 def test_revocation_after_intent_blocks_action_check_but_not_readback(
@@ -517,7 +517,7 @@ def test_action_check_revalidates_source_observation_age(
             def read_cart(self) -> CartObservation:
                 return backdated(super().read_cart())
 
-        fake: Any = StaleRecurringCart(paths, {"111": 1, "999": 8})
+        fake: Any = StaleRecurringCart(paths, {"999": 8})
         module: Any = browser_mutation
         apply: Any = browser_mutation.apply_recurring
         intent_name = "run_recurring_intent"
@@ -623,14 +623,14 @@ def test_dispatch_revocation_after_intent_blocks_action(
         return result
 
     monkeypatch.setattr(browser_mutation, "run_recurring_intent", intent_then_revoke)
-    fake = FakeAdditiveCart(home, {"111": 1, "999": 8})
+    fake = FakeAdditiveCart(home, {"999": 8})
     with pytest.raises(WeeklyPlanError, match="revoked"):
         apply_recurring(home, run_id, fake)
     assert len(persisted) == 1 and not fake.writes
     assert checked_events(home) == []
     assert lifecycle(home, run_id) == "recurring-apply"
     # The pending intent is readable without renewed authorization; no new write is.
-    run_recurring_observe(home, run_id, readback({"checksum": persisted[0]}, {"111": 1, "999": 8}))
+    run_recurring_observe(home, run_id, readback({"checksum": persisted[0]}, {"999": 8}))
     with pytest.raises(WeeklyPlanError, match="revoked"):
         apply_recurring(home, run_id, fake, resume=True)
     assert not fake.writes

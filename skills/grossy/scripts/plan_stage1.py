@@ -74,7 +74,7 @@ if not (D / "plan-prepare.json").exists():
 run = json.loads((D / "plan-prepare.json").read_text())["run_id"]
 
 if not (D / "baseline-result.json").exists():
-    obs, bound, unavailable, searched = cart_bind.bind_cart(KNOWN, "baseline")
+    obs, bound, unavailable, searched, unbound = cart_bind.bind_cart(KNOWN, "baseline")
     write("baseline-cart.json", obs)
     write(
         "baseline-bound.json",
@@ -90,6 +90,8 @@ if not (D / "baseline-result.json").exists():
         len(unavailable),
         "| bound via search:",
         len(searched),
+        "| unbound rows recorded (left as is, no credit):",
+        len(unbound),
     )
     for p, r in bound.items():
         print(f"  {p} x{r['quantity']} €{r['displayed_price_eur']}  {r['title'][:60]}")
@@ -148,6 +150,14 @@ for i in pend:
                 print(
                     f"  primary {pid} unavailable -> read alternative {alt}: {ra['availability']}"
                 )
+for r in [x for x in readings if x["product_id"] not in bound and x["quantity"] > 0]:
+    # A planned product already in the basket: its unbound row joins the bound lines by page
+    # evidence, so the first preflight credits it as covered.
+    cart_bind.bind_page_row(r, "baseline")
+    bound[r["product_id"]] = {
+        k: r[k] for k in ("title", "quantity", "displayed_price_eur", "canonical_url")
+    }
+    write("baseline-bound.json", bound)
 lines = []
 for p, br in bound.items():
     rr = next((x for x in readings if x["product_id"] == p), None) or read(p, br["quantity"])

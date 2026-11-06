@@ -217,9 +217,26 @@ do not fabricate retrospective confirmation for an already-prepared run.
    proposal has no unknown order; an unknown order fails closed until synced.
    Local history alone is not comparison evidence. These CLI phases never browse.
    This CLI never browses. No CLI phase launches a browser.
-3. Agent reads the current cart using `agent-browser`.
+3. Agent reads the current cart using `agent-browser`. The basket may be
+   non-empty; the run must not break because of it. An explicit empty-basket
+   message is a valid observation of an empty cart, not a precondition.
+   Checkout rows `cart_bind` cannot bind to a product page are recorded as
+   unbound rows (name, brand, quantity, price as read) in the work directory
+   (`unbound-rows.json`), left out of the observation, ignored by the CLI (no
+   credit, not in the budget projection) and never removed or adjusted. Every
+   later checkout read compares the sorted current unbound rows with that
+   record and stops with `checkout_unbound_rows_changed` on any difference;
+   `advance.py` re-records the list at the basket-review barrier.
 4. Agent emits a `grossy.cart.observation.v1` JSON.
 5. `grossy weekly baseline-apply <run-id> <cart-observation.json>`
+   A planned product whose page shows a positive in-cart quantity is covered:
+   missing 0, no top-up, for recurring staples, learned families and recipe
+   ingredients. When that product was in an unbound row, the scripts bind the
+   unique row with the page quantity and line price (`page-bound-rows.json`),
+   include it in the observation, and the CLI credits it; no write, no
+   action-check. An absent or ambiguous row match stops with
+   `planned_product_unbound_row_absent:<id>` or
+   `planned_product_unbound_row_ambiguous:<id>` before intent.
 6. Execute **Recurring additions** below. Stage consent authorizes the entire
    recurring prefill; no per-action user prompt. After completion (zero-delta
    intent), the run enters `awaiting-basket-review`. Recipe planning MUST wait
@@ -379,6 +396,11 @@ is bound and confirmed the same way, but a line lost during the recipe stage sto
    Require exit zero, versioned accepted output, and its exact `manifest`.
    It computes positive missing deltas with compatible credit, approved
    unavailable-primary fallback, blacklists and hard product/line limits.
+   Any positive exact or compatible-family credit marks the product
+   `cart-covered` with missing 0; only zero credit yields the full quantity.
+   Preflight accepts a first-observed positive line for a run-known recurring
+   identity (a basket row bound by product-page evidence) as covered, not
+   drift; any other new line or quantity change is still drift.
    Baseline and excess stay untouched. It never authorizes removals or price
    substitutions based on incomparable/unknown units.
 3. **Stage consent (Task 16):** The weekly plan invocation grants durable
@@ -438,7 +460,11 @@ is bound and confirmed the same way, but a line lost during the recipe stage sto
 - Another run is active → fail.
 - History sync failure → stop before cart mutation.
 - Unexpected cart change before mutation → enter `needs-attention`; freshly
-  confirmed unavailable-line loss follows the bounded recurring rule above.
+  confirmed unavailable-line loss follows the bounded recurring rule above,
+  and a page-bound pre-existing row of a run-known identity is covered.
+- Recorded unbound rows differ from the current checkout read
+  (`checkout_unbound_rows_changed`) → stop; unbound rows are never removed
+  or adjusted.
 - Product unavailable or ambiguous → skip and report.
 - Hard price limit exceeded → block affected addition.
 
@@ -478,10 +504,17 @@ Add ingredients for selected recipes (Stage 2).
    annotations/history. Facts and cart must be within five minutes; contradictory
    overlapping facts fail. Missing or dimensionally incompatible facts block the
    affected recipe. Do not restore unrelated removed recurring items.
+   Before the first recipe preflight, a recipe product page showing a positive
+   in-cart quantity outside the expected lines binds its unique unbound row by
+   quantity and line price (same rule and stops as Stage1); the recorded unbound
+   rows must otherwise equal the current checkout read.
 3. `grossy weekly recipe-preflight <run-id> <cart-observation.json>` independently
    classifies every selected dinner before any additions, consolidates only passing
    recipes, credits compatible cart quantity once, and returns an accepted versioned
-   exact manifest with at most ONE positive action. Blocked recipes never contribute.
+   exact manifest with at most ONE positive action. Any positive credit satisfies
+   the ingredient with missing 0; no top-up. Blocked recipes never contribute.
+   A target product found in the cart only after this anchoring preflight stops
+   with `recipe_product_present_after_anchor:<id>` before intent.
 4. **Stage consent (Task 16):** `selection-apply` grants durable run-scoped
    recipe stage consent. No per-action user prompt. The agent presents manifest
    details (identity, delta, price, conversion, decisions, budget warning) for
@@ -825,9 +858,10 @@ stepper (`add-to-basket-component` containing `product-block-quantity-input`
 with the quantity, `data-quantity`, no `product-block-add` button) and the
 current price. Build each observation line from that route-bound identity and
 quantity, then require checkout consistency: `remove-basket-item` count equals
-the number of expected lines, header badge matches, and each line's brand,
-quantity and price agree. Any extra checkout line without a product-page
-identity, or any disagreement, makes the readback `incomplete`, never a guess.
+the number of expected lines plus the recorded unbound rows, header badge
+matches, each bound line's brand, quantity and price agree, and the sorted
+unbound rows equal the record (phase sequence step 3). Any other disagreement
+makes the readback `incomplete`, never a guess.
 
 Settling after a write (verified 2026-10-06): the product-page stepper updates
 before `/checkout` does. After one add or decrement, wait until the product
@@ -905,15 +939,19 @@ Brave start on the same profile must pass that flag too, or cookies written by o
 side are unreadable by the other. If any other tab is
 present, stop: never adopt a tab the agent did not open.
 
-Basket-review advance with owner edits: bind every checkout line to a product page.
-Known lines first (hard reload; a stale 0 for a line checkout still lists gets one
-more reload). Bind unknown lines by exact name/brand search and product-page
-quantity/price. Report the four outcomes separately and honestly:
+Basket-review advance with owner edits: bind each checkout line to a product page
+where one binds. Known and page-bound lines first (hard reload; a stale 0 for a
+line checkout still lists gets one more reload). Bind unknown lines by exact
+name/brand search and product-page quantity/price; rows that still bind to no
+page are re-recorded as unbound rows here, the only place owner edits are
+accepted. Report the five outcomes separately and honestly:
 - **Unavailable:** lines showing "See Alternatives" with no quantity are excluded
   as unbuyable, not owner removals.
 - **Removed:** recurring items the owner took out.
 - **Re-bound:** recurring lines bound via search, not owner additions.
 - **Added:** genuine owner additions.
+- **Unbound:** rows no product page binds, re-recorded as read, no credit,
+  left exactly as they are.
 
 Record the task tab's stable target ID privately and select that exact target
 before each browser command, retaining `--pin-tab`. A session name/sticky pin

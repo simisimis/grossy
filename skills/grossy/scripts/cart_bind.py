@@ -1,6 +1,7 @@
-"""Identity-bind every checkout line to a product page (read-only).
+"""Identity-bind checkout lines to product pages (read-only); rows no page binds are recorded
+as unbound rows, never removed or adjusted.
 
-Shared by baseline and advance.
+Shared by baseline, the recurring seed and advance.
 """
 
 import json
@@ -9,7 +10,8 @@ import time
 import urllib.parse
 
 import live_common as drill
-from live_common import CHECKOUT_URL, STORE, stop, write
+import recurring_cart
+from live_common import CHECKOUT_URL, STORE, D, stop, write
 
 
 def norm(t):
@@ -57,25 +59,82 @@ def checkout_rows(tag="cart"):
     stop("checkout_not_settled")
 
 
-def match_row(row, cand):
+def match_row(row, cand, page_row=None):
+    """Row identity is the page title containing name and brand, or equality with the product's
+    page-bound record ``page_row``; quantity and line price must match either way."""
     price = drill.price_of(row["price_parts"])
     q = int(row["quantity"])
+    identity = (
+        norm(row["name"]) in norm(cand["title"]) and norm(row["brand"]) in norm(cand["title"])
+    ) or (
+        page_row is not None
+        and recurring_cart.unbound_key(page_row)
+        == recurring_cart.unbound_key(recurring_cart.unbound_row(row))
+    )
     return (
-        norm(row["name"]) in norm(cand["title"])
-        and norm(row["brand"]) in norm(cand["title"])
+        identity
         and cand["quantity"] == q
         and price
         in (cand["displayed_price_eur"], "%.2f" % (float(cand["displayed_price_eur"]) * q))
     )
 
 
-def bind_cart(known_products, tag="cart"):
+def bind_page_row(reading, prefix):
+    """Page evidence outside a whole-cart read: ``reading`` is a planned product page showing a
+    positive in-cart quantity for a product not among the expected lines. Move the unique
+    quantity-and-price match out of ``unbound-rows.json`` into ``page-bound-rows.json`` and
+    return it; an absent or ambiguous match writes ``<prefix>-page-bound-diagnostic.json`` and
+    stops before intent. No browser write."""
+    pid = reading["product_id"]
+    unbound_file = D / recurring_cart.UNBOUND_RECORD
+    page_bound_file = D / recurring_cart.PAGE_BOUND_RECORD
+    unbound = json.loads(unbound_file.read_text()) if unbound_file.exists() else []
+    try:
+        row = recurring_cart.bind_page_evidence(reading, unbound)
+    except ValueError as exc:
+        write(
+            prefix + "-page-bound-diagnostic.json",
+            {"reason": str(exc), "unbound_rows": len(unbound)},
+        )
+        stop(str(exc))
+    page_bound = json.loads(page_bound_file.read_text()) if page_bound_file.exists() else {}
+    write(unbound_file.name, recurring_cart.without_unbound_row(unbound, row))
+    write(page_bound_file.name, {**page_bound, pid: row})
+    write(
+        f"{prefix}-page-bound-{pid}.json",
+        {
+            "product_id": pid,
+            "quantity": reading["quantity"],
+            "displayed_price_eur": reading["displayed_price_eur"],
+            "row": row,
+        },
+    )
+    print(
+        f"{prefix}: planned product {pid} already in basket x{reading['quantity']}; checkout row "
+        "bound by page evidence, no write",
+        flush=True,
+    )
+    return row
+
+
+def bind_cart(known_products, tag="cart", recorded_unbound=None, page_bound=None):
     """Read whole cart; bind lines to product pages.
 
     known_products: pid -> {canonical_url, title} from local evidence. Only candidates whose
-    stored title contains the row's name and brand are opened; the rest go through exact search.
-    Returns (observation, bound dict pid->reading, unavailable rows, rows_bound_via_search)."""
+    stored title contains the row's name and brand, or whose ``page_bound`` record equals a
+    row, are opened; the rest go through exact search. Buyable rows that neither path binds are
+    returned as unbound rows (name, brand, quantity, price as read) and written to
+    ``<tag>-unbound.json``. With ``recorded_unbound`` None (baseline, advance) they replace
+    ``unbound-rows.json`` and ``page-bound-rows.json`` keeps only records still bound.
+    Otherwise (recurring seed) a recorded unbound row that a known product's page now binds,
+    by stored title or exact search, is page evidence: it moves from ``unbound-rows.json``
+    into ``page-bound-rows.json`` when it is the unique quantity-and-price match; the
+    remaining rows must equal the recorded list, which is otherwise untouched. The
+    observation holds bound lines only.
+    Returns (observation, bound dict pid->reading, unavailable rows, rows_bound_via_search,
+    unbound rows)."""
     known_urls = {p: k["canonical_url"] for p, k in known_products.items()}
+    page_bound = page_bound or {}
     start = drill.now()
     c1 = checkout_rows(tag)
     if any(r.get("ambiguous") for r in c1["rows"]):
@@ -83,19 +142,25 @@ def bind_cart(known_products, tag="cart"):
     unavailable = [r for r in c1["rows"] if r.get("unavailable")]
     rows = [r for r in c1["rows"] if not r.get("unavailable")]
     write(tag + "-unavailable-lines.json", unavailable)
-    bound, unknown = {}, []
+    bound, unknown, bound_rows, known = {}, [], {}, {}
     if rows:
         # Known candidates first: hard reload each product page and bind by
-        # title/brand/quantity/price.
-        known = {}
+        # title/brand/quantity/price (or the page-bound record and quantity/price).
         for pid, k in known_products.items():
             t = norm(k.get("title"))
-            if t and any(norm(r["name"]) in t and norm(r["brand"]) in t for r in rows):
+            if (t and any(norm(r["name"]) in t and norm(r["brand"]) in t for r in rows)) or any(
+                pid in recurring_cart.page_bound_ids(r, page_bound) for r in rows
+            ):
                 known[pid] = drill.product(pid, k["canonical_url"], None, force_reload=True)
         for row in rows:
-            ids = [p for p, cnd in known.items() if cnd and cnd["quantity"] and match_row(row, cnd)]
+            ids = [
+                p
+                for p, cnd in known.items()
+                if cnd and cnd["quantity"] and match_row(row, cnd, page_bound.get(p))
+            ]
             if len(ids) == 1 and ids[0] not in bound:
                 bound[ids[0]] = known[ids[0]]
+                bound_rows[ids[0]] = row
             elif not ids:
                 unknown.append(row)
             else:
@@ -114,11 +179,12 @@ def bind_cart(known_products, tag="cart"):
                 known[stale[0]] = r
                 if r["quantity"] and match_row(row, r) and stale[0] not in bound:
                     bound[stale[0]] = r
+                    bound_rows[stale[0]] = row
                     unknown.remove(row)
         missing = [p for p, cnd in known.items() if cnd and cnd["quantity"] and p not in bound]
         if missing:
             stop("known_in_cart_not_in_checkout:" + ",".join(missing))
-    searched = []
+    searched, unbound = [], []
     for row in unknown:
         e = urllib.parse.quote(row["name"])
         drill.browser(
@@ -161,10 +227,12 @@ def bind_cart(known_products, tag="cart"):
             if r["quantity"] and match_row(row, r):
                 hits.append(r)
         if len(hits) != 1:
-            write(tag + "-unbound.json", {"row": row, "candidates": len(cands), "hits": len(hits)})
-            stop("cart_line_not_bound:" + row["name"])
+            unbound.append(recurring_cart.unbound_row(row))
+            continue
         bound[hits[0]["product_id"]] = hits[0]
+        bound_rows[hits[0]["product_id"]] = row
         searched.append(hits[0])
+    write(tag + "-unbound.json", unbound)
     c2 = checkout_rows(tag + "2")
     c2rows = [r for r in c2["rows"] if not r.get("unavailable")]
     if json.dumps(c2rows, sort_keys=True) != json.dumps(rows, sort_keys=True):
@@ -172,8 +240,63 @@ def bind_cart(known_products, tag="cart"):
     total = sum(int(r["quantity"]) for r in c2rows)
     if rows and c2["badge"] not in ([str(total)], [str(total + len(unavailable))]):
         stop("header_badge_inconsistent")
-    if len(bound) != len(rows):
-        stop("line_count_binding_mismatch")
+    if recorded_unbound is None:
+        write(recurring_cart.UNBOUND_RECORD, unbound)
+        write(
+            recurring_cart.PAGE_BOUND_RECORD,
+            {
+                p: r
+                for p, r in page_bound.items()
+                if p in bound_rows
+                and recurring_cart.unbound_key(recurring_cart.unbound_row(bound_rows[p]))
+                == recurring_cart.unbound_key(r)
+            },
+        )
+    else:
+        # Recorded unbound rows now bound to known (planned) products; a row bound to any other
+        # product is still a changed unbound list below.
+        recorded_keys = set(map(recurring_cart.unbound_key, recorded_unbound))
+        transitions = {}
+        for p, row in bound_rows.items():
+            if (
+                p not in known_products
+                or p in page_bound
+                or recurring_cart.unbound_key(recurring_cart.unbound_row(row)) not in recorded_keys
+            ):
+                continue
+            try:
+                transitions[p] = recurring_cart.bind_page_evidence(bound[p], recorded_unbound)
+            except ValueError as exc:
+                write(
+                    tag + "-page-bound-diagnostic.json",
+                    {"reason": str(exc), "unbound_rows": len(recorded_unbound)},
+                )
+                stop(str(exc))
+        remaining_unbound = list(recorded_unbound)
+        for row in transitions.values():
+            remaining_unbound = recurring_cart.without_unbound_row(remaining_unbound, row)
+        recorded = sorted(map(recurring_cart.unbound_key, remaining_unbound))
+        current = sorted(map(recurring_cart.unbound_key, unbound))
+        if recorded != current:
+            stop(f"checkout_unbound_rows_changed:recorded={len(recorded)}:current={len(current)}")
+        for p, row in transitions.items():
+            write(
+                f"{tag}-page-bound-{p}.json",
+                {
+                    "product_id": p,
+                    "quantity": bound[p]["quantity"],
+                    "displayed_price_eur": bound[p]["displayed_price_eur"],
+                    "row": row,
+                },
+            )
+            print(
+                f"{tag}: planned product {p} already in basket x{bound[p]['quantity']}; checkout "
+                "row bound by page evidence, no write",
+                flush=True,
+            )
+        if transitions:
+            write(recurring_cart.UNBOUND_RECORD, remaining_unbound)
+            write(recurring_cart.PAGE_BOUND_RECORD, {**page_bound, **transitions})
     obs = {
         "schema_name": "grossy.cart.observation.v1",
         "schema_version": 1,
@@ -188,4 +311,4 @@ def bind_cart(known_products, tag="cart"):
             for p, r in bound.items()
         ],
     }
-    return obs, bound, unavailable, searched
+    return obs, bound, unavailable, searched, unbound

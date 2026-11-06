@@ -549,7 +549,8 @@ def _resolve_yaml_staple(
 
     # Cart credit (FR-120, FR-121): exact + compatible-family credit.
     credited = _compute_compatible_credit(conn, product_id, family_id, staple.quantity, baseline)
-    missing = max(0, staple.quantity - credited)
+    # Any positive credit covers the staple; the cart quantity is never topped up.
+    missing = 0 if credited > 0 else staple.quantity
 
     status = "pending" if missing > 0 else "skipped"
     rationale_parts = [f"YAML staple {staple.key!r} ({category})"]
@@ -813,7 +814,8 @@ def _resolve_learned_families(
         credited = _compute_compatible_credit(
             conn, product_id, family_id_str, typical_qty, baseline
         )
-        missing = max(0, typical_qty - credited)
+        # Any positive credit covers the family; the cart quantity is never topped up.
+        missing = 0 if credited > 0 else typical_qty
         price_cents = _product_price_cents(conn, product_id, baseline)
 
         # Display name for ordering.

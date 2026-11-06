@@ -481,7 +481,9 @@ def _plan(
                 if p in baseline and not product_gate(conn, p).is_blocked
             ),
         )
-        delta = max(0, target - credit)
+        # Any positive exact or compatible-family credit covers the product; the
+        # quantity already in the cart is the owner's choice and is never topped up.
+        delta = 0 if credit > 0 else target
         if not delta:
             decisions.append({"product_id": pid, "status": "cart-covered"})
             continue
@@ -747,9 +749,16 @@ def run_recurring_preflight(
         expected = _latest(conn, rid, f"{stage}-cart")
         quantities = expected["quantities"] if expected else _baseline(conn, rid)
         if stage == "recurring":
-            quantities = _recurring_available_quantities(
-                obs, quantities, known=_recurring_known_product_ids(conn, rid, config)
-            )
+            known = _recurring_known_product_ids(conn, rid, config)
+            quantities = _recurring_available_quantities(obs, quantities, known=known)
+            # A run-known recurring identity first observed now with a positive quantity is
+            # a basket row the scripts bound by product-page evidence, not drift: the planner
+            # credits it as covered. Any other new line or quantity change is still drift.
+            quantities |= {
+                pid: quantity
+                for pid, quantity in _cart(obs).items()
+                if pid not in quantities and pid in known and quantity > 0
+            }
         unexpected = (stage == "recurring" or expected) and _cart(obs) != quantities
         if stage == "recipe":
             anchor = _recipe_anchor(conn, rid)

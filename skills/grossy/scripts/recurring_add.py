@@ -41,6 +41,8 @@ def remember_candidates(result):
 remember_candidates(json.loads((D / "recurring-preflight.json").read_text()))
 KNOWN = {p: {"title": r["title"], "canonical_url": r["canonical_url"]} for p, r in INIT.items()}
 EXP_FILE = D / "verified-recurring-quantities.json"
+UNBOUND_FILE = D / recurring_cart.UNBOUND_RECORD
+PAGE_BOUND_FILE = D / recurring_cart.PAGE_BOUND_RECORD
 MAX_ACTIONS = int(sys.argv[1]) if len(sys.argv) > 1 else 20
 STALE = 240  # seconds; observation freshness limit is 300
 cache = {}  # pid -> reading + read_at (epoch) + iso
@@ -67,27 +69,49 @@ def read(pid, qty):
 
 
 def refresh(expected, skip=()):
+    # Products outside the expected lines are read without a quantity gate: a positive in-cart
+    # quantity on such a page is evidence the product is already present, not a stop.
     for pid in list(dict.fromkeys([*TRACKED, *expected])):
         if pid in skip:
             continue
         if pid not in cache or time.time() - cache[pid]["read_at"] > STALE:
-            read(pid, expected.get(pid, 0))
+            read(pid, expected.get(pid))
     for pid in list(TRACKED):
         if cache[pid]["availability"] == "unavailable":
             for alt in ALTERNATIVES.get(pid, []):
                 if alt not in URLS:
                     stop("approved_alternative_url_missing:" + alt)
                 if alt not in cache or time.time() - cache[alt]["read_at"] > STALE:
-                    read(alt, expected.get(alt, 0))
+                    read(alt, expected.get(alt))
+
+
+def recorded_unbound():
+    return json.loads(UNBOUND_FILE.read_text()) if UNBOUND_FILE.exists() else []
+
+
+def recorded_page_bound():
+    return json.loads(PAGE_BOUND_FILE.read_text()) if PAGE_BOUND_FILE.exists() else {}
+
+
+def bind_present(expected, pre):
+    """Planned product pages showing an in-cart quantity outside the expected lines bind their
+    recorded unbound rows by page evidence and join the expected lines; the CLI then credits
+    them as covered without a write or action-check."""
+    for pid in [p for p in TRACKED if p not in expected and cache[p]["quantity"] > 0]:
+        cart_bind.bind_page_row(cache[pid], pre)
+        expected[pid] = cache[pid]["quantity"]
+        write(EXP_FILE.name, expected)
 
 
 def checkout_check(expected, tag, protected=()):
     """Identity-bound checkout readback. Returns the buyable quantities (unavailable lines
-    excluded)."""
+    excluded); the unbound rows must equal the recorded list."""
     c = cart_bind.checkout_rows(tag)
     try:
         recurring_cart.bind_unavailable_rows(c, cache, KNOWN, lambda pid, url: read(pid, None))
-        return recurring_cart.reconcile(c, expected, cache, protected)
+        return recurring_cart.reconcile(
+            c, expected, cache, protected, recorded_unbound(), recorded_page_bound()
+        )
     except ValueError as exc:
         write(tag + "-checkout-diagnostic.json", {"reason": str(exc), "row_count": len(c["rows"])})
         stop(str(exc))
@@ -187,7 +211,11 @@ else:
             }
         )
     t0, iso0 = time.time(), drill.now()
-    obs0, bound0, unavailable0, searched0 = cart_bind.bind_cart(KNOWN, "seed")
+    # Owner edits are accepted only at the basket-review barrier: the seed compares against the
+    # baseline's unbound record instead of replacing it.
+    obs0, bound0, unavailable0, searched0, unbound0 = cart_bind.bind_cart(
+        KNOWN, "seed", recorded_unbound(), recorded_page_bound()
+    )
     for p, r in bound0.items():
         cache[p] = {**r, "read_at": t0, "iso": iso0}
         INIT.setdefault(p, r)
@@ -195,7 +223,8 @@ else:
     write(EXP_FILE.name, expected)
     print(
         f"seeded from cart: {len(expected)} lines, {sum(expected.values())} items; "
-        f"unavailable lines excluded: {len(unavailable0)}",
+        f"unavailable lines excluded: {len(unavailable0)}; unbound rows (no credit): "
+        f"{len(unbound0)}; page-bound rows: {len(recorded_page_bound())}",
         flush=True,
     )
 pending = [
@@ -255,6 +284,7 @@ for _ in range(MAX_ACTIONS):
     ]
     pre = f"action-{max(numbers, default=0) + 1:02d}"
     refresh(expected)
+    bind_present(expected, pre)
     expected = checkout_check(expected, pre + "-pre")
     o1 = observation(expected)
     write(pre + "-cart-1.json", o1)
@@ -267,7 +297,13 @@ for _ in range(MAX_ACTIONS):
     remember_candidates(r1)
     adds = r1["manifest"]["additions"]
     if adds:  # immediate reread of the exact target before intent
-        read(adds[0]["product_id"], expected.get(adds[0]["product_id"], 0))
+        target = adds[0]["product_id"]
+        read(target, expected.get(target))
+        if target not in expected and cache[target]["quantity"] > 0:
+            # Already in the basket: bind its row and re-run preflight so the CLI reports it
+            # covered instead of planning a write.
+            bind_present(expected, pre)
+            continue
     refresh(expected)
     expected = checkout_check(expected, pre + "-pre-intent")
     o2 = observation(expected)

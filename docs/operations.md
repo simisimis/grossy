@@ -244,7 +244,25 @@ Retain the validated listed-orders proposal for
 the default walk found no unknown order (empty unknown set, including zero
 listed orders); an unknown order fails the plan closed until synced. Only an
 explicit `--skip-history-sync` waives comparison. Then baseline-apply persists the whole
-cart. Stage1 recurring-preflight returns at most one positive action. Stage
+cart. The basket may be non-empty at start; the run must not break because of
+it. Checkout rows the scripts cannot bind to a product page are recorded as
+unbound rows (name, brand, quantity, price as read) in the private work
+directory (`unbound-rows.json`), ignored by the CLI (no credit, not in the
+budget projection) and never removed or adjusted; every later checkout read
+compares the sorted current unbound rows with that record and stops with
+`checkout_unbound_rows_changed` on any difference, and `advance` re-records the
+list at the basket-review barrier. A planned product whose page shows a
+positive in-cart quantity is covered: missing 0, no top-up, for recurring
+staples, learned families and recipe ingredients. When it was an unbound row,
+the scripts bind that row by its unique quantity and line price
+(`page-bound-rows.json`) and the CLI credits it without a browser write or
+action-check; an absent or ambiguous match stops before intent
+(`planned_product_unbound_row_absent:<id>` /
+`planned_product_unbound_row_ambiguous:<id>`), and a recipe product found in
+the cart only after the anchoring recipe preflight stops with
+`recipe_product_present_after_anchor:<id>`. Pre-existing basket items, bound
+or unbound, are never removed or adjusted by the run.
+Stage1 recurring-preflight returns at most one positive action. Stage
 consent (granted at plan-prepare) authorizes each addition without per-action
 user prompt; `grossy weekly action-check <run-id> <mutation-manifest.json>`
 immediately before each browser write blocks revoked consent. The flow is:

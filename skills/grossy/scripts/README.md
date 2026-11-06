@@ -24,15 +24,15 @@ print source order IDs or URLs; counts only.
 | *(owner selects delivery day/time manually; agent ends turn and waits)* | | No further browser activity, history sync, availability checks or prefill. |
 | `slot-ready` | `slot_ready.py` | Only after the owner's explicit "slot selected" report: record readiness locally without inspecting slot details or touching the browser/cart. |
 | `history [--dry-run] [--full]` | `history_sync.py` | discover-prepare, reservation-history enumeration walk newest first (two settled bottom passes; 30 s stall rule; default stops at the first imported order, `--full` skips it), `grossy.history.listed-orders.v2` proposal, sync-dry-run, scan-prepare, then per unknown order: heading-checked order page, settled scan (tiles read once after the walk; tiles without a canonical `/p/<id>` link are skipped and counted, zero identifiable tiles stop with `no_identifiable_products`), one-order scan-validate and sync-apply transaction. Progress in `enumeration.json` and `scan-apply.json` (`last_imported_order_id`, `skipped_tile_total`). |
-| `stage1 [--skip-history-sync]` | `plan_stage1.py` | plan-prepare, identity-bound whole-cart baseline, baseline-apply, recurring facts (alternatives for unavailable primaries), first recurring-preflight summary. |
-| `recurring [max]` | `recurring_add.py` | Recurring prefill loop under stage consent: reread, preflight twice, intent, action-check, one click, identity-bound readback, recurring-observe; ends with the zero-addition intent (`awaiting-basket-review`). |
+| `stage1 [--skip-history-sync]` | `plan_stage1.py` | plan-prepare, identity-bound whole-cart baseline (records the unbound rows, see Non-empty start), baseline-apply, recurring facts (alternatives for unavailable primaries; a planned product already in the basket is bound by page evidence), first recurring-preflight summary. |
+| `recurring [max]` | `recurring_add.py` | Recurring prefill loop under stage consent: reread (binds a present planned product by page evidence), preflight twice, intent, action-check, one click, identity-bound readback, recurring-observe; ends with the zero-addition intent (`awaiting-basket-review`). |
 | *(owner reviews basket in the browser)* | | |
-| `advance` | `advance.py` | Binds every checkout line to a product page after owner edits and runs `weekly advance`; reports unavailable/removed/re-bound/added separately. |
+| `advance` | `advance.py` | Binds the checkout lines to product pages after owner edits, re-records the unbound rows and runs `weekly advance`; reports unavailable/removed/re-bound/added/unbound separately. |
 | `recipes` | `recipes_apply.py` | Empty-match offline options proposal, `recipes-apply`, prints the four slots and runs `matching-prepare`. |
 | *(coordinator writes semantic matches spec)* | | see `matches_apply.py` docstring for the spec format |
 | `matches <spec.json>` | `matches_apply.py` | Reads catalogue facts for non-local identities, checksums the proposal, `matches-apply`, prints ingredient previews and costs. |
 | *(owner picks dinners)* | | never run selection on the owner's behalf |
-| `recipe-add <recipeN,...|all> [max]` | `recipe_add.py` | `selection-apply`, then the recipe prefill loop (recipe-preflight twice, intent, action-check, one click, readback, recipe-observe) until zero additions (`awaiting-user-verification`). |
+| `recipe-add <recipeN,...|all> [max]` | `recipe_add.py` | `selection-apply`, then the recipe prefill loop (reread binds a present recipe product by page evidence before the anchoring preflight; recipe-preflight twice, intent, action-check, one click, readback, recipe-observe) until zero additions (`awaiting-user-verification`). |
 | `grossy weekly finish <run-id>` | | Local closure after the owner reviewed the cart. |
 | `status` | `status.py` | Work dir, run id, lifecycle, verified quantities, pending-intent markers. |
 
@@ -59,13 +59,22 @@ Other CLI phases (reroll-apply, abandon, consent-revoke, removal-*) run with
   guard on every `eval`, boolean-only readiness waits, product-page reader
   (`product`, `recipe_fact`), read-only checkout reader, `grossy` phase runner,
   `click_once`/`add_units` (one click, backoff, never re-click), `probe_quantity`.
-- `cart_bind.py`: settled checkout rows and identity binding of every line to a
-  canonical `/p/<id>` page (known titles first, then exact name/brand search).
+- `cart_bind.py`: settled checkout rows and identity binding of each line to a
+  canonical `/p/<id>` page (known titles and page-bound records first, then exact
+  name/brand search); rows no page binds are returned as unbound rows. The
+  baseline and advance reads replace `unbound-rows.json`, the recurring seed
+  compares against it. `bind_page_row` is the one page-evidence transition the
+  stage1, recurring and recipe scripts share.
+- `recurring_cart.py`: pure checkout reconciliation shared by both prefill
+  loops, including the sorted unbound-rows comparison and `bind_page_evidence`,
+  the unique quantity-and-line-price match of a planned product page against
+  the recorded unbound rows.
 
 ## Stops and recovery
 
 Every script exits non-zero with `STOP: <coded reason>` on ambiguity, nonzero
-CLI exit, unexpected route, authentication/CAPTCHA, unbound cart line or drift.
+CLI exit, unexpected route, authentication/CAPTCHA or drift, including a
+changed unbound-rows list. An unbound checkout row by itself is not a stop.
 Nothing retries a browser write. If a click did not register, the loops close
 the intent with a fresh reread via `resume-prepare` and try once more with a
 longer pre-click delay (1 s, 2 s, 5 s); after three not-applied attempts they
@@ -86,6 +95,25 @@ unavailable line cannot overwrite an earlier intent. Both prefill loops share
 `cart_bind.checkout_rows` and the pure `recurring_cart` reconciliation; the recipe
 loop binds a pre-existing unavailable row the same way but stops if a buyable line
 disappears after the recipe anchor.
+
+Non-empty start: the basket may hold anything when a weekly plan starts. An
+explicit empty-basket message is a valid observation of an empty cart, not a
+precondition. Checkout rows no product page binds are recorded as unbound rows
+(name, brand, quantity, price as read) in `unbound-rows.json`, ignored by the
+CLI (no credit) and never removed or adjusted; every later checkout read
+compares the sorted current unbound rows with that record and stops with
+`checkout_unbound_rows_changed` on any difference, and `advance` re-records the
+list at the basket-review barrier. A planned product whose page shows a
+positive in-cart quantity is covered (the CLI reports missing 0, no top-up) for
+recurring staples, learned families and recipe ingredients; when it was an
+unbound row, the script binds that row by its unique quantity and line price
+(`page-bound-rows.json`, evidence in `<prefix>-page-bound-<id>.json`) and the
+CLI credits it, with no browser write and no action-check. An absent or
+ambiguous match writes `<prefix>-page-bound-diagnostic.json` and stops before
+intent with `planned_product_unbound_row_absent:<id>` or
+`planned_product_unbound_row_ambiguous:<id>`; a recipe product found in the cart
+only after the anchoring recipe preflight stops with
+`recipe_product_present_after_anchor:<id>`.
 
 Owner edits are only accepted at the basket-review barrier. A cart that changes
 between `stage1` baseline and the `recurring` loop puts the run in
