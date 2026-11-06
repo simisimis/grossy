@@ -14,11 +14,42 @@ import os
 import pathlib
 import subprocess
 import sys
+from urllib.parse import urlsplit
 
 from slot_gate import initialize, load
 
 if set(sys.argv[1:]) - {"--reuse", "--history-only"}:
     print("STOP: usage: live.sh start [--reuse] [--history-only]", flush=True)
+    sys.exit(1)
+
+
+def store_base_url():
+    """Same GROSSY_STORE_URL rules as live_common.store_base_url, checked before the work
+    directory exists (live_common binds to live-current.txt and cannot be imported yet)."""
+    value = os.environ.get("GROSSY_STORE_URL")
+    if value is None:
+        return None
+    try:
+        parsed = urlsplit(value)
+        _ = parsed.port  # raises ValueError for a malformed port
+    except ValueError:
+        return None
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path
+        or parsed.query
+        or parsed.fragment
+    ):
+        return None
+    return "https://" + parsed.netloc
+
+
+STORE = store_base_url()
+if STORE is None:
+    print("STOP: store_url_missing", flush=True)
     sys.exit(1)
 
 os.umask(0o077)
@@ -34,7 +65,7 @@ PROFILE = (
     / "ab-profile"
 )
 BRAVE = pathlib.Path.home() / ".nix-profile" / "bin" / "brave"
-START_URL = "https://www.ab.gr/en/my-account/reservation-history"
+START_URL = STORE + "/en/my-account/reservation-history"
 
 prev_session = prev_target = None
 if PTR.exists():

@@ -126,7 +126,7 @@ def prepare(paths: GrossyPaths, pids: list[str] | None = None) -> str:
             "lines": [
                 {
                     "product_id": pid,
-                    "canonical_url": f"https://www.ab.gr/en/eshop/rice/p/{pid}",
+                    "canonical_url": f"https://store.example/en/eshop/rice/p/{pid}",
                     "quantity": 1,
                     "displayed_price_eur": "2.50",
                 }
@@ -147,7 +147,7 @@ def complete_recurring(paths: GrossyPaths, run_id: str, pids: list[str] | None =
         "lines": [
             {
                 "product_id": pid,
-                "canonical_url": f"https://www.ab.gr/en/eshop/rice/p/{pid}",
+                "canonical_url": f"https://store.example/en/eshop/rice/p/{pid}",
                 "quantity": 1,
                 "displayed_price_eur": "2.50",
             }
@@ -460,7 +460,7 @@ def add_product(
         "rchase_order_count,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
         (
             pid,
-            f"https://www.ab.gr/en/eshop/item/p/{pid}",
+            f"https://store.example/en/eshop/item/p/{pid}",
             name,
             size,
             unit,

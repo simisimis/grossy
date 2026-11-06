@@ -162,7 +162,7 @@ def _assert_no_run_state(paths: GrossyPaths) -> None:
 
 
 def _product_url(pid: str) -> str:
-    return f"https://www.ab.gr/en/eshop/Food/item-{pid}/p/{pid}"
+    return f"https://store.example/en/eshop/Food/item-{pid}/p/{pid}"
 
 
 def _cart_observation(
@@ -307,7 +307,7 @@ def _listed_orders(count: int = 6, base_id: int = 100001) -> dict[str, Any]:
             {
                 "source_order_id": str(base_id + i),
                 "order_date": f"2026-01-{(i + 1):02d}",
-                "navigation_url": f"https://www.ab.gr/my-account/order?id={base_id + i}",
+                "navigation_url": f"https://store.example/my-account/order?id={base_id + i}",
             }
             for i in range(count)
         ],

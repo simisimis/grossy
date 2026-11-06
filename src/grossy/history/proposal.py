@@ -36,10 +36,11 @@ from pydantic import (
 
 from grossy.config.models import (
     NUMERIC_ID_PATTERN,
-    PRODUCT_URL_HOST,
+    PRODUCT_URL_SHORT_FORM,
     product_id_from_url,
 )
 from grossy.security import ProhibitedContentError, scan_prohibited_content
+from grossy.store import store_host
 
 LISTED_ORDERS_SCHEMA_NAME = "grossy.history.listed-orders.v2"
 LISTED_ORDERS_SCHEMA_VERSION = 2
@@ -56,8 +57,8 @@ FAMILY_LINKS_SCHEMA_NAME = "grossy.history.family-links.v1"
 FAMILY_LINKS_SCHEMA_VERSION = 1
 
 # The only order navigation route, shared by listed-orders v2 and order-scan
-# v1: the AB.gr order-details page selected by exactly one raw numeric ``id``
-# query.
+# v1: the store's order-details page selected by exactly one raw numeric ``id``
+# query.  The authority comes from ``GROSSY_STORE_URL``; the path is literal.
 ORDER_DETAILS_PATH = "/my-account/order"
 _ORDER_DETAILS_QUERY_RE = re.compile(r"^id=[0-9]+$")
 
@@ -118,19 +119,20 @@ def _validate_order_details_url(url: str) -> None:
     """Validate an order-details navigation URL (listed-orders v2, order-scan v1).
 
     The only accepted form is
-    ``https://www.ab.gr/my-account/order?id=<numeric-string>``: the canonical
-    https authority, the literal order-details path (no language prefix, no
+    ``<store>/my-account/order?id=<numeric-string>``: the configured https
+    store authority, the literal order-details path (no language prefix, no
     trailing slash, no percent-encoding) and exactly one raw numeric ``id``
     query. The model validators bind that query to the source ID. Fragments,
     extra queries and unsafe characters are rejected.
     """
+    expected_host = store_host()
     try:
         parsed = urlsplit(url)
     except ValueError:
         raise HistoryProposalError("navigation_url is malformed") from None
-    if parsed.scheme != "https" or parsed.netloc != PRODUCT_URL_HOST:
+    if parsed.scheme != "https" or parsed.netloc != expected_host:
         raise HistoryProposalError(
-            f"navigation_url must be an https URL on the canonical {PRODUCT_URL_HOST} host"
+            "navigation_url must be an https URL on the configured canonical store host"
         )
     if "#" in url:
         raise HistoryProposalError("navigation_url must not contain a fragment")
@@ -139,7 +141,7 @@ def _validate_order_details_url(url: str) -> None:
     if parsed.path != ORDER_DETAILS_PATH or not _ORDER_DETAILS_QUERY_RE.fullmatch(parsed.query):
         raise HistoryProposalError(
             "navigation_url must be the order-details route "
-            f"https://{PRODUCT_URL_HOST}{ORDER_DETAILS_PATH}?id=<numeric-string>"
+            f"<store>{ORDER_DETAILS_PATH}?id=<numeric-string>"
         )
 
 
@@ -269,8 +271,8 @@ class ScannedProduct(BaseModel):
     def _check_url(cls, value: str) -> str:
         if product_id_from_url(value) is None:
             raise HistoryProposalError(
-                "canonical_url must be a supported AB.gr product URL of the form "
-                "https://www.ab.gr/[en|el/]eshop/.../p/<id>"
+                "canonical_url must be a supported product URL of the store of the form "
+                f"{PRODUCT_URL_SHORT_FORM}"
             )
         return value
 

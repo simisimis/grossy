@@ -78,7 +78,7 @@ def _label(iso_date: str) -> str:
 
 
 def _product_url(product_id: str) -> str:
-    return f"https://www.ab.gr/en/eshop/Food/item-{product_id}/p/{product_id}"
+    return f"https://store.example/en/eshop/Food/item-{product_id}/p/{product_id}"
 
 
 def _scanned_product(
@@ -100,7 +100,7 @@ def _scanned_order(
         "source_order_id": source_order_id,
         "displayed_label": _label(order_date),
         "order_date": order_date,
-        "navigation_url": f"https://www.ab.gr/my-account/order?id={source_order_id}",
+        "navigation_url": f"https://store.example/my-account/order?id={source_order_id}",
         "displayed_product_count": len(product_ids),
         "products": [_scanned_product(pid, category=category) for pid in product_ids],
     }
@@ -1451,7 +1451,7 @@ class TestYamlPolicyBoundary:
                 lunch=[
                     StapleModel(
                         key="yogurt",
-                        product_url="https://www.ab.gr/en/eshop/Food/Dairy/Yogurt/p/100",
+                        product_url="https://store.example/en/eshop/Food/Dairy/Yogurt/p/100",
                         quantity=1,
                         approved_alternative_product_ids=["200", "999999"],
                     )
@@ -1656,15 +1656,15 @@ def test_invalid_maintenance_request_fails_without_state_change(
 @pytest.mark.parametrize(
     "bad_url",
     [
-        "http://www.ab.gr/en/eshop/item/p/300",
+        "http://store.example/en/eshop/item/p/300",
         "https://evil.test/en/eshop/item/p/300",
-        "https://www.ab.gr/en/eshop/../item/p/300",
-        "https://www.ab.gr/en/eshop/%2e%2e/item/p/300",
-        "https://www.ab.gr/en/eshop/item/p/300?token=secret",
-        "https://www.ab.gr/en/eshop/item/p/300#",
-        "https://www.ab.gr/en/eshop/<script>/p/300",
-        "https://www.ab.gr/en/eshop/%3Cscript%3E/p/300",
-        "https://www.ab.gr/en/eshop/item/p/300?",
+        "https://store.example/en/eshop/../item/p/300",
+        "https://store.example/en/eshop/%2e%2e/item/p/300",
+        "https://store.example/en/eshop/item/p/300?token=secret",
+        "https://store.example/en/eshop/item/p/300#",
+        "https://store.example/en/eshop/<script>/p/300",
+        "https://store.example/en/eshop/%3Cscript%3E/p/300",
+        "https://store.example/en/eshop/item/p/300?",
     ],
 )
 def test_product_register_rejects_unsafe_identity(tmp_env, bad_url):
@@ -1692,7 +1692,10 @@ def test_product_register_nonpurchase_identity_and_metadata_preservation(tmp_env
     assert run_product_register(paths, _product_url("300"))["changed"] is False
     # The URL slug is never a metadata source. Locale/slug variants with the
     # same exact numeric identity preserve the existing canonical URL and facts.
-    assert run_product_register(paths, "https://www.ab.gr/el/eshop/Other/p/300")["changed"] is False
+    assert (
+        run_product_register(paths, "https://store.example/el/eshop/Other/p/300")["changed"]
+        is False
+    )
     c = open_connection(paths.database_file)
     try:
         assert (

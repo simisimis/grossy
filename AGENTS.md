@@ -1,8 +1,8 @@
 # Working on Grossy
 
-Grossy prepares weekly AB.gr grocery carts for one household. Python owns local
-validation, SQLite state and recipe planning. A coordinator uses the Pi skill for
-supervised browser work. The CLI does not launch a browser.
+Grossy prepares weekly grocery carts at your local store for one household.
+Python owns local validation, SQLite state and recipe planning. A coordinator
+uses the Pi skill for supervised browser work. The CLI does not launch a browser.
 
 ## Start here
 
@@ -95,12 +95,12 @@ the four option slots.
   replay intent, compensate or continue after a failed phase, drift, CAPTCHA or
   authentication loss.
 - Do not enter credentials/2FA, progress checkout, select fulfilment, pay or submit
-  orders. With explicit approval, the coordinator may open AB.gr `/checkout`
+  orders. With explicit approval, the coordinator may open the store's `/checkout`
   solely to read the cart-item list; exclude account/address/payment/fulfilment
   sections and checkout-stage controls. Read-only scope grants no cart writes.
 - Doctor's authenticated checks are skipped without an adapter; `warn`/exit `2`
   does not establish live authentication. CLI version compatibility likewise does
-  not establish rendered AB.gr compatibility.
+  not establish rendered store compatibility.
 - Only the vegetarian spicy-bean-burgers seed is bundled. Report the other three
   as missing; do not fabricate or fetch replacement recipes during weekly planning.
 - `just history-sync`, `weekly-plan` and `weekly-add` invoke operational agent

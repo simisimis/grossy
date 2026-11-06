@@ -24,7 +24,11 @@ from pydantic import (
     model_validator,
 )
 
-from grossy.config.models import NUMERIC_ID_PATTERN, product_id_from_url
+from grossy.config.models import (
+    NUMERIC_ID_PATTERN,
+    PRODUCT_URL_SHORT_FORM,
+    product_id_from_url,
+)
 from grossy.security import ProhibitedContentError, scan_prohibited_content
 
 CART_OBSERVATION_SCHEMA_NAME = "grossy.cart.observation.v1"
@@ -36,7 +40,7 @@ class CartObservationError(ValueError):
 
 
 class CartObservationLine(BaseModel):
-    """One line item in the rendered AB.gr cart."""
+    """One line item in the rendered store cart."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -52,8 +56,8 @@ class CartObservationLine(BaseModel):
     def _check_url(cls, v: str) -> str:
         if product_id_from_url(v) is None:
             raise ValueError(
-                "canonical_url must be a supported AB.gr product URL "
-                "of the form https://www.ab.gr/[en|el/]eshop/.../p/<id>"
+                "canonical_url must be a supported product URL of the store "
+                f"of the form {PRODUCT_URL_SHORT_FORM}"
             )
         return v
 
@@ -263,7 +267,7 @@ def validate_cart_observation(data: dict[str, Any]) -> CartObservation:
     2. Schema name and version match exactly.
     3. Required fields present; no unknown fields.
     4. Product IDs are numeric strings.
-    5. Canonical URLs are valid AB.gr product URLs.
+    5. Canonical URLs are valid product URLs of the configured store.
     6. Product ID agrees with the URL-derived ID.
     7. Quantities are positive strict integers (no string coercion).
     8. Prices are valid positive decimal strings.

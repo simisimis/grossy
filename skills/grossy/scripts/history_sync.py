@@ -29,7 +29,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import live_common as drill
-from live_common import D, stop, write
+from live_common import STORE, D, stop, write
 from slot_gate import require_ready
 
 if set(sys.argv[1:]) - {"--dry-run", "--full"}:
@@ -41,9 +41,10 @@ except ValueError as exc:
 
 DRY = "--dry-run" in sys.argv
 FULL = "--full" in sys.argv
-LIST_URL = "https://www.ab.gr/en/my-account/reservation-history"
 LIST_PATH = "/en/my-account/reservation-history"
-ORDER_URL = "https://www.ab.gr/my-account/order?id="
+LIST_URL = STORE + LIST_PATH
+ORDER_PATH = "/my-account/order"
+ORDER_URL = STORE + ORDER_PATH + "?id="
 ROUTE_JS = 'if(location.pathname!=="' + LIST_PATH + '")throw Error("unexpected_route");'
 # Rendered entries in DOM order (newest first): the order-details anchor href and the entry's
 # date text, the only date source. Order pages are never read for dates.
@@ -53,11 +54,13 @@ ENTRIES_JS = (
     'const d=[...e.querySelectorAll("p[data-testid=my-account-orders-item-date]")];'
     'return {hrefs:a.map(x=>x.getAttribute("href")),dates:d.map(x=>x.innerText.trim())};});'
 )
-HREF_RE = re.compile(r"^(?:https://www\.ab\.gr)?/my-account/order\?id=(\d+)$")
+# Rendered hrefs are either relative (store paths) or absolute on the store origin.
+HREF_RE = re.compile(r"^(?:" + re.escape(STORE) + r")?/my-account/order\?id=(\d+)$")
 DATE_RE = re.compile(r"^(\d{2})/(\d{2})/(\d{4})$")
-ORDER_PATH = "/my-account/order"
 # Canonical product link rendered on an order card (task 01: /en/eshop/<category-path>/p/<id>).
-PRODUCT_HREF_RE = re.compile(r"^(?:https://www\.ab\.gr)?/(?:(?:en|el)/)?eshop/[^?#\s]+/p/(\d+)$")
+PRODUCT_HREF_RE = re.compile(
+    r"^(?:" + re.escape(STORE) + r")?/(?:(?:en|el)/)?eshop/[^?#\s]+/p/(\d+)$"
+)
 
 
 def order_route_js(sid):
@@ -280,9 +283,7 @@ def scan_order(order, seq, skipped_now):
             href = m.group(0)
             product = {
                 "product_id": pid,
-                "canonical_url": href
-                if href.startswith("https://")
-                else "https://www.ab.gr" + href,
+                "canonical_url": href if href.startswith("https://") else STORE + href,
                 "title": tile["names"][0],
                 "brand": tile["brands"][0]
                 if len(tile["brands"]) == 1 and tile["brands"][0]

@@ -21,8 +21,8 @@ from grossy.browser.observation import (
     validate_cart_observation,
 )
 
-VALID_URL = "https://www.ab.gr/en/eshop/Dairy/Yogurt/p/1234567"
-VALID_URL_2 = "https://www.ab.gr/el/eshop/Βουτυρό/Γαλακτοκομικά/p/7654321"
+VALID_URL = "https://store.example/en/eshop/Dairy/Yogurt/p/1234567"
+VALID_URL_2 = "https://store.example/el/eshop/Βουτυρό/Γαλακτοκομικά/p/7654321"
 
 
 def _valid_data(**overrides: object) -> dict:
@@ -139,29 +139,32 @@ def test_envelope_violations_rejected(overrides: dict[str, Any], match: str | No
         ),
         pytest.param(
             "canonical_url",
-            "http://www.ab.gr/en/eshop/Dairy/Yogurt/p/1234567",
+            "http://store.example/en/eshop/Dairy/Yogurt/p/1234567",
             None,
             id="non-https",
         ),
         pytest.param(
-            "canonical_url", "https://www.ab.gr/other/Dairy/Yogurt/p/1234567", None, id="non-eshop"
+            "canonical_url",
+            "https://store.example/other/Dairy/Yogurt/p/1234567",
+            None,
+            id="non-eshop",
         ),
         # PRD 17.4: percent-encoded markup must not bypass the URL identity gate.
         pytest.param(
             "canonical_url",
-            "https://www.ab.gr/en/eshop/Dairy/%3Cscript%3Ealert(1)%3Cscript%3E/p/1234567",
+            "https://store.example/en/eshop/Dairy/%3Cscript%3Ealert(1)%3Cscript%3E/p/1234567",
             None,
             id="encoded-script-tag",
         ),
         pytest.param(
             "canonical_url",
-            "https://www.ab.gr/en/eshop/Dairy/%3Ctest%3E/p/1234567",
+            "https://store.example/en/eshop/Dairy/%3Ctest%3E/p/1234567",
             None,
             id="encoded-angle-brackets",
         ),
         pytest.param(
             "canonical_url",
-            "https://www.ab.gr/en/eshop/Dairy/item%3E/p/1234567",
+            "https://store.example/en/eshop/Dairy/item%3E/p/1234567",
             None,
             id="encoded-greater-than",
         ),

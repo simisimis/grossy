@@ -38,7 +38,7 @@ def now() -> str:
 
 
 def url(pid: str) -> str:
-    return f"https://www.ab.gr/en/eshop/food/p/{pid}"
+    return f"https://store.example/en/eshop/food/p/{pid}"
 
 
 def observation(quantities: dict[str, int], *, facts: bool = True) -> dict[str, Any]:
@@ -599,7 +599,7 @@ def test_closed_observation_and_manifest_boundary(home: GrossyPaths, case: str) 
         elif case == "duplicate-fact":
             data["recurring_product_facts"].append(dict(fact))
         elif case == "unsafe-url":
-            fact["canonical_url"] = "https://www.ab.gr/eshop/%3Cscript%3E/p/111"
+            fact["canonical_url"] = "https://store.example/eshop/%3Cscript%3E/p/111"
         elif case == "extra-fact":
             fact["cookie"] = "unsafe"
         else:

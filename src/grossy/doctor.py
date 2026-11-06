@@ -1,7 +1,7 @@
 """Deterministic grossy doctor diagnostics (PRD FR-3, FR-4, FR-5).
 
 The doctor validates the local environment and, when a browser adapter is
-provided, authenticated read-only AB.gr access. It is strictly read-only:
+provided, authenticated read-only store access. It is strictly read-only:
 it never mutates the database, configuration, or cart. Missing authentication
 yields manual-login instructions, never automated credential entry.
 """
@@ -23,6 +23,7 @@ from grossy.db.migrations import discover_migrations
 from grossy.fsutil import DIR_MODE, FILE_MODE
 from grossy.paths import GrossyPaths
 from grossy.security import sanitize_human_text
+from grossy.store import STORE_URL_ENV, StoreConfigError, store_base_url
 
 DOCTOR_SCHEMA_NAME = "grossy.doctor.result"
 DOCTOR_SCHEMA_VERSION = 1
@@ -75,13 +76,14 @@ class DoctorResult:
 def run_doctor(paths: GrossyPaths, browser: BrowserAdapter | None = None) -> DoctorResult:
     """Run all doctor checks and return an aggregate result.
 
-    Static checks (config, database, migrations, permissions, tools) always
-    run. Browser-dependent checks (auth, history controls, cart read) run
+    Static checks (store URL, config, database, migrations, permissions, tools)
+    always run. Browser-dependent checks (auth, history controls, cart read) run
     only when a browser adapter is provided; otherwise they are reported
     as skipped and the overall status is "warn" (not "pass") because the
     required FR-3 checks could not be completed.
     """
     checks: list[DoctorCheckResult] = [
+        _check_store_url(),
         _check_config(paths),
         _check_database(paths),
         _check_migrations(paths),
@@ -129,6 +131,19 @@ def run_doctor(paths: GrossyPaths, browser: BrowserAdapter | None = None) -> Doc
 
 
 # --- individual checks -------------------------------------------------------
+
+
+def _check_store_url() -> DoctorCheckResult:
+    try:
+        store_base_url()
+    except StoreConfigError as exc:
+        return DoctorCheckResult(
+            "store_url",
+            "fail",
+            str(exc),
+            f"set {STORE_URL_ENV} to the store's bare https base URL",
+        )
+    return DoctorCheckResult("store_url", "pass", f"{STORE_URL_ENV} is a valid store base URL")
 
 
 def _check_config(paths: GrossyPaths) -> DoctorCheckResult:
@@ -507,7 +522,7 @@ def _check_auth(browser: BrowserAdapter) -> DoctorCheckResult:
         "auth",
         "fail",
         result.detail,
-        "log in manually to AB.gr in headed Brave; Grossy never enters credentials",
+        "log in manually to the store in headed Brave; Grossy never enters credentials",
     )
 
 
@@ -519,7 +534,7 @@ def _check_history_controls(browser: BrowserAdapter) -> DoctorCheckResult:
         "history_controls",
         "fail",
         result.detail,
-        "AB.gr UI may have changed; manual review required",
+        "the store UI may have changed; manual review required",
     )
 
 
@@ -537,5 +552,5 @@ def _check_cart_read(browser: BrowserAdapter) -> DoctorCheckResult:
             "cart_read",
             "fail",
             f"cannot read cart: {exc}",
-            "check the AB.gr cart page in headed Brave",
+            "check the store cart page in headed Brave",
         )

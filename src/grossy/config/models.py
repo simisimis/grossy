@@ -22,10 +22,15 @@ from pydantic import (
     model_validator,
 )
 
+from grossy.store import store_host
+
 NUMERIC_ID_PATTERN = r"^[0-9]+$"
 
-PRODUCT_URL_HOST = "www.ab.gr"
-# AB.gr renders product pages under /eshop/ with an optional locale segment;
+# The accepted canonical product route, shown in error messages; ``<store>``
+# stands for the configured ``GROSSY_STORE_URL`` base URL.
+PRODUCT_URL_FORM = "<store>/[en|el/]eshop/<category-path>/<product-slug>/p/<product-id>"
+PRODUCT_URL_SHORT_FORM = "<store>/[en|el/]eshop/.../p/<id>"
+# The store renders product pages under /eshop/ with an optional locale segment;
 # only the two locales observed in the sanctioned interface are accepted.
 _PRODUCT_URL_LOCALES = ("en", "el")
 
@@ -107,7 +112,7 @@ def _is_safe_url_char(char: str) -> bool:
     ``str.isprintable`` rejects C0/C1 controls, DEL, format characters
     (zero-width, BOM), and lone surrogates; space is rejected explicitly
     because it is not a legal URL character. Angle brackets (``<`` and
-    ``>``) are rejected because no legitimate AB.gr product URL segment
+    ``>``) are rejected because no legitimate store product URL segment
     contains them, and their presence after percent-decoding would permit
     executable markup (e.g. ``%3Cscript%3E``) to bypass the raw-string
     prohibited-content scan in the observation envelope.
@@ -156,23 +161,23 @@ def _decode_path_segment(segment: str) -> str | None:
 
 
 def product_id_from_url(product_url: str) -> str | None:
-    """Deterministically parse the stable AB.gr product ID from a canonical URL.
+    """Deterministically parse the stable store product ID from a canonical URL.
 
-    The only supported canonical product route is the rendered AB.gr product
-    page:
+    The only supported canonical product route is the rendered store product
+    page under the ``GROSSY_STORE_URL`` base URL:
 
-    ``https://www.ab.gr/[<locale>/]eshop/<category-path>/<product-slug>/p/<product-id>``
+    ``<store>/[<locale>/]eshop/<category-path>/<product-slug>/p/<product-id>``
 
     for example
-    ``https://www.ab.gr/en/eshop/Dairy-.../Yogurt-Dessert-2-Fat-1kg/p/7633916``.
+    ``<store>/en/eshop/Dairy-.../Yogurt-Dessert-2-Fat-1kg/p/7633916``.
     Everything else fails closed. Narrow accepted language:
 
-    - scheme ``https`` with the exact canonical port-free authority
-      ``www.ab.gr``: no user info (including an empty ``https://@`` form), no
-      port (including ``:0`` and the empty ``:`` port delimiter), no query, no
-      fragment, and no malformed, encoded, or differently-cased host
-      (product identity must not depend on any of them; percent-encoded
-      authority forms cannot match the exact host);
+    - scheme ``https`` with exactly the configured store authority
+      (``store_host()``): no user info (including an empty ``https://@`` form),
+      no port that the setting does not carry (including ``:0`` and the empty
+      ``:`` port delimiter), no query, no fragment, and no malformed, encoded,
+      or differently-cased host (product identity must not depend on any of
+      them; percent-encoded authority forms cannot match the exact host);
     - the raw URL contains no backslashes and only printable, non-space
       characters: no C0/C1 controls, no DEL, no format characters, no lone
       surrogates (``urlsplit`` strips tabs and newlines, so the raw string is
@@ -197,17 +202,22 @@ def product_id_from_url(product_url: str) -> str | None:
     ID) is not evidence of a product ID and is rejected. These are
     compatibility rules for user-authored configuration, not claims about
     which URL forms the live retailer exposes.
+
+    Raises ``StoreConfigError`` when ``GROSSY_STORE_URL`` is missing or
+    malformed: no product URL can be accepted without a configured store.
     """
+    expected_host = store_host()
     try:
         parsed = urlsplit(product_url)
     except ValueError:
         # Malformed authority (for example an invalid IPv6 literal).
         return None
-    # The authority must be the exact canonical port-free host: this rejects
-    # any user info (including the empty ``https://@`` form), any port
-    # (including the empty ``:`` port delimiter and non-numeric ports such as
-    # ``:443x``), and differently-cased or percent-encoded host forms.
-    if parsed.scheme != "https" or parsed.netloc != PRODUCT_URL_HOST:
+    # The authority must be exactly the configured store host: this rejects
+    # any user info (including the empty ``https://@`` form), any port the
+    # setting does not carry (including the empty ``:`` port delimiter and
+    # non-numeric ports such as ``:443x``), and differently-cased or
+    # percent-encoded host forms.
+    if parsed.scheme != "https" or parsed.netloc != expected_host:
         return None
     if parsed.query or parsed.fragment:
         return None
@@ -255,8 +265,8 @@ class StapleModel(_StrictModel):
     def _check_product_url(cls, value: str | None) -> str | None:
         if value is not None and product_id_from_url(value) is None:
             raise ValueError(
-                "must be a supported canonical AB.gr product URL of the form "
-                "https://www.ab.gr/[en|el/]eshop/<category-path>/<product-slug>/p/<product-id>"
+                f"must be a supported canonical product URL of the store of the form "
+                f"{PRODUCT_URL_FORM}"
             )
         return value
 
@@ -269,7 +279,7 @@ class StapleModel(_StrictModel):
             if url_id is None:
                 raise ValueError(
                     f"staple {self.key!r}: product_url {self.product_url!r} does not carry a "
-                    "parseable AB.gr product ID"
+                    "parseable store product ID"
                 )
         if self.product_id is not None and self.product_url is not None:
             url_id = product_id_from_url(self.product_url)

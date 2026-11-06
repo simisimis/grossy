@@ -38,7 +38,7 @@ def now() -> str:
 
 
 def url(pid: str) -> str:
-    return f"https://www.ab.gr/en/eshop/rice/p/{pid}"
+    return f"https://store.example/en/eshop/rice/p/{pid}"
 
 
 def observation(quantities: dict[str, int], *, facts: bool = True) -> dict[str, Any]:

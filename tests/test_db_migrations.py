@@ -591,7 +591,7 @@ def test_populated_v7_upgrade_preserves_history_and_run_with_verified_backup(
         conn.execute(
             "INSERT INTO products (id, retailer_product_id, canonical_url, name, "
             "purchase_order_count, created_at, updated_at) VALUES "
-            "(1, '1111111', 'https://www.ab.gr/en/eshop/milk/p/1111111', 'Milk', 1, ?, ?)",
+            "(1, '1111111', 'https://store.example/en/eshop/milk/p/1111111', 'Milk', 1, ?, ?)",
             (now, now),
         )
         conn.execute(

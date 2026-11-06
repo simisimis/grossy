@@ -7,7 +7,7 @@ Verifies that doctor:
 - Fails closed on missing tools, profile, authentication, permissions
 - Works fully offline with fake adapters
 
-All tests use temporary directories and fake adapters. No live AB.gr,
+All tests use temporary directories and fake adapters. No live store,
 no Brave, no agent-browser, no real profile.
 """
 
@@ -40,6 +40,7 @@ from grossy.doctor import (
 from grossy.fsutil import atomic_write_text, ensure_private_dir
 from grossy.init import SAMPLE_CONFIG
 from grossy.paths import GrossyPaths, resolve_paths
+from grossy.store import STORE_URL_ENV
 
 SUPPORTED_MAX = max(m.version for m in discover_migrations())
 
@@ -154,6 +155,7 @@ class TestDoctorAllPass:
         config_before = paths.config_file.read_text()
         result = _doctor(paths)
         for name in (
+            "store_url",
             "config",
             "database",
             "migrations",
@@ -195,6 +197,7 @@ class TestDoctorAllPass:
         assert d["schema_version"] == DOCTOR_SCHEMA_VERSION
         assert d["status"] in ("pass", "fail", "warn")
         assert {c.name for c in result.checks} == {
+            "store_url",
             "config",
             "database",
             "migrations",
@@ -263,6 +266,26 @@ def test_local_check_fails_closed(
     assert result.status == "fail"
     assert _check_name(result, check) == "fail"
     assert remediation in _check_remediation(result, check)
+
+
+class TestDoctorStoreUrlCheck:
+    """The static ``store_url`` check validates ``GROSSY_STORE_URL`` and fails closed."""
+
+    def test_valid_setting_passes(self, paths: GrossyPaths) -> None:
+        result = _doctor(paths)
+        assert _check_name(result, "store_url") == "pass"
+        assert STORE_URL_ENV in _check_detail(result, "store_url")
+
+    def test_malformed_setting_fails_with_reason(
+        self, paths: GrossyPaths, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(STORE_URL_ENV, "https://store.example/")
+        result = _doctor(paths)
+        assert result.status == "fail"
+        assert _check_name(result, "store_url") == "fail"
+        detail = _check_detail(result, "store_url")
+        assert STORE_URL_ENV in detail and "https://HOST" in detail
+        assert STORE_URL_ENV in _check_remediation(result, "store_url")
 
 
 class TestDoctorDatabaseChecks:

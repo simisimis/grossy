@@ -132,7 +132,7 @@ def test_safety_boundaries_document_required_instructions(skill_content: str) ->
             "Never enter credentials or 2FA codes.",
             "Never progress checkout.",
             "Only with explicit coordinator/user approval,",
-            "opening `https://www.ab.gr/checkout` to read its cart-item list is permitted:",
+            "to read its cart-item list is permitted:",
             "do not read account/address/payment/fulfilment sections,",
             "click checkout-stage controls or perform cart writes under read-only approval.",
             "Never select fulfilment slots.",
@@ -145,12 +145,17 @@ def test_safety_boundaries_document_required_instructions(skill_content: str) ->
 
 
 def test_observation_section_contains_valid_envelope_example(skill_content: str) -> None:
+    from conftest import TEST_STORE_URL
+
     from grossy.browser.observation import validate_cart_observation
 
     section = _section(skill_content, "Observation Protocol")
     example = re.search(r"```json\s*\n(.*?)\n```", section, re.DOTALL)
     assert example is not None, "Observation Protocol: missing JSON example"
-    observation = validate_cart_observation(json.loads(example.group(1)))
+    payload = json.loads(example.group(1))
+    # The example names the shared test store, so the session fixture validates it.
+    assert payload["lines"][0]["canonical_url"].startswith(f"{TEST_STORE_URL}/")
+    observation = validate_cart_observation(payload)
     assert observation.lines, "Observation Protocol: example must illustrate a cart line"
     _require_text(section, ["unknown fields are rejected"], "Observation Protocol")
 
@@ -159,6 +164,7 @@ def test_doctor_section_documents_checks_and_manual_login(skill_content: str) ->
     section = _section(skill_content, "Doctor")
     expected = {
         "Configuration",
+        "Store URL",
         "Database",
         "Migrations",
         "Foreign keys",

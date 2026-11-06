@@ -81,7 +81,7 @@ def test_cli_malformed_current_fact_price_is_structured_and_preserves_state(
     data = observation({"111": 1}, facts=False)
     fact = {
         "product_id": "111",
-        "canonical_url": "https://www.ab.gr/en/eshop/food/p/111",
+        "canonical_url": "https://store.example/en/eshop/food/p/111",
         "displayed_price_eur": "not-a-price",
         "availability": "available",
     }

@@ -41,6 +41,7 @@ from grossy.history.learn import InferenceSummary, run_inference
 from grossy.history.maintenance import category_rename_target, product_has_category_override
 from grossy.history.proposal import (
     LISTED_ORDERS_SCHEMA_NAME,
+    ORDER_DETAILS_PATH,
     ORDER_SCAN_SCHEMA_NAME,
     HistoryProposalError,
     ListedOrdersProposal,
@@ -52,6 +53,7 @@ from grossy.history.proposal import (
 )
 from grossy.paths import GrossyPaths
 from grossy.security import sanitize_human_text
+from grossy.store import store_base_url
 
 SYNC_REPORT_SCHEMA_NAME = "grossy.history.sync-report"
 SYNC_REPORT_SCHEMA_VERSION = 1
@@ -232,12 +234,12 @@ class DiscoverPrepareResult:
             "imported_order_count": self.imported_order_count,
             "listed_orders_schema": LISTED_ORDERS_SCHEMA_NAME,
             "requirements": [
-                "walk the rendered AB.gr reservation-history list newest first",
+                "walk the store's rendered reservation-history list newest first",
                 "enumerate every listed order of the current walk (any count, including zero)",
                 "for each order capture its numeric-string source order ID with "
                 "leading zeros, the list date normalized to ISO YYYY-MM-DD from "
                 "the rendered DD/MM/YYYY text, and the order-details URL "
-                "https://www.ab.gr/my-account/order?id=<numeric-string>",
+                f"{store_base_url()}{ORDER_DETAILS_PATH}?id=<numeric-string>",
                 f"emit a {LISTED_ORDERS_SCHEMA_NAME} proposal and run sync-dry-run",
             ],
         }

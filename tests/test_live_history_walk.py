@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from conftest import TEST_STORE_URL
 from test_history_sync import _imported_ids, _seed_imported
 
 from grossy.history import (
@@ -31,10 +32,12 @@ from grossy.history import (
 )
 from grossy.init import do_init
 from grossy.paths import GrossyPaths, resolve_paths
+from grossy.store import STORE_URL_ENV
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "skills/grossy/scripts"
-LIST_URL = "https://www.ab.gr/en/my-account/reservation-history"
-ORDER_URL = "https://www.ab.gr/my-account/order?id="
+# The scripts derive every URL from GROSSY_STORE_URL, which conftest points at the test store.
+LIST_URL = TEST_STORE_URL + "/en/my-account/reservation-history"
+ORDER_URL = TEST_STORE_URL + "/my-account/order?id="
 
 
 def order_id(index: int) -> str:
@@ -411,7 +414,7 @@ def test_leading_zero_ids_and_day_first_dates_are_preserved(
         {
             "source_order_id": "000000900",
             "order_date": "2026-11-05",
-            "navigation_url": "https://www.ab.gr/my-account/order?id=000000900",
+            "navigation_url": ORDER_URL + "000000900",
         }
     ]
     prepared = json.loads((work / "scan-prepare.json").read_text())
@@ -430,7 +433,7 @@ def test_leading_zero_ids_and_day_first_dates_are_preserved(
     ]
     assert order["products"][0] == {
         "product_id": "790000",
-        "canonical_url": "https://www.ab.gr/en/eshop/Food/item-790000/p/790000",
+        "canonical_url": TEST_STORE_URL + "/en/eshop/Food/item-790000/p/790000",
         "title": "Product 790000",
         "brand": "Brand",
     }
@@ -447,7 +450,7 @@ def test_leading_zero_ids_and_day_first_dates_are_preserved(
     }
     # Privacy: no source order ID or URL on stdout; the per-order line carries counts only.
     out = capsys.readouterr().out
-    assert "000000900" not in out and "ab.gr" not in out
+    assert "000000900" not in out and "store.example" not in out
     assert "order 1/1: 3 products, 0 skipped tiles, 2 bottom passes, applied" in out
 
 
@@ -968,3 +971,77 @@ def test_start_opens_reservation_history_route(
     monkeypatch.syspath_prepend(str(SCRIPTS))
     runpy.run_path(str(SCRIPTS / "live_start.py"))
     assert opened == [LIST_URL]
+
+
+MALFORMED_STORE_URLS = [
+    None,  # unset
+    "",
+    "http://store.example",
+    "https://store.example/",
+    "https://store.example/en",
+    "https://store.example?x=1",
+    "https://store.example#top",
+    "https://user:pw@store.example",
+    "https://store.example:port",
+]
+
+
+@pytest.mark.parametrize("value", MALFORMED_STORE_URLS)
+def test_start_stops_before_creating_work_dir_without_store_url(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    value: str | None,
+) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    (tmp_path / "grossy").mkdir()
+    if value is None:
+        monkeypatch.delenv(STORE_URL_ENV)
+    else:
+        monkeypatch.setenv(STORE_URL_ENV, value)
+
+    def forbidden(*args: Any, **kwargs: Any) -> None:
+        pytest.fail("agent-browser ran without a valid store URL")
+
+    monkeypatch.setattr(subprocess, "run", forbidden)
+    monkeypatch.setattr(sys, "argv", ["live_start.py", "--history-only"])
+    monkeypatch.syspath_prepend(str(SCRIPTS))
+    with pytest.raises(SystemExit) as exit_info:
+        runpy.run_path(str(SCRIPTS / "live_start.py"))
+    assert exit_info.value.code == 1
+    assert "STOP: store_url_missing" in capsys.readouterr().out
+    # Nothing was created: no work directory, no live-current.txt pointer.
+    assert sorted(p.name for p in (tmp_path / "grossy").iterdir()) == []
+
+
+@pytest.mark.parametrize("value", MALFORMED_STORE_URLS)
+def test_live_common_import_stops_without_store_url(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    value: str | None,
+) -> None:
+    if value is None:
+        monkeypatch.delenv(STORE_URL_ENV)
+    else:
+        monkeypatch.setenv(STORE_URL_ENV, value)
+    monkeypatch.setenv("GROSSY_LIVE_DIR", str(tmp_path))
+    spec = importlib.util.spec_from_file_location("live_common", SCRIPTS / "live_common.py")
+    assert spec is not None and spec.loader is not None
+    with pytest.raises(SystemExit) as exit_info:
+        spec.loader.exec_module(importlib.util.module_from_spec(spec))
+    assert exit_info.value.code == 1
+    assert "STOP: store_url_missing" in capsys.readouterr().out
+
+
+def test_live_common_derives_guard_and_urls_from_store_url(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(STORE_URL_ENV, "https://other.example:8443")
+    drill = load_live_common(tmp_path, monkeypatch)
+    assert drill.STORE == "https://other.example:8443"
+    assert drill.CHECKOUT_URL == "https://other.example:8443/checkout"
+    assert drill.GUARD.startswith(
+        'if(location.origin!=="https://other.example:8443")throw Error("unexpected_origin");'
+    )
+    assert "store.example" not in drill.GUARD

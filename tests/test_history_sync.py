@@ -39,6 +39,7 @@ from grossy.history import (
 from grossy.history.proposal import LISTED_ORDERS_SCHEMA_NAME
 from grossy.init import do_init
 from grossy.paths import GrossyPaths
+from grossy.store import STORE_URL_ENV
 
 RUNNER = CliRunner()
 
@@ -56,11 +57,11 @@ def _label(iso_date: str) -> str:
 
 
 def _nav_url(source_order_id: str) -> str:
-    return f"https://www.ab.gr/my-account/order?id={source_order_id}"
+    return f"https://store.example/my-account/order?id={source_order_id}"
 
 
 def _product_url(product_id: str) -> str:
-    return f"https://www.ab.gr/en/eshop/Food/item-{product_id}/p/{product_id}"
+    return f"https://store.example/en/eshop/Food/item-{product_id}/p/{product_id}"
 
 
 def _listed_order(source_order_id: str, order_date: str) -> dict[str, Any]:
@@ -275,35 +276,50 @@ class TestQueryBackedOrderIdentity:
         "url",
         [
             # Retired routes: the quick-shop history overview and queryless paths.
-            "https://www.ab.gr/customerhub/quick-shop/orders?id=000123456",
-            "https://www.ab.gr/customerhub/quick-shop/orders",
-            "https://www.ab.gr/orders/000123456",
-            "https://www.ab.gr/en/eshop/order-history/detail/000123456",
+            "https://store.example/customerhub/quick-shop/orders?id=000123456",
+            "https://store.example/customerhub/quick-shop/orders",
+            "https://store.example/orders/000123456",
+            "https://store.example/en/eshop/order-history/detail/000123456",
             # Order-details route with a wrong or ambiguous selection.
-            "https://www.ab.gr/my-account/order",
-            "https://www.ab.gr/my-account/order?",
-            "https://www.ab.gr/my-account/order?id=LAST_ORDERS_PRODUCTS",
-            "https://www.ab.gr/my-account/order?id=",
-            "https://www.ab.gr/my-account/order?id=000123456&id=000123456",
-            "https://www.ab.gr/my-account/order?id=000123456&extra=1",
-            "https://www.ab.gr/my-account/order?ID=000123456",
-            "https://www.ab.gr/my-account/order?id=%3000123456",
-            "https://www.ab.gr/my-account/order?%69d=000123456",
-            "https://www.ab.gr/my-account/order?id=000123456#",
-            "https://www.ab.gr/my-account/order?id=000123456#section",
-            "https://www.ab.gr/my-account/order/?id=000123456",
-            "https://www.ab.gr/en/my-account/order?id=000123456",
-            "https://www.ab.gr/my-account/../my-account/order?id=000123456",
-            "https://www.ab.gr/my-account/%6frder?id=000123456",
-            "https://www.ab.gr/my-account/order?id=000123456<script>",
-            "https://www.ab.gr/other?id=000123456",
-            "http://www.ab.gr/my-account/order?id=000123456",
+            "https://store.example/my-account/order",
+            "https://store.example/my-account/order?",
+            "https://store.example/my-account/order?id=LAST_ORDERS_PRODUCTS",
+            "https://store.example/my-account/order?id=",
+            "https://store.example/my-account/order?id=000123456&id=000123456",
+            "https://store.example/my-account/order?id=000123456&extra=1",
+            "https://store.example/my-account/order?ID=000123456",
+            "https://store.example/my-account/order?id=%3000123456",
+            "https://store.example/my-account/order?%69d=000123456",
+            "https://store.example/my-account/order?id=000123456#",
+            "https://store.example/my-account/order?id=000123456#section",
+            "https://store.example/my-account/order/?id=000123456",
+            "https://store.example/en/my-account/order?id=000123456",
+            "https://store.example/my-account/../my-account/order?id=000123456",
+            "https://store.example/my-account/%6frder?id=000123456",
+            "https://store.example/my-account/order?id=000123456<script>",
+            "https://store.example/other?id=000123456",
+            "http://store.example/my-account/order?id=000123456",
             "https://evil.example/my-account/order?id=000123456",
         ],
     )
     def test_rejects_retired_or_ambiguous_route(self, family: str, url: str) -> None:
         with pytest.raises(HistoryProposalError):
             _validate_query_order(family, url)
+
+    @pytest.mark.parametrize("family", ["listed", "scan"])
+    def test_host_rule_follows_the_store_setting(
+        self, family: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Only the host named by ``GROSSY_STORE_URL`` is the order-details host."""
+        other_host_url = "https://other.example/my-account/order?id=000123456"
+        with pytest.raises(HistoryProposalError, match="configured canonical store host"):
+            _validate_query_order(family, other_host_url)
+        assert _validate_query_order(family, _nav_url("000123456")).navigation_url == _nav_url(
+            "000123456"
+        )
+        monkeypatch.setenv(STORE_URL_ENV, "https://other.example")
+        with pytest.raises(HistoryProposalError, match="configured canonical store host"):
+            _validate_query_order(family, _nav_url("000123456"))
 
 
 class TestListedOrdersSchema:
@@ -369,7 +385,7 @@ class TestListedOrdersSchema:
             ),
             pytest.param(
                 lambda p: p["orders"][0].update(
-                    navigation_url="https://www.ab.gr/customerhub/quick-shop/orders?id=1001"
+                    navigation_url="https://store.example/customerhub/quick-shop/orders?id=1001"
                 ),
                 "order-details route",
                 id="retired-quick-shop-route",
@@ -380,7 +396,7 @@ class TestListedOrdersSchema:
                 id="noncanonical-url",
             ),
             pytest.param(
-                lambda p: p["orders"][0].update(screenshot="https://www.ab.gr/x.png"),
+                lambda p: p["orders"][0].update(screenshot="https://store.example/x.png"),
                 None,
                 id="unknown-field",
             ),
@@ -396,7 +412,7 @@ class TestListedOrdersSchema:
             ),
             pytest.param(
                 lambda p: p["orders"][0].update(
-                    navigation_url="https://www.ab.gr/my-account/order?id=1001<script>"
+                    navigation_url="https://store.example/my-account/order?id=1001<script>"
                 ),
                 "prohibited content",
                 id="prohibited-content",
@@ -410,11 +426,14 @@ class TestListedOrdersSchema:
                     id=case,
                 )
                 for case, url in [
-                    ("encoded-dotdot", "https://www.ab.gr/my-account/%2e%2e/order?id=1001"),
-                    ("mixed-dot", "https://www.ab.gr/my-account/.%2e/order?id=1001"),
-                    ("nested-encoding", "https://www.ab.gr/%252e%252e/my-account/order?id=1001"),
-                    ("encoded-separator", "https://www.ab.gr/my-account%2forder?id=1001"),
-                    ("encoded-control", "https://www.ab.gr/my-account/order%00?id=1001"),
+                    ("encoded-dotdot", "https://store.example/my-account/%2e%2e/order?id=1001"),
+                    ("mixed-dot", "https://store.example/my-account/.%2e/order?id=1001"),
+                    (
+                        "nested-encoding",
+                        "https://store.example/%252e%252e/my-account/order?id=1001",
+                    ),
+                    ("encoded-separator", "https://store.example/my-account%2forder?id=1001"),
+                    ("encoded-control", "https://store.example/my-account/order%00?id=1001"),
                 ]
             ],
         ],
@@ -466,13 +485,15 @@ class TestOrderScanSchema:
             ),
             # P1: the scan proposal cannot be directed off the listed order route.
             pytest.param(
-                lambda o: o.update(navigation_url="https://www.ab.gr/my-account/%6frder?id=1001"),
+                lambda o: o.update(
+                    navigation_url="https://store.example/my-account/%6frder?id=1001"
+                ),
                 "order-details route",
                 id="encoded-traversal-url",
             ),
             pytest.param(
                 lambda o: o["products"][0].update(
-                    product_id="abc", canonical_url="https://www.ab.gr/en/eshop/Food/x/p/abc"
+                    product_id="abc", canonical_url="https://store.example/en/eshop/Food/x/p/abc"
                 ),
                 None,
                 id="non-numeric-product-id",
@@ -571,7 +592,7 @@ class TestSyncDryRun:
         self, initialized_home: GrossyPaths, tmp_path: Path
     ) -> None:
         payload = _window_listed()
-        payload["orders"][-1]["navigation_url"] = "https://www.ab.gr/orders/1006"
+        payload["orders"][-1]["navigation_url"] = "https://store.example/orders/1006"
         path = _write(tmp_path, "listed.json", payload)
         with pytest.raises(HistorySyncError, match="listed-orders proposal rejected"):
             run_sync_dry_run(path, initialized_home)
@@ -822,7 +843,7 @@ class TestSyncApply:
             "INSERT INTO products (retailer, retailer_product_id, canonical_url, name, "
             "first_observed_date, last_observed_date, purchase_order_count, created_at, "
             "updated_at) VALUES ('ab', '55', "
-            "'https://www.ab.gr/en/eshop/Food/item-55/p/55', 'Existing', "
+            "'https://store.example/en/eshop/Food/item-55/p/55', 'Existing', "
             "'2026-09-01', '2026-09-05', 1, '2026-09-01T00:00:00.000000Z', "
             "'2026-09-05T00:00:00.000000Z')"
         )
@@ -1052,7 +1073,7 @@ class TestSyncApply:
         URL-equality binding runs; nothing is imported either way.
         """
         order = _scanned_order("1001", "2026-09-20", ["11"])
-        order["navigation_url"] = "https://www.ab.gr/orders/1001"  # retired queryless route
+        order["navigation_url"] = "https://store.example/orders/1001"  # retired queryless route
         orders = [
             order,
             _scanned_order("1002", "2026-09-21", ["12"]),
@@ -1326,7 +1347,7 @@ class TestCli:
 
     def test_scan_prepare_invalid_fails_closed(self, cli_env: GrossyPaths, tmp_path: Path) -> None:
         payload = _window_listed()
-        payload["orders"][-1]["navigation_url"] = "https://www.ab.gr/orders/1006"
+        payload["orders"][-1]["navigation_url"] = "https://store.example/orders/1006"
         listed = _write(tmp_path, "listed.json", payload)
         result = RUNNER.invoke(app, ["history", "scan-prepare", "--listed-orders", str(listed)])
         assert result.exit_code == 1
@@ -1413,7 +1434,9 @@ class TestStabilizeScan:
         return RawProductCard(
             product_id=pid,
             title=title,
-            canonical_url=f"https://www.ab.gr/en/eshop/Dairy/item/{pid}/p/{pid}" if pid else None,
+            canonical_url=f"https://store.example/en/eshop/Dairy/item/{pid}/p/{pid}"
+            if pid
+            else None,
         )
 
     def test_two_stable_passes_succeed(self) -> None:
@@ -1554,7 +1577,7 @@ class TestFilterDatedOrders:
 
 
 class FakeOrderPage:
-    """Simulates a lazy-loaded AB.gr order page for offline integration tests.
+    """Simulates a lazy-loaded store order page for offline integration tests.
 
     Each call to ``scroll_to_bottom()`` may reveal more product cards,
     simulating lazy loading. Once all cards are loaded, repeated scrolls
@@ -1605,7 +1628,7 @@ class TestFakeBrowserIntegration:
             RawProductCard(
                 product_id=str(200 + i),
                 title=f"Item {i}",
-                canonical_url=f"https://www.ab.gr/en/eshop/Food/item-{i}/p/{200 + i}",
+                canonical_url=f"https://store.example/en/eshop/Food/item-{i}/p/{200 + i}",
                 category_heading="Food",
             )
             for i in range(5)
@@ -1626,7 +1649,7 @@ class TestFakeBrowserIntegration:
             RawProductCard(
                 product_id=str(300 + i),
                 title=f"Product {i}",
-                canonical_url=f"https://www.ab.gr/en/eshop/Food/item-{i}/p/{300 + i}",
+                canonical_url=f"https://store.example/en/eshop/Food/item-{i}/p/{300 + i}",
                 category_heading="Dairy",
             )
             for i in range(4)
@@ -1672,13 +1695,13 @@ class TestFakeBrowserIntegration:
             RawProductCard(
                 product_id="400",
                 title="Good",
-                canonical_url="https://www.ab.gr/en/eshop/Food/g/p/400",
+                canonical_url="https://store.example/en/eshop/Food/g/p/400",
             ),
             RawProductCard(product_id=None, title="Broken Card"),
             RawProductCard(
                 product_id="401",
                 title="Also Good",
-                canonical_url="https://www.ab.gr/en/eshop/Food/a/p/401",
+                canonical_url="https://store.example/en/eshop/Food/a/p/401",
             ),
         ]
         page = FakeOrderPage(products, batch_size=3)
@@ -1814,7 +1837,7 @@ class TestFakeBrowserIntegration:
                 RawProductCard(
                     product_id=pid,
                     title=f"Product {pid}",
-                    canonical_url=f"https://www.ab.gr/en/eshop/Food/item/{pid}/p/{pid}",
+                    canonical_url=f"https://store.example/en/eshop/Food/item/{pid}/p/{pid}",
                     category_heading="Food",
                 )
                 for pid in product_ids

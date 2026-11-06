@@ -1,5 +1,5 @@
 {
-  description = "Grossy: weekly grocery shopping automation for AB.gr";
+  description = "Grossy: weekly grocery shopping automation for your local store";
 
   # Pinned to the NixOS unstable channel per owner preference (task 01 tooling).
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
@@ -40,7 +40,7 @@
           {
             default = pyPkgs.buildPythonApplication {
               pname = "grossy";
-              version = "0.3.0";
+              version = "0.4.0";
               src = buildSource pkgs;
               pyproject = true;
               nativeBuildInputs = [ pyPkgs.setuptools ];
@@ -112,6 +112,7 @@
                 unset __PYVENV_LAUNCHER__
                 unset PYTHONPATH
                 export PYTHONNOUSERSITE=1
+                if [ -f ./.env ]; then set -a; . ./.env; set +a; fi
                 # Establish Nix store Python as the default interpreter.
                 export GROSSY_SHELL_PROJECT="grossy-python312-v1"
                 export GROSSY_SHELL_PYTHON="${testPython}"

@@ -71,6 +71,7 @@ from grossy.recipes import (
     run_seed_import,
 )
 from grossy.security import sanitize_human_text
+from grossy.store import StoreConfigError, store_base_url
 
 STATUS_SCHEMA_NAME = "grossy.cli.status"
 STATUS_SCHEMA_VERSION = 1
@@ -179,7 +180,7 @@ def emit_weekly_error(command: str, exc: Exception) -> NoReturn:
 
 
 app = typer.Typer(
-    help="Grossy: deterministic AB.gr weekly grocery planning CLI", no_args_is_help=True
+    help="Grossy: deterministic weekly grocery planning CLI for the store", no_args_is_help=True
 )
 history_app = typer.Typer(help="Learned history and manual corrections", no_args_is_help=True)
 recipes_app = typer.Typer(help="Offline recipe library", no_args_is_help=True)
@@ -190,6 +191,34 @@ blacklist_app = typer.Typer(help="Block products or families", no_args_is_help=T
 unblacklist_app = typer.Typer(help="Unblock products or families", no_args_is_help=True)
 family_app = typer.Typer(help="Product family operations", no_args_is_help=True)
 category_app = typer.Typer(help="Category operations", no_args_is_help=True)
+
+
+@app.callback()
+def require_store_url(ctx: typer.Context) -> None:
+    """Fail closed before any command when GROSSY_STORE_URL is missing or malformed.
+
+    ``doctor`` is exempt so its ``store_url`` check can report the problem.
+    """
+    if ctx.invoked_subcommand == "doctor":
+        return
+    try:
+        store_base_url()
+    except StoreConfigError as exc:
+        typer.echo(
+            json.dumps(
+                {
+                    "schema_name": STATUS_SCHEMA_NAME,
+                    "schema_version": STATUS_SCHEMA_VERSION,
+                    "status": "error",
+                    "command": sanitize_human_text(ctx.invoked_subcommand or ""),
+                    "detail": sanitize_human_text(str(exc)),
+                },
+                sort_keys=True,
+            )
+        )
+        typer.echo(f"grossy: {sanitize_human_text(str(exc))}", err=True)
+        raise typer.Exit(code=1) from exc
+
 
 app.add_typer(history_app, name="history")
 app.add_typer(recipes_app, name="recipes")
@@ -230,7 +259,7 @@ def init() -> None:
 
 @app.command()
 def doctor() -> None:
-    """Validate the local environment and authenticated read-only AB.gr access."""
+    """Validate the local environment and authenticated read-only store access."""
     from grossy.doctor import run_doctor
 
     paths = resolve_paths()

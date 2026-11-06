@@ -109,7 +109,7 @@ def unavailable_cart() -> dict[str, Any]:
 
 def test_bind_unavailable_rows_reads_known_product_page_once() -> None:
     readings: dict[str, Any] = {}
-    known = {"111": {"title": "AB Salad", "canonical_url": "https://www.ab.gr/p/111"}}
+    known = {"111": {"title": "AB Salad", "canonical_url": "https://store.example/p/111"}}
     reads: list[tuple[str, str]] = []
 
     def read(pid: str, url: str) -> None:
@@ -118,7 +118,7 @@ def test_bind_unavailable_rows_reads_known_product_page_once() -> None:
 
     cart.bind_unavailable_rows(unavailable_cart(), readings, known, read)
     cart.bind_unavailable_rows(unavailable_cart(), readings, known, read)
-    assert reads == [("111", "https://www.ab.gr/p/111")]
+    assert reads == [("111", "https://store.example/p/111")]
 
 
 def test_bind_unavailable_rows_rejects_unknown_ambiguous_or_disagreeing_identity() -> None:

@@ -147,7 +147,7 @@ def test_fresh_catalogue_identity_has_no_fabricated_purchases_and_can_be_fallbac
     data["catalogue_products"] = [
         {
             "product_id": "333",
-            "canonical_url": "https://www.ab.gr/en/eshop/item/p/333",
+            "canonical_url": "https://store.example/en/eshop/item/p/333",
             "title": "Fresh dairy butter 200g",
             "brand": "Test",
             "observed_at": datetime.now(UTC).isoformat(),
@@ -192,14 +192,14 @@ def test_catalogue_and_live_facts_fail_closed(home: GrossyPaths, case: str) -> N
         data["matches"][0]["compatible_product_ids"].append("333")
         p = {
             "product_id": "333",
-            "canonical_url": "https://www.ab.gr/en/eshop/item/p/333",
+            "canonical_url": "https://store.example/en/eshop/item/p/333",
             "title": "Dairy butter",
             "observed_at": datetime.now(UTC).isoformat(),
         }
         if case == "stale":
             p["observed_at"] = (datetime.now(UTC) - timedelta(minutes=6)).isoformat()
         if case == "wrong-id":
-            p["canonical_url"] = "https://www.ab.gr/en/eshop/item/p/444"
+            p["canonical_url"] = "https://store.example/en/eshop/item/p/444"
         if case == "unknown-field":
             p["unchecked"] = True
         data["catalogue_products"] = [p]

@@ -327,7 +327,7 @@ def test_stage1_removal_allows_unrelated_stage2_additions(
             data["recurring_product_facts"] = [
                 {
                     "product_id": "111",
-                    "canonical_url": "https://www.ab.gr/en/eshop/item/p/111",
+                    "canonical_url": "https://store.example/en/eshop/item/p/111",
                     "displayed_price_eur": "2.00",
                     "availability": "available",
                 }

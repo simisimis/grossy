@@ -2,7 +2,7 @@
 
 These are pure, deterministic functions that process raw browser observations
 before a versioned proposal is emitted. The Pi skill calls these when it
-observes the rendered AB.gr order-history interface. They are also unit-tested
+observes the store's rendered order-history interface. They are also unit-tested
 in isolation with fake observations (PRD 19.3).
 """
 

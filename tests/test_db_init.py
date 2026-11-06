@@ -290,7 +290,7 @@ class TestSchemaConstraints:
         conn = open_connection(grossy_home.database_file)
         try:
             now = "2026-09-26T00:00:00.000000Z"
-            url = "https://www.ab.gr/en/eshop/x/y/p/123"
+            url = "https://store.example/en/eshop/x/y/p/123"
             conn.execute(
                 "INSERT INTO products "
                 "(retailer, retailer_product_id, canonical_url, name, "
@@ -335,7 +335,7 @@ class TestSchemaConstraints:
         conn = open_connection(grossy_home.database_file)
         try:
             now = "2026-09-26T00:00:00.000000Z"
-            url = "https://www.ab.gr/en/eshop/x/y/p/123"
+            url = "https://store.example/en/eshop/x/y/p/123"
             conn.execute(
                 "INSERT INTO products "
                 "(retailer, retailer_product_id, canonical_url, name, "
@@ -359,7 +359,7 @@ class TestSchemaConstraints:
         conn = open_connection(grossy_home.database_file)
         try:
             now = "2026-09-26T00:00:00.000000Z"
-            url = "https://www.ab.gr/en/eshop/x/y/p/123"
+            url = "https://store.example/en/eshop/x/y/p/123"
             conn.execute(
                 "INSERT INTO products "
                 "(retailer, retailer_product_id, canonical_url, name, "
@@ -426,7 +426,7 @@ class TestSchemaConstraints:
         conn = open_connection(grossy_home.database_file)
         try:
             now = "2026-09-26T00:00:00.000000Z"
-            url = "https://www.ab.gr/en/eshop/x/y/p/1"
+            url = "https://store.example/en/eshop/x/y/p/1"
             with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
                 conn.execute(
                     "INSERT INTO products "

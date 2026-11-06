@@ -87,13 +87,13 @@ class TestFakeAdapterCustom:
             lines=[
                 CartObservationLine(
                     product_id="111",
-                    canonical_url="https://www.ab.gr/en/eshop/A/B/p/111",
+                    canonical_url="https://store.example/en/eshop/A/B/p/111",
                     quantity=2,
                     displayed_price_eur="5.00",
                 ),
                 CartObservationLine(
                     product_id="222",
-                    canonical_url="https://www.ab.gr/en/eshop/C/D/p/222",
+                    canonical_url="https://store.example/en/eshop/C/D/p/222",
                     quantity=1,
                     displayed_price_eur="10.50",
                 ),

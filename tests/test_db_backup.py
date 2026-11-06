@@ -57,7 +57,7 @@ def populated_db(grossy_home: GrossyPaths) -> Path:
     conn.execute(
         "INSERT INTO products (retailer, retailer_product_id, canonical_url, name, "
         "category_id, created_at, updated_at) VALUES ('ab', '123', "
-        "'https://www.ab.gr/en/eshop/Dairy/Yogurt/p/123', 'Greek Yogurt', 1, ?, ?)",
+        "'https://store.example/en/eshop/Dairy/Yogurt/p/123', 'Greek Yogurt', 1, ?, ?)",
         (now, now),
     )
     conn.execute(

@@ -1,10 +1,13 @@
 """Coordinator live helpers: exact task tab, boolean readiness predicates, read-only page reads,
 one bounded click.
 
-Work directory: $GROSSY_LIVE_DIR, else the path in <state>/grossy/live-current.txt (created by
-live_start.py). Browser session name: <workdir>/session.txt (written by live_start.py). Nothing
-here writes to the cart unless click_once/add_units is called by a stage script after a persisted
-intent and an authorized action-check.
+Store base URL: $GROSSY_STORE_URL, a bare https://<host>[:port] (same urlsplit rules as
+src/grossy/store.py, validated inline because the shell's Python does not import grossy); STORE
+is the only origin source for every URL and the origin guard. Work directory: $GROSSY_LIVE_DIR,
+else the path in <state>/grossy/live-current.txt (created by live_start.py). Browser session
+name: <workdir>/session.txt (written by live_start.py). Nothing here writes to the cart unless
+click_once/add_units is called by a stage script after a persisted intent and an authorized
+action-check.
 """
 
 import datetime
@@ -15,6 +18,41 @@ import re
 import subprocess
 import sys
 import time
+from urllib.parse import urlsplit
+
+
+def stop(reason):
+    print("STOP:", reason, flush=True)
+    sys.exit(1)
+
+
+def store_base_url():
+    """Validated bare https://<host>[:port] from GROSSY_STORE_URL, or None when unset/malformed."""
+    value = os.environ.get("GROSSY_STORE_URL")
+    if value is None:
+        return None
+    try:
+        parsed = urlsplit(value)
+        _ = parsed.port  # raises ValueError for a malformed port
+    except ValueError:
+        return None
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path
+        or parsed.query
+        or parsed.fragment
+    ):
+        return None
+    return "https://" + parsed.netloc
+
+
+STORE = store_base_url()
+if STORE is None:
+    stop("store_url_missing")
+CHECKOUT_URL = STORE + "/checkout"
 
 os.umask(0o077)
 BASE = (
@@ -35,18 +73,13 @@ V = (
     '>0&&s.visibility!=="hidden"&&s.display!=="none"};'
 )
 GUARD = (
-    'if(location.origin!=="https://www.ab.gr")throw Error("unexpected_origin");'
+    "if(location.origin!==" + json.dumps(STORE) + ')throw Error("unexpected_origin");'
     'if([...document.querySelectorAll("input[type=password]")].some(v)||[...document.querySelectorA'
     'll("iframe[src*=captcha],[class*=captcha],[id*=captcha]")]'
     ".some(e=>v(e)&&e.getBoundingClientRect().width>250&&e.getBoundingClientRect().height>150))thro"
     'w Error("authentication_or_challenge");'
 )
 EMPTY_RE = r"/^(Your (shopping )?(cart|basket) is empty[.!]?|Το καλάθι σας είναι άδειο[.!]?)$/i"
-
-
-def stop(reason):
-    print("STOP:", reason, flush=True)
-    sys.exit(1)
 
 
 def write(name, data):
@@ -111,7 +144,7 @@ def recover_closed_window():
             BRAVE_LAUNCH_ARGS,
             "--pin-tab",
             "open",
-            "https://www.ab.gr/checkout",
+            CHECKOUT_URL,
         ],
         capture_output=True,
         text=True,

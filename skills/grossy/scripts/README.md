@@ -1,6 +1,7 @@
 # Grossy live-workflow scripts
 
-Deterministic coordinator scripts for the supervised AB.gr workflow. They wrap
+Deterministic coordinator scripts for the supervised workflow on your local
+store. They wrap
 the `grossy` CLI phases and the verified `agent-browser` page procedures from
 the skill's Observation Protocol, so a weekly run does not have to be rebuilt
 from the prose. Run everything through `live.sh` from any directory:

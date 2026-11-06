@@ -17,7 +17,7 @@ The mandatory precedence (PRD 7.1) is:
 3. explicit YAML policy;
 4. manual SQLite override;
 5. learned SQLite state;
-6. live AB.gr availability and price.
+6. live store availability and price.
 """
 
 from __future__ import annotations
@@ -35,6 +35,7 @@ from grossy.db.lock import WriterLock
 from grossy.db.migrations import run_migrations
 from grossy.paths import GrossyPaths
 from grossy.security import ProhibitedContentError, sanitize_human_text, scan_prohibited_content
+from grossy.store import StoreConfigError
 
 # Shared whitespace-collapsing normalizer (same as sync.py _WHITESPACE_RE).
 _WS_RE = re.compile(r"\s+")
@@ -274,14 +275,17 @@ def run_product_register(paths: GrossyPaths, canonical_url: str) -> dict[str, ob
         scan_prohibited_content(unquote(canonical_url))
     except ProhibitedContentError as exc:
         raise MaintenanceError("prohibited content in product URL") from exc
-    product_id = product_id_from_url(canonical_url)
+    try:
+        product_id = product_id_from_url(canonical_url)
+    except StoreConfigError as exc:
+        raise MaintenanceError(str(exc)) from exc
     if (
         product_id is None
         or len(canonical_url) > 4096
         or "?" in canonical_url
         or "#" in canonical_url
     ):
-        raise MaintenanceError("a canonical AB.gr product URL is required")
+        raise MaintenanceError("a canonical product URL of the store is required")
     if sanitize_human_text(unquote(canonical_url)) != unquote(canonical_url):
         raise MaintenanceError("unsafe product URL content")
 

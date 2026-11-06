@@ -17,6 +17,7 @@ from grossy.browser.observation import (
     CartObservation,
     CartObservationLine,
 )
+from grossy.store import store_base_url
 
 
 @dataclass(frozen=True)
@@ -44,7 +45,7 @@ class BrowserAdapter(ABC):
 
     @abstractmethod
     def check_authentication(self) -> AuthCheckResult:
-        """Check whether the user is authenticated to AB.gr."""
+        """Check whether the user is authenticated to the store."""
 
     @abstractmethod
     def check_history_controls(self) -> HistoryControlsResult:
@@ -64,7 +65,7 @@ def _default_observation() -> CartObservation:
         lines=[
             CartObservationLine(
                 product_id="1234567",
-                canonical_url="https://www.ab.gr/en/eshop/Dairy/Yogurt/p/1234567",
+                canonical_url=f"{store_base_url()}/en/eshop/Dairy/Yogurt/p/1234567",
                 quantity=1,
                 displayed_price_eur="3.49",
             )

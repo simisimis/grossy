@@ -340,7 +340,7 @@ def _seed_product(paths: GrossyPaths, product_id: str, name: str = "Olympus Milk
             "VALUES ('ab', ?, ?, ?, 1, ?, ?)",
             (
                 product_id,
-                f"https://www.ab.gr/en/eshop/x/{product_id}/p/{product_id}",
+                f"https://store.example/en/eshop/x/{product_id}/p/{product_id}",
                 name,
                 now,
                 now,
@@ -504,7 +504,7 @@ def test_module_entry_weekly_phases_fail_closed(
 
 
 def test_product_register_cli_is_versioned_idempotent_and_fail_closed(initialized_home):
-    good = "https://www.ab.gr/en/eshop/fixture/p/444"
+    good = "https://store.example/en/eshop/fixture/p/444"
     for changed in (True, False):
         result = RUNNER.invoke(app, ["history", "product-register", good])
         assert result.exit_code == 0, result.output

@@ -14,18 +14,17 @@ from grossy.config import (
     load_config_text,
     product_id_from_url,
 )
+from grossy.store import STORE_URL_ENV, StoreConfigError
 
-# Real observed AB.gr product page URL (feasibility task 09 evidence).
+# Observed store product page URL shape (feasibility task 09 evidence), on the test host.
 OBSERVED_PRODUCT_URL = (
-    "https://www.ab.gr/en/eshop/Dairy-Plant-Based-Beverages-and-Chilled-Products/"
+    "https://store.example/en/eshop/Dairy-Plant-Based-Beverages-and-Chilled-Products/"
     "Yogurt/Plain-yoghurts/Yogurt-Dessert-2-Fat-1kg/p/7633916"
 )
 GREEK_PRODUCT_URL = (
-    "https://www.ab.gr/el/eshop/Γαλακτοκομικά/Γιαούρτι/Γιαουρτι-2-Κατά-1kg/p/7633916"
+    "https://store.example/el/eshop/Γαλακτοκομικά/Γιαούρτι/Γιαουρτι-2-Κατά-1kg/p/7633916"
 )
-ENCODED_GREEK_PRODUCT_URL = (
-    "https://www.ab.gr/en/eshop/Dairy/%CE%93%CE%B9%CE%B1%CF%8C%CF%85%CF%81%CF%84%CE%B9/p/7633916"
-)
+ENCODED_GREEK_PRODUCT_URL = "https://store.example/en/eshop/Dairy/%CE%93%CE%B9%CE%B1%CF%8C%CF%85%CF%81%CF%84%CE%B9/p/7633916"
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SAMPLE_CONFIG = REPO_ROOT / "config" / "grossy.sample.yaml"
@@ -275,7 +274,7 @@ class TestDuplicateKeys:
             config_text(
                 staples=staples_text(
                     "    - key: bread\n"
-                    "      product_url: https://www.ab.gr/eshop/%2e%2e/white-loaf/p/12345\n"
+                    "      product_url: https://store.example/eshop/%2e%2e/white-loaf/p/12345\n"
                     "      quantity: 1"
                 )
             ),
@@ -320,7 +319,7 @@ def test_invalid_value_fails_with_field_path(text: str, path: str) -> None:
         pytest.param(
             config_text(
                 staples=bread_staple(
-                    "product_url: https://www.ab.gr/eshop/bread/white-loaf/p/7654321",
+                    "product_url: https://store.example/eshop/bread/white-loaf/p/7654321",
                     product_id='"1234567"',
                 )
             ),
@@ -331,11 +330,11 @@ def test_invalid_value_fails_with_field_path(text: str, path: str) -> None:
             config_text(
                 staples=staples_text(
                     "    - key: bread\n"
-                    "      product_url: https://www.ab.gr/eshop/category/bread\n"
+                    "      product_url: https://store.example/eshop/category/bread\n"
                     "      quantity: 1"
                 )
             ),
-            ["staples.breakfast.0", "canonical AB.gr product URL"],
+            ["staples.breakfast.0", "canonical product URL of the store"],
             id="category-url",
         ),
         pytest.param(
@@ -405,14 +404,14 @@ class TestAcceptedValues:
         config = load_config_text(
             config_text(
                 staples=bread_staple(
-                    "product_url: https://www.ab.gr/eshop/bread/white-loaf/p/1234567",
+                    "product_url: https://store.example/eshop/bread/white-loaf/p/1234567",
                     product_id='"1234567"',
                 )
             )
         )
         assert (
             config.staples.breakfast[0].product_url
-            == "https://www.ab.gr/eshop/bread/white-loaf/p/1234567"
+            == "https://store.example/eshop/bread/white-loaf/p/1234567"
         )
 
     @pytest.mark.parametrize(
@@ -430,20 +429,23 @@ class TestStapleModelUrlBoundary:
         "url",
         [
             pytest.param(
-                "https://www.ab.gr/eshop/category/1234567", id="numeric-category-not-product"
+                "https://store.example/eshop/category/1234567", id="numeric-category-not-product"
             ),
             pytest.param(
-                "https://www.ab.gr/eshop/1234567/../../checkout", id="literal-dot-traversal"
-            ),
-            pytest.param("https://www.ab.gr/en/eshop/%2e%2e/p/12345", id="encoded-dot-traversal"),
-            pytest.param(
-                "https://www.ab.gr:/eshop/bread/white-loaf/p/12345", id="empty-port-delimiter"
+                "https://store.example/eshop/1234567/../../checkout", id="literal-dot-traversal"
             ),
             pytest.param(
-                "https://www.ab.gr/eshop/bread/white-loaf/p/%312345", id="encoded-identity-digit"
+                "https://store.example/en/eshop/%2e%2e/p/12345", id="encoded-dot-traversal"
             ),
             pytest.param(
-                "https://www.ab.gr/eshop/%252e%252e/white-loaf/p/12345",
+                "https://store.example:/eshop/bread/white-loaf/p/12345", id="empty-port-delimiter"
+            ),
+            pytest.param(
+                "https://store.example/eshop/bread/white-loaf/p/%312345",
+                id="encoded-identity-digit",
+            ),
+            pytest.param(
+                "https://store.example/eshop/%252e%252e/white-loaf/p/12345",
                 id="nested-encoded-traversal",
             ),
         ],
@@ -458,7 +460,7 @@ class TestStapleModelUrlBoundary:
             pytest.param(GREEK_PRODUCT_URL, "7633916", id="greek"),
             pytest.param(ENCODED_GREEK_PRODUCT_URL, None, id="percent-encoded-greek"),
             pytest.param(
-                "https://www.ab.gr/eshop/bread/white-loaf/p/1234567", "1234567", id="plain"
+                "https://store.example/eshop/bread/white-loaf/p/1234567", "1234567", id="plain"
             ),
         ],
     )
@@ -506,7 +508,7 @@ class TestProductIdFromUrl:
     """Only the canonical product route carries an unambiguous product ID.
 
     The supported canonical route is
-    ``https://www.ab.gr/[en|el/]eshop/<category-path>/<product-slug>/p/<product-id>``
+    ``https://store.example/[en|el/]eshop/<category-path>/<product-slug>/p/<product-id>``
     (observed in feasibility evidence). Category and slug segments may be raw
     Unicode or percent-encoded UTF-8 (for example Greek); every ambiguous,
     category, traversal, encoded-traversal, malformed-encoding, or
@@ -519,23 +521,25 @@ class TestProductIdFromUrl:
         [
             pytest.param(OBSERVED_PRODUCT_URL, "7633916", id="observed-locale-route"),
             pytest.param(
-                "https://www.ab.gr/eshop/bread/white-loaf/p/1234567", "1234567", id="unprefixed"
+                "https://store.example/eshop/bread/white-loaf/p/1234567", "1234567", id="unprefixed"
             ),
             pytest.param(
-                "https://www.ab.gr/el/eshop/bread/white-loaf/p/1234567", "1234567", id="el-locale"
+                "https://store.example/el/eshop/bread/white-loaf/p/1234567",
+                "1234567",
+                id="el-locale",
             ),
             # Raw Greek (and other printable Unicode) category and slug text is
             # harmless: identity comes from the host, route, and numeric ID.
             pytest.param(GREEK_PRODUCT_URL, "7633916", id="raw-greek-slug"),
             pytest.param(
-                "https://www.ab.gr/eshop/ｂｒｅａｄ/white-loaf/p/12345",
+                "https://store.example/eshop/ｂｒｅａｄ/white-loaf/p/12345",
                 "12345",
                 id="fullwidth-slug",
             ),
             pytest.param(ENCODED_GREEK_PRODUCT_URL, "7633916", id="percent-encoded-greek"),
             # Percent-encoding of unreserved characters (%2D = -, %7E = ~) is harmless.
             pytest.param(
-                "https://www.ab.gr/eshop/bread/white%2Dloaf%7E2024/p/1234567",
+                "https://store.example/eshop/bread/white%2Dloaf%7E2024/p/1234567",
                 "1234567",
                 id="encoded-unreserved",
             ),
@@ -548,114 +552,177 @@ class TestProductIdFromUrl:
         "url",
         [
             # A numeric segment anywhere but the identity marker is not a product ID.
-            pytest.param("https://www.ab.gr/eshop/category/1234567", id="numeric-category"),
-            pytest.param("https://www.ab.gr/eshop/1234567", id="bare-numeric-segment"),
-            pytest.param("https://www.ab.gr/eshop/category/bread", id="category-route"),
-            pytest.param("https://www.ab.gr/eshop/p/1234567", id="missing-slug"),
-            pytest.param("https://www.ab.gr/en/eshop/p/1234567", id="missing-slug-locale"),
-            pytest.param("https://www.ab.gr/eshop/bread/white-loaf/p/12a3", id="non-numeric-id"),
-            # Dot segments, literal or encoded in any mix, decode to . or .. and fail.
-            pytest.param("https://www.ab.gr/eshop/1234567/../../checkout", id="literal-dotdot"),
-            pytest.param("https://www.ab.gr/eshop/bread/./white-loaf/p/1", id="literal-dot"),
-            pytest.param("https://www.ab.gr/en/eshop/%2e%2e/p/12345", id="encoded-dotdot"),
-            pytest.param("https://www.ab.gr/en/eshop/%2E%2E/p/12345", id="encoded-dotdot-upper"),
-            pytest.param("https://www.ab.gr/eshop/%2e/white-loaf/p/12345", id="encoded-dot"),
-            pytest.param("https://www.ab.gr/en/eshop/%2e./p/12345", id="mixed-dot-1"),
-            pytest.param("https://www.ab.gr/en/eshop/.%2e/p/12345", id="mixed-dot-2"),
-            pytest.param("https://www.ab.gr/en/eshop/%2E%2e/p/12345", id="mixed-dot-case"),
-            pytest.param("https://www.ab.gr/en/eshop/%2e%2e%2f/p/12345", id="encoded-dotdot-slash"),
+            pytest.param("https://store.example/eshop/category/1234567", id="numeric-category"),
+            pytest.param("https://store.example/eshop/1234567", id="bare-numeric-segment"),
+            pytest.param("https://store.example/eshop/category/bread", id="category-route"),
+            pytest.param("https://store.example/eshop/p/1234567", id="missing-slug"),
+            pytest.param("https://store.example/en/eshop/p/1234567", id="missing-slug-locale"),
             pytest.param(
-                "https://www.ab.gr/eshop/white-loaf/p/12345%2e", id="trailing-encoded-dot"
+                "https://store.example/eshop/bread/white-loaf/p/12a3", id="non-numeric-id"
+            ),
+            # Dot segments, literal or encoded in any mix, decode to . or .. and fail.
+            pytest.param("https://store.example/eshop/1234567/../../checkout", id="literal-dotdot"),
+            pytest.param("https://store.example/eshop/bread/./white-loaf/p/1", id="literal-dot"),
+            pytest.param("https://store.example/en/eshop/%2e%2e/p/12345", id="encoded-dotdot"),
+            pytest.param(
+                "https://store.example/en/eshop/%2E%2E/p/12345", id="encoded-dotdot-upper"
+            ),
+            pytest.param("https://store.example/eshop/%2e/white-loaf/p/12345", id="encoded-dot"),
+            pytest.param("https://store.example/en/eshop/%2e./p/12345", id="mixed-dot-1"),
+            pytest.param("https://store.example/en/eshop/.%2e/p/12345", id="mixed-dot-2"),
+            pytest.param("https://store.example/en/eshop/%2E%2e/p/12345", id="mixed-dot-case"),
+            pytest.param(
+                "https://store.example/en/eshop/%2e%2e%2f/p/12345", id="encoded-dotdot-slash"
+            ),
+            pytest.param(
+                "https://store.example/eshop/white-loaf/p/12345%2e", id="trailing-encoded-dot"
             ),
             # Double encoding is never decoded twice; it fails rather than normalizing.
             pytest.param(
-                "https://www.ab.gr/eshop/%252e%252e/white-loaf/p/12345", id="double-encoded-dotdot"
+                "https://store.example/eshop/%252e%252e/white-loaf/p/12345",
+                id="double-encoded-dotdot",
             ),
-            pytest.param("https://www.ab.gr/eshop/white-loaf/p/%252e%252e12345", id="double-in-id"),
             pytest.param(
-                "https://www.ab.gr/eshop/%252F/white-loaf/p/12345", id="double-encoded-slash"
+                "https://store.example/eshop/white-loaf/p/%252e%252e12345", id="double-in-id"
             ),
-            pytest.param("https://www.ab.gr/eshop/100%25/white-loaf/p/12345", id="encoded-percent"),
+            pytest.param(
+                "https://store.example/eshop/%252F/white-loaf/p/12345", id="double-encoded-slash"
+            ),
+            pytest.param(
+                "https://store.example/eshop/100%25/white-loaf/p/12345", id="encoded-percent"
+            ),
             # Encoded separators and backslashes normalize to separators after decoding.
-            pytest.param("https://www.ab.gr/eshop/bread%2fwhite-loaf/p/12345", id="encoded-slash"),
             pytest.param(
-                "https://www.ab.gr/eshop/bread%2Fwhite-loaf/p/12345", id="encoded-slash-upper"
+                "https://store.example/eshop/bread%2fwhite-loaf/p/12345", id="encoded-slash"
             ),
             pytest.param(
-                "https://www.ab.gr/eshop/bread%5cwhite-loaf/p/12345", id="encoded-backslash"
+                "https://store.example/eshop/bread%2Fwhite-loaf/p/12345", id="encoded-slash-upper"
             ),
             pytest.param(
-                "https://www.ab.gr/eshop/bread%5Cwhite-loaf/p/12345", id="encoded-backslash-upper"
+                "https://store.example/eshop/bread%5cwhite-loaf/p/12345", id="encoded-backslash"
             ),
-            pytest.param("https://www.ab.gr/eshop/bread\\white-loaf/p/12345", id="raw-backslash"),
-            pytest.param("https://www.ab.gr/en/eshop/\\../p/12345", id="raw-backslash-dotdot"),
+            pytest.param(
+                "https://store.example/eshop/bread%5Cwhite-loaf/p/12345",
+                id="encoded-backslash-upper",
+            ),
+            pytest.param(
+                "https://store.example/eshop/bread\\white-loaf/p/12345", id="raw-backslash"
+            ),
+            pytest.param("https://store.example/en/eshop/\\../p/12345", id="raw-backslash-dotdot"),
             # Raw controls, DEL and format characters fail on the raw string
             # (urlsplit strips tabs/newlines, so the parsed path would hide them).
-            pytest.param("https://www.ab.gr/eshop/bread\x00/white-loaf/p/12345", id="raw-nul"),
-            pytest.param("https://www.ab.gr/eshop/bread/white-loaf\n/p/12345", id="raw-newline"),
-            pytest.param("https://www.ab.gr/eshop/bread/white-loaf\tp/12345", id="raw-tab"),
-            pytest.param("https://www.ab.gr/eshop/bread\x7f/white-loaf/p/12345", id="raw-del"),
-            pytest.param("https://www.ab.gr/eshop/bread\u200b/white-loaf/p/12345", id="raw-zwsp"),
-            pytest.param("https://www.ab.gr/eshop/bread\u0085/white-loaf/p/12345", id="raw-nel"),
-            # Decoded controls (including C1) and spaces fail even from plain ASCII input.
-            pytest.param("https://www.ab.gr/eshop/bread%00/white-loaf/p/12345", id="encoded-nul"),
-            pytest.param("https://www.ab.gr/eshop/bread%0ap/12345", id="encoded-newline"),
-            pytest.param("https://www.ab.gr/eshop/bread%7f/white-loaf/p/12345", id="encoded-del"),
+            pytest.param("https://store.example/eshop/bread\x00/white-loaf/p/12345", id="raw-nul"),
             pytest.param(
-                "https://www.ab.gr/eshop/bread%c2%85/white-loaf/p/12345", id="encoded-nel"
+                "https://store.example/eshop/bread/white-loaf\n/p/12345", id="raw-newline"
             ),
-            pytest.param("https://www.ab.gr/eshop/bread%20/white-loaf/p/12345", id="encoded-space"),
-            # Malformed or invalid-UTF-8 percent escapes fail closed.
-            pytest.param("https://www.ab.gr/eshop/bread%2g/white-loaf/p/12345", id="bad-hex-1"),
-            pytest.param("https://www.ab.gr/eshop/bread%zz/white-loaf/p/12345", id="bad-hex-2"),
-            pytest.param("https://www.ab.gr/eshop/bread%2/white-loaf/p/12345", id="short-escape"),
-            pytest.param("https://www.ab.gr/eshop/bread%/white-loaf/p/12345", id="bare-percent"),
-            pytest.param("https://www.ab.gr/eshop/bread%ce/p/12345", id="truncated-utf8"),
-            pytest.param("https://www.ab.gr/eshop/bread%ff%fe/p/12345", id="invalid-utf8"),
+            pytest.param("https://store.example/eshop/bread/white-loaf\tp/12345", id="raw-tab"),
+            pytest.param("https://store.example/eshop/bread\x7f/white-loaf/p/12345", id="raw-del"),
             pytest.param(
-                "https://www.ab.gr/eshop/bread%ce%28/p/12345", id="invalid-utf8-continuation"
+                "https://store.example/eshop/bread\u200b/white-loaf/p/12345", id="raw-zwsp"
+            ),
+            pytest.param(
+                "https://store.example/eshop/bread\u0085/white-loaf/p/12345", id="raw-nel"
+            ),
+            # Decoded controls (including C1) and spaces fail even from plain ASCII input.
+            pytest.param(
+                "https://store.example/eshop/bread%00/white-loaf/p/12345", id="encoded-nul"
+            ),
+            pytest.param("https://store.example/eshop/bread%0ap/12345", id="encoded-newline"),
+            pytest.param(
+                "https://store.example/eshop/bread%7f/white-loaf/p/12345", id="encoded-del"
+            ),
+            pytest.param(
+                "https://store.example/eshop/bread%c2%85/white-loaf/p/12345", id="encoded-nel"
+            ),
+            pytest.param(
+                "https://store.example/eshop/bread%20/white-loaf/p/12345", id="encoded-space"
+            ),
+            # Malformed or invalid-UTF-8 percent escapes fail closed.
+            pytest.param("https://store.example/eshop/bread%2g/white-loaf/p/12345", id="bad-hex-1"),
+            pytest.param("https://store.example/eshop/bread%zz/white-loaf/p/12345", id="bad-hex-2"),
+            pytest.param(
+                "https://store.example/eshop/bread%2/white-loaf/p/12345", id="short-escape"
+            ),
+            pytest.param(
+                "https://store.example/eshop/bread%/white-loaf/p/12345", id="bare-percent"
+            ),
+            pytest.param("https://store.example/eshop/bread%ce/p/12345", id="truncated-utf8"),
+            pytest.param("https://store.example/eshop/bread%ff%fe/p/12345", id="invalid-utf8"),
+            pytest.param(
+                "https://store.example/eshop/bread%ce%28/p/12345", id="invalid-utf8-continuation"
             ),
             # Route markers are raw ASCII: encoded forms never normalize into acceptance.
             pytest.param(
-                "https://www.ab.gr/eshop/bread/white-loaf/%70/12345", id="encoded-p-marker"
-            ),
-            pytest.param("https://www.ab.gr/es%68op/bread/white-loaf/p/12345", id="encoded-eshop"),
-            pytest.param(
-                "https://www.ab.gr/%65n/eshop/bread/white-loaf/p/12345", id="encoded-locale"
+                "https://store.example/eshop/bread/white-loaf/%70/12345", id="encoded-p-marker"
             ),
             pytest.param(
-                "https://www.ab.gr/eshop/bread/white-loaf/p/12345%32", id="encoded-id-digit"
+                "https://store.example/es%68op/bread/white-loaf/p/12345", id="encoded-eshop"
             ),
             pytest.param(
-                "https://www.ab.gr/eshop/bread/white-loaf/p/%312345", id="encoded-id-lead"
+                "https://store.example/%65n/eshop/bread/white-loaf/p/12345", id="encoded-locale"
+            ),
+            pytest.param(
+                "https://store.example/eshop/bread/white-loaf/p/12345%32", id="encoded-id-digit"
+            ),
+            pytest.param(
+                "https://store.example/eshop/bread/white-loaf/p/%312345", id="encoded-id-lead"
             ),
             # Authority must be exactly the canonical port-free host over https.
             pytest.param(
-                "https://www.ab.gr%2e/eshop/bread/white-loaf/p/12345", id="encoded-authority"
-            ),
-            pytest.param("https://@www.ab.gr/eshop/bread/white-loaf/p/12345", id="empty-user-info"),
-            pytest.param(
-                "https://user:pw@www.ab.gr/eshop/bread/white-loaf/p/1234567", id="user-info"
-            ),
-            pytest.param("https://www.ab.gr:0/eshop/bread/white-loaf/p/12345", id="zero-port"),
-            pytest.param(
-                "https://www.ab.gr:443/eshop/bread/white-loaf/p/1234567", id="explicit-port"
+                "https://store.example%2e/eshop/bread/white-loaf/p/12345", id="encoded-authority"
             ),
             pytest.param(
-                "https://www.ab.gr:443x/eshop/bread/white-loaf/p/12345", id="malformed-port"
+                "https://@store.example/eshop/bread/white-loaf/p/12345", id="empty-user-info"
             ),
-            pytest.param("https://www.ab.gr:/eshop/bread/white-loaf/p/12345", id="empty-port"),
             pytest.param(
-                "https://www.ab.gr:/en/eshop/bread/white-loaf/p/12345", id="empty-port-locale"
+                "https://user:pw@store.example/eshop/bread/white-loaf/p/1234567", id="user-info"
+            ),
+            pytest.param("https://store.example:0/eshop/bread/white-loaf/p/12345", id="zero-port"),
+            pytest.param(
+                "https://store.example:443/eshop/bread/white-loaf/p/1234567", id="explicit-port"
+            ),
+            pytest.param(
+                "https://store.example:443x/eshop/bread/white-loaf/p/12345", id="malformed-port"
+            ),
+            pytest.param("https://store.example:/eshop/bread/white-loaf/p/12345", id="empty-port"),
+            pytest.param(
+                "https://store.example:/en/eshop/bread/white-loaf/p/12345", id="empty-port-locale"
             ),
             pytest.param("https://example.com/eshop/bread/white-loaf/p/1234567", id="foreign-host"),
-            pytest.param("http://www.ab.gr/eshop/bread/white-loaf/p/1234567", id="non-https"),
+            pytest.param("http://store.example/eshop/bread/white-loaf/p/1234567", id="non-https"),
             pytest.param(
-                "https://www.ab.gr/fr/eshop/bread/white-loaf/p/1234567", id="unknown-locale"
+                "https://store.example/fr/eshop/bread/white-loaf/p/1234567", id="unknown-locale"
             ),
-            pytest.param("https://www.ab.gr/eshop/bread/white-loaf/p/1234567?utm=1", id="query"),
-            pytest.param("https://www.ab.gr/eshop/bread/white-loaf/p/1234567#ref", id="fragment"),
+            pytest.param(
+                "https://store.example/eshop/bread/white-loaf/p/1234567?utm=1", id="query"
+            ),
+            pytest.param(
+                "https://store.example/eshop/bread/white-loaf/p/1234567#ref", id="fragment"
+            ),
         ],
     )
     def test_rejects_ambiguous_or_noncanonical_url(self, url: str) -> None:
         assert product_id_from_url(url) is None
+
+    def test_host_rule_follows_the_store_setting(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The accepted host is whatever ``GROSSY_STORE_URL`` names, nothing else."""
+        other_host_url = "https://other.example/en/eshop/bread/white-loaf/p/1234567"
+        assert product_id_from_url(OBSERVED_PRODUCT_URL) == "7633916"
+        assert product_id_from_url(other_host_url) is None
+        monkeypatch.setenv(STORE_URL_ENV, "https://other.example")
+        assert product_id_from_url(OBSERVED_PRODUCT_URL) is None
+        assert product_id_from_url(other_host_url) == "1234567"
+
+    def test_missing_store_setting_fails_closed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv(STORE_URL_ENV)
+        with pytest.raises(StoreConfigError, match=STORE_URL_ENV):
+            product_id_from_url(OBSERVED_PRODUCT_URL)
+        with pytest.raises(GrossyConfigError, match=STORE_URL_ENV):
+            load_config_text(
+                config_text(
+                    staples=staples_text(
+                        f"    - key: yogurt\n      product_url: {OBSERVED_PRODUCT_URL}\n"
+                        "      quantity: 1"
+                    )
+                )
+            )

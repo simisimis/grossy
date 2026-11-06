@@ -11,6 +11,7 @@ from types import ModuleType
 from typing import Any
 
 import pytest
+from conftest import TEST_STORE_URL
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "skills/grossy/scripts"
 spec = importlib.util.spec_from_file_location("slot_gate", SCRIPTS / "slot_gate.py")
@@ -120,7 +121,8 @@ def test_unready_scripts_stop_before_any_phase_or_browser_call(
     def stop(reason: str) -> None:
         raise ValueError(reason)
 
-    for key, value in {"D": tmp_path, "stop": stop, "write": forbidden}.items():
+    fake_attributes = {"D": tmp_path, "STORE": TEST_STORE_URL, "stop": stop, "write": forbidden}
+    for key, value in fake_attributes.items():
         setattr(drill, key, value)
     drill.__getattr__ = lambda name: forbidden  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "live_common", drill)
@@ -193,6 +195,7 @@ def test_history_phase_starts_only_after_applicable_readiness(
 
     for key, value in {
         "D": tmp_path,
+        "STORE": TEST_STORE_URL,
         "stop": pytest.fail,
         "write": pytest.fail,
         "grossy": phase,

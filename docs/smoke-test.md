@@ -16,7 +16,7 @@ automatic expansion of this smoke allowance.
 ## Preconditions and universal stop rule
 
 - Offline gate and fixture review accepted; user understands residual risks,
-  including unestablished AB.gr permission/terms and unproven cross-day behavior.
+  including unestablished store permission/terms and unproven cross-day behavior.
 - Matching CLI/skill available, private state initialized, policy reviewed,
   no competing writer/active run, verified private backup/export available.
 - User manually authenticates headed Brave using the existing private profile.
@@ -41,13 +41,13 @@ automatic expansion of this smoke allowance.
 - All phases require exit zero and the exact expected versioned JSON. Any failure,
   malformed output, stale facts, changed identity/cart/price, authentication loss,
   a blocking CAPTCHA challenge, unsafe exposure or revoked consent stops **all**
-  browser activity. AB.gr shows a small persistent captcha badge on every page;
+  browser activity. The store shows a small persistent captcha badge on every page;
   a badge is not a challenge. Only a large or overlaying captcha element, or a
   visible login form, counts as blocking (see the skill's CAPTCHA handling).
   Preserve minimized local intent/observation state; no automatic retries, removals,
   compensation, or replay. User handles manual login/review before renewed approval.
 - Never progress checkout, choose fulfilment/delivery slots, pay or submit orders.
-  With explicit read-only approval, `/checkout` is permitted solely for AB.gr's
+  With explicit read-only approval, `/checkout` is permitted solely for the store's
   cart-item list. Extract product identity/quantity/price only; do not inspect
   account/address/payment/fulfilment sections or activate checkout-stage controls.
   This exception does not authorize cart changes or other smoke steps.
@@ -70,7 +70,7 @@ uses the sanitized template below.
 **Operation:** authorize local `grossy doctor`, then separately authorize coordinator
 rendered authentication, rendered reservation-history list visibility and
 whole-cart-read checks through agent-browser. For history, navigate directly to
-`https://www.ab.gr/en/my-account/reservation-history` and verify that rendered
+`https://<store>/en/my-account/reservation-history` and verify that rendered
 route; do not open the homepage as an intermediate step or open individual
 order-details pages. Confirm that at least one order entry with its order-details
 anchor and date is rendered. Inspect the list read-only, without scrolling/loading
@@ -170,7 +170,7 @@ recurring-observe with `mutation_result: {manifest_checksum, outcome: readback}`
 manifest checksum, verified reconciliation and user visual confirmation. Readback
 identity comes from the product page's in-cart quantity stepper on the canonical
 `/p/<id>` route, cross-checked against checkout line count, header badge, brand,
-quantity and price; AB.gr checkout lines carry no product ID (see the skill's
+quantity and price; the store's checkout lines carry no product ID (see the skill's
 Observation Protocol). The manifest checksum changes on every preflight because
 it covers `generated_at`; the user approves the exact action content (product, URL,
 quantity, price), and intent uses the freshly accepted manifest.

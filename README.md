@@ -1,6 +1,7 @@
 # Grossy
 
-Manually invoked, single-user AB.gr grocery-history learning and cart preparation.
+Manually invoked, single-user grocery-history learning and cart preparation for
+your local store.
 Python owns validated local state and planning; the project Pi skill coordinates
 supervised rendered-browser actions. No CLI command launches a browser.
 
@@ -47,6 +48,14 @@ settings afterwards. Direct CLI calls do not rerun this guard and a newly set
 `PYTHONPATH` can shadow the installed package. The guard permits only the
 explicit repository `src` path for source-test/helper subprocesses.
 
+## Store URL
+
+Grossy reads the store base URL from the `GROSSY_STORE_URL` environment
+variable. Copy `.env.example` to `.env` and set the variable to your local
+store's base URL (`https://HOST`, no path or trailing slash). The dev shell
+sources `.env` automatically when it exists; Python reads only the environment
+and never parses `.env`. `grossy doctor` reports the `store_url` check.
+
 ## Test execution
 
 `just check` runs format/lint checks, strict mypy and the full pytest suite using
@@ -73,6 +82,6 @@ nixpkgs pin supplies pytest-xdist; no pip/uv installation is needed.
 
 Live compatibility and final release remain pending user verification. Grossy
 never progresses checkout, chooses fulfilment, pays or submits an order. The
-coordinator may open AB.gr `/checkout` solely for an explicitly approved cart-list
+coordinator may open the store's `/checkout` solely for an explicitly approved cart-list
 read, excluding private sections and checkout-stage controls. Do not run
 unattended or treat cart preparation as purchase evidence.

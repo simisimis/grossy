@@ -45,7 +45,7 @@ def now() -> str:
 
 
 def url(pid: str) -> str:
-    return f"https://www.ab.gr/en/eshop/item/p/{pid}"
+    return f"https://store.example/en/eshop/item/p/{pid}"
 
 
 def fact(pid: str = "111", **changes: Any) -> dict[str, Any]:
@@ -498,7 +498,7 @@ def test_closed_recipe_facts_matrix(case: str) -> None:
     if case == "price-conflict":
         f["displayed_price_eur"] = "3.00"
     if case == "identity-conflict":
-        f["canonical_url"] = "https://www.ab.gr/en/eshop/other/p/111"
+        f["canonical_url"] = "https://store.example/en/eshop/other/p/111"
     if case == "duplicate":
         obs["recipe_product_facts"].append(f)
     if case == "unit":
@@ -814,7 +814,7 @@ def test_unrelated_cart_drift_before_first_recipe_intent(
     elif drift == "price":
         after["lines"][0]["displayed_price_eur"] = "3.00"
     else:
-        after["lines"][0]["canonical_url"] = "https://www.ab.gr/en/eshop/changed/p/999"
+        after["lines"][0]["canonical_url"] = "https://store.example/en/eshop/changed/p/999"
     manifests = stored(home, "SELECT * FROM run_mutation_manifests")
     if phase == "fake-adapter":
         adapter = FakeCart(home)
@@ -872,7 +872,7 @@ def test_whole_cart_anchor_after_recipe_action(
         if drift == "price":
             line["displayed_price_eur"] = "3.00"
         else:
-            line["canonical_url"] = "https://www.ab.gr/en/eshop/changed/p/999"
+            line["canonical_url"] = "https://store.example/en/eshop/changed/p/999"
         return payload
 
     first_manifest: dict[str, Any] = {}

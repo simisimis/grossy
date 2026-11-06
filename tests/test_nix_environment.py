@@ -258,6 +258,21 @@ class TestPackageResources:
         assert export_data["schema_version"] == 1
 
 
+class TestStoreUrlEnvFile:
+    """The dev shell sources a git-ignored ``.env``; ``.env.example`` documents it."""
+
+    def test_env_example_sets_store_url_placeholder(self) -> None:
+        lines = (REPO_ROOT / ".env.example").read_text(encoding="utf-8").splitlines()
+        assert "GROSSY_STORE_URL=https://example.com" in lines
+        assert ".env" in (REPO_ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+
+    def test_shell_hook_sources_env_when_present(self) -> None:
+        flake = (REPO_ROOT / "flake.nix").read_text(encoding="utf-8")
+        hook = re.search(r"shellHook = ''\n(.*?)\n\s*'';", flake, re.DOTALL)
+        assert hook is not None, "flake.nix: shellHook not found"
+        assert "if [ -f ./.env ]; then set -a; . ./.env; set +a; fi" in hook.group(1)
+
+
 class TestSourceTreeImports:
     """Verify source-tree testing works with PYTHONPATH=src (explicit, not global)."""
 

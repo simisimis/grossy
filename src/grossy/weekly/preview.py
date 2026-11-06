@@ -319,7 +319,7 @@ def build_recipe_preview(
                 "size": ingredient["package_size"],
                 "unit": ingredient["package_unit"],
                 "notes": ingredient["notes"],
-                "assumption": "recipe annotation is not proof of the AB product package",
+                "assumption": "recipe annotation is not proof of the store product package",
             },
             "linear_target": str(linear),
             "target": str(target),

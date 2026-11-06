@@ -9,7 +9,7 @@ import time
 import urllib.parse
 
 import live_common as drill
-from live_common import stop, write
+from live_common import CHECKOUT_URL, STORE, stop, write
 
 
 def norm(t):
@@ -18,7 +18,7 @@ def norm(t):
 
 def checkout_rows(tag="cart"):
     """Settled checkout rows incl. unavailable ('See Alternatives') lines; no private sections."""
-    drill.browser(["open", "https://www.ab.gr/checkout"], tag)
+    drill.browser(["open", CHECKOUT_URL], tag)
     prev = None
     for _ in range(40):
         time.sleep(0.75)
@@ -122,7 +122,7 @@ def bind_cart(known_products, tag="cart"):
     for row in unknown:
         e = urllib.parse.quote(row["name"])
         drill.browser(
-            ["open", f"https://www.ab.gr/eshop/search?q={e}%3Arelevance&text={e}&sort=relevance"],
+            ["open", f"{STORE}/eshop/search?q={e}%3Arelevance&text={e}&sort=relevance"],
             tag + "s",
         )
         sig = None
